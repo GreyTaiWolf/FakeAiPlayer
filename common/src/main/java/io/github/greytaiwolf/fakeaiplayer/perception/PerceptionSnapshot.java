@@ -1,12 +1,14 @@
 package io.github.greytaiwolf.fakeaiplayer.perception;
 
 import com.google.gson.Gson;
+import io.github.greytaiwolf.fakeaiplayer.perception.focus.FocusSnapshot;
 
 import java.util.List;
 import java.util.Map;
 
 public record PerceptionSnapshot(
         SelfState self,
+        FocusSnapshot.FocusSummary focus,
         TaskInfo task,
         Highlights highlights,
         List<NearbyBlock> blocks,

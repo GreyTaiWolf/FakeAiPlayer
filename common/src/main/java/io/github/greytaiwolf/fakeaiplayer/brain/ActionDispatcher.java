@@ -21,7 +21,7 @@ public final class ActionDispatcher {
             java.util.Set.of("move", "mine", "strip_mine");
     private static final int GOAL_FAIL_GUARD_TICKS = 600; // 30s
     private static final java.util.Set<String> USER_PAUSED_ALLOWED_TOOLS = java.util.Set.of(
-            "say", "get_task_status", "goal_status", "recall", "list_jobs", "pause", "resume", "stop", "cancel_all");
+            "say", "inspect_focus", "get_task_status", "goal_status", "recall", "list_jobs", "pause", "resume", "stop", "cancel_all");
 
     private final ToolRegistry registry;
 
@@ -72,7 +72,7 @@ public final class ActionDispatcher {
 
     private ToolDefinition.ToolResult invoke(AIPlayerEntity bot, ChatToolCall call) {
         try {
-            if (TaskManager.INSTANCE.isUserPaused(bot) && !USER_PAUSED_ALLOWED_TOOLS.contains(call.name())) {
+            if (TaskManager.INSTANCE.isUserPaused(bot) && !isAllowedWhileUserPaused(call.name())) {
                 return new ToolDefinition.ToolResult(false, "blocked: mission_user_paused");
             }
             // 优化2:目标刚失败时,大脑常改用 strip_mine/mine_block/move_to(或 assign_task{move/mine/strip_mine})
@@ -101,6 +101,10 @@ public final class ActionDispatcher {
             String reason = exception.getMessage() == null ? exception.getClass().getSimpleName() : exception.getMessage();
             return new ToolDefinition.ToolResult(false, "exception: " + reason);
         }
+    }
+
+    static boolean isAllowedWhileUserPaused(String toolName) {
+        return USER_PAUSED_ALLOWED_TOOLS.contains(toolName);
     }
 
     private static JsonObject sanitizedArguments(JsonObject args) {

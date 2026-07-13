@@ -68,6 +68,7 @@ class PrivilegedBoundarySourceTest {
                 "mining/OreProspector.java",
                 "mining/OreScan.java",
                 "perception/PerceptionCollector.java",
+                "perception/focus/FocusResolver.java",
                 "task/ContainerTask.java",
                 "task/CraftTask.java",
                 "task/DangerWatcher.java",

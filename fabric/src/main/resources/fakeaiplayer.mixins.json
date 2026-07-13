@@ -5,6 +5,7 @@
   "compatibilityLevel": "JAVA_21",
   "refmap": "fakeaiplayer.refmap.json",
   "mixins": [
+    "BaseContainerBlockEntityAccessorMixin",
     "ClientConnectionAccessorMixin",
     "PlayerManagerFakePlayerMixin",
     "MerchantEntityInvokerMixin"
