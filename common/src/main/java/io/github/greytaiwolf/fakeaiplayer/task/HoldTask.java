@@ -1,0 +1,35 @@
+package io.github.greytaiwolf.fakeaiplayer.task;
+
+import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
+
+public final class HoldTask extends AbstractTask {
+    @Override
+    public String name() {
+        return "hold";
+    }
+
+    @Override
+    public String describe() {
+        return "Holding position";
+    }
+
+    @Override
+    public double progress() {
+        return 0.5D;
+    }
+
+    @Override
+    public boolean isWaiting() {
+        return true;
+    }
+
+    @Override
+    protected void onStart(AIPlayerEntity bot) {
+        bot.getActionPack().stopAll();
+    }
+
+    @Override
+    protected void onTick(AIPlayerEntity bot) {
+        bot.getActionPack().stopMovement();
+    }
+}

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "fakeaiplayer",
+  "version": "${version}",
+  "name": "${mod_name}",
+  "description": "${mod_description}",
+  "authors": [
+    "${mod_author}"
+  ],
+  "contributors": [
+    "zoyluo (original mc_aiplayer author)"
+  ],
+  "contact": {
+    "homepage": "${mod_homepage}",
+    "sources": "${mod_sources}"
+  },
+  "license": "${mod_license}",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "io.github.greytaiwolf.fakeaiplayer.platform.fabric.FakeAiPlayerFabric"
+    ],
+    "client": [
+      "io.github.greytaiwolf.fakeaiplayer.platform.fabric.client.FakeAiPlayerFabricClient"
+    ]
+  },
+  "mixins": [
+    "fakeaiplayer.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=${fabric_loader_version}",
+    "minecraft": "${minecraft_version_range_fabric}",
+    "java": ">=${java_version}",
+    "fabric-api": ">=${fabric_version}"
+  }
+}

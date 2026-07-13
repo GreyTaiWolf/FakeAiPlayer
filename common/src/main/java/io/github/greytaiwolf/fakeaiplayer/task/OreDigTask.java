@@ -1,0 +1,891 @@
+package io.github.greytaiwolf.fakeaiplayer.task;
+
+import io.github.greytaiwolf.fakeaiplayer.action.BlockMiner;
+import io.github.greytaiwolf.fakeaiplayer.action.HarvestCore;
+import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
+import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
+import io.github.greytaiwolf.fakeaiplayer.mining.OreProspector;
+import io.github.greytaiwolf.fakeaiplayer.mining.OreScan;
+import io.github.greytaiwolf.fakeaiplayer.mining.ToolTier;
+import io.github.greytaiwolf.fakeaiplayer.mode.CapabilityRuntime;
+import io.github.greytaiwolf.fakeaiplayer.mode.ObservableWorldQuery;
+import io.github.greytaiwolf.fakeaiplayer.mode.PrivilegedCapability;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.Set;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.FluidTags;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.level.block.Block;
+
+/**
+ * OREDIG(实测#10):可靠的矿石采集,取代 GoalExecutor 的 MINE_ORE 步原本用的 OreSeekTask。
+ *
+ * OreSeek 的"扫描→A*接近→走廊兜底"接近逻辑在被石头包裹的矿上连续 stuck(#6/#8/#10)。
+ * 本任务改用已被验证**永不卡死**的模式:**控制式直挖隧道 + 共享 {@link BlockMiner}**,绝不寻路/走路:
+ *  - SCAN:用服务端全数据找最近目标矿(限频);找不到就向下挖一格换层再扫;
+ *  - DIG:每 tick 只挖"朝矿方向的下一格"(水平或向下一格),BlockMiner 驱动一块一块成形,
+ *    bot 自然跟进;矿进入伸手范围 → 直接挖它,并把相邻同脉矿一起挖净;
+ *  - 全程无进展看门狗:超时没破任何块即干净失败,交 GoalExecutor。
+ *
+ * 自包含状态机(铁律 G1),不在内部 assign;全程主线程(G2)。
+ */
+public final class OreDigTask extends AbstractTask {
+    private static final int MAX_ELAPSED_BASE = 9600;   // 硬超时基线(小配额);大配额(整套铁甲要26铁)按量缩放,见构造
+    private static final int STRIP_AFTER_SKIPS = 3;     // 连续这么多次"锁矿够不到被跳过" → 强制 strip 推进一步(破原地死锁)
+    private static final int NO_PROGRESS_LIMIT = 200;   // 10s 没破任何块 → 失败
+    private static final int SCAN_INTERVAL = 10;
+    private static final int SCAN_RADIUS = 24;
+    private static final int PROSPECT_RANGE = 64;       // 探矿(大范围定位最近矿)半径——身边扫不到时启用
+    private static final int PROSPECT_INTERVAL = 40;    // 探矿较贵(逐区块 section 扫),2s 一次
+    private static final int VERTICAL_SCAN = 10;
+    // 4.5^2:与 BlockMiner 内部验证一致(5.5 时边缘开挖被 miner 拒→FAILED→矿被误拉黑,geo_wall 实测
+    // 锁定 2s 即弃)。历史 5.1 死区的前提已不存在——接近目标现在是矿正下方格,寻路会真走到贴脸位。
+    private static final double REACH_SQUARED = 20.25D;
+    private static final int MIN_Y = -60;
+    private static final int VEIN_CAP = 64;
+    private static final int PICKUP_GRACE_TICKS = 30;
+    private static final int BONUS_CAP = 8;            // R3 顺路矿单任务上限:白捡是好,改行不行
+    private static final int APPROACH_LIMIT = 80;       // P0:锁定矿超过此 tick 仍没靠近 → 判够不到,放弃换矿/下挖
+    private static final int STRIP_SEGMENT = 48;        // 覆盖效率:扫描是全知 24 格球,巷道价值=移动覆盖;长段直线减少转向与重叠扫描
+    private static final Direction[] STRIP_DIRS = {
+            Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST};
+
+    private final Set<Block> targetOres;
+    private final Set<Item> targetDrops;
+    private final int targetCount;
+    private final BlockMiner miner = new BlockMiner();
+    // 排除项收编进 EpisodeMemory(工作记忆,goal 级生命周期+TTL 复活):原实例 Set 在 replan 后丢失、
+    // 又需一次性"特赦"补救;TTL 短排除(30s)语义更细腻——过期自然复活,无需特赦。
+    private final Deque<BlockPos> veinQueue = new ArrayDeque<>();
+
+    private int invBaseline;
+    private int collected;
+    private int lastProgressTick;
+    private int lastScanTick = -SCAN_INTERVAL;
+    private int lastProspectTick = -100;
+    private int pickupGrace;
+    private BlockPos targetOre;
+    private double lastTargetDist = Double.MAX_VALUE; // P0:锁定矿的历史最近距离²(监控是否在接近)
+    private int targetApproachTick;
+    private int stripDirIndex = -1;   // 优化1:矿层水平找矿当前掘进方向(STRIP_DIRS 下标),-1=未开始
+    private int stripStepsLeft;       // 优化1:当前隧道段剩余格数
+    private int consecutiveSkips;     // 连续"锁矿够不到被跳过"次数(挖到矿清零);超阈值强制 strip 推进破死锁
+    private BlockPos lastSkipPos;     // 上次弃矿时 bot 所在格:原地反复弃矿(位置不变)不喂活看门狗,让其能熔断破thrash
+    private final int maxElapsed;     // 硬超时:大配额(整套铁甲26铁)按量缩放,小配额用基线
+    private int lastMinedTick = -100; // 挖掉矿本体的时刻:掉落实体在下 tick 才出现,挖完原地驻留捡取
+    private BlockPos bonusOre;        // R3 顺路矿:reach 内的非目标矿,顺手一镐(单块,不追脉)
+    private int bonusMined;           // 顺路预算计数(防喧宾夺主)
+    private int lastBonusScanTick = -100;
+    private int lastReLockTick = -100;  // 接近途中重扫改投更近矿的限频
+
+    public OreDigTask(Set<Block> targetOres, int targetCount) {
+        this.targetOres = targetOres == null || targetOres.isEmpty()
+                ? OreScan.COMMON_ORES
+                : OreScan.expandOreFamilies(targetOres);
+        this.targetDrops = HarvestCore.expectedDropsFor(this.targetOres);
+        this.targetCount = Math.max(1, targetCount);
+        // 硬超时按配额缩放:整套铁甲一步要挖 26 铁(每块含掘进接近~600t),固定 9600 必然挖不完就超时退回逐件。
+        this.maxElapsed = Math.max(MAX_ELAPSED_BASE, this.targetCount * 700);
+    }
+
+    @Override
+    public String name() {
+        return "mine_ore";
+    }
+
+    @Override
+    public String describe() {
+        return "OreDig " + collected + "/" + targetCount
+                + (targetOre == null ? " (scanning)" : " ->" + targetOre.getX() + "," + targetOre.getY() + "," + targetOre.getZ());
+    }
+
+    @Override
+    public double progress() {
+        if (state == TaskState.COMPLETED) {
+            return 1.0D;
+        }
+        return Math.min(0.95D, (double) collected / targetCount);
+    }
+
+    @Override
+    public boolean isWaiting() {
+        // 挖掘/下挖期 bot 基本站着挖,视为 waiting 让 StuckWatcher 不误判(它正是 #10 反复 abort 的元凶);
+        // 由本任务自己的 NO_PROGRESS_LIMIT 看门狗负责卡死保护。
+        return true;
+    }
+
+    // EpisodeMemory 薄包装:排除"够不到/挖空"的矿(TTL 30s 自动复活),goal 级生命周期跨 replan 存活。
+    private void excludeOre(AIPlayerEntity bot, BlockPos pos) {
+        EpisodeMemory.INSTANCE.exclude(bot.getUUID(), pos, bot.getServer().getTickCount(), EpisodeMemory.TTL_SHORT);
+    }
+
+    private boolean oreExcluded(AIPlayerEntity bot, BlockPos pos) {
+        return EpisodeMemory.INSTANCE.isExcluded(bot.getUUID(), pos, bot.getServer().getTickCount());
+    }
+
+    @Override
+    protected void onStart(AIPlayerEntity bot) {
+        invBaseline = HarvestCore.countInventoryItems(bot, targetDrops);
+        collected = 0;
+        lastProgressTick = 0;
+        pickupGrace = 0;
+        targetOre = null;
+        // R6 入口地标:开挖处自动 mark(goto_place mine_entry 一步回来;玩家问'矿洞在哪'也答得出)。
+        io.github.greytaiwolf.fakeaiplayer.memory.BotMemoryStore.INSTANCE.of(bot.getUUID())
+                .markPlace("mine_entry", bot.serverLevel(), bot.blockPosition());
+    }
+
+    @Override
+    protected void onAbort(AIPlayerEntity bot) {
+        markMineFace(bot);
+        miner.cancel(bot);
+        bot.getActionPack().stopAll();
+    }
+
+    // R6/R7 作业面地标:任务结束处=下次续挖起点。矿种一并 remember,resume_mining 免问。
+    private void markMineFace(AIPlayerEntity bot) {
+        var mem = io.github.greytaiwolf.fakeaiplayer.memory.BotMemoryStore.INSTANCE.of(bot.getUUID());
+        mem.markPlace("mine_face", bot.serverLevel(), bot.blockPosition());
+        String ores = targetOres.stream()
+                .map(b -> net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(b).toString())
+                .sorted()
+                .collect(java.util.stream.Collectors.joining(","));
+        mem.remember("mine_face_ores", ores);
+    }
+
+    @Override
+    protected void onTick(AIPlayerEntity bot) {
+        if (elapsed > maxElapsed) {
+            fail("ore_dig_timeout collected=" + collected);
+            return;
+        }
+        ServerLevel world = bot.serverLevel();
+
+        // 溺水熔断:湖底/水下矿会把 bot 勾进水里持续作业,air 耗尽淹死且任务全程无反应
+        // (geo_lake 实测:天然湖底铁矿,air 278→0 致死)。MoveTask 的挖掘直行早有同款熔断,
+        // 挖矿任务漏配。air<100(剩 5 秒)停手撤单,矿短排除(TTL 复活),交安全网上浮换气。
+        if (bot.isUnderWater() && bot.getAirSupply() < 100) {
+            if (targetOre != null) {
+                excludeOre(bot, targetOre);
+            }
+            miner.cancel(bot);
+            bot.getActionPack().stopAll();
+            fail("ore_dig_drowning_abort");
+            return;
+        }
+
+        // 工具闸:挖不动目标矿(无合格镐)立即失败,交 GoalExecutor 倒推补镐。
+        if (!canHarvestAnyTarget(bot)) {
+            fail("need_better_tool:" + ToolTier.requiredPickaxeItemId(targetOres));
+            return;
+        }
+
+        // P0 背包满自救:满了先丢低值占位(每种留 8 个),腾不出位才失败交编排——否则破了矿捡不起白挖。
+        if (HarvestCore.isInventoryFull(bot) && !io.github.greytaiwolf.fakeaiplayer.action.InventoryAction.dropJunk(bot, 8)) {
+            fail("inventory_full");
+            return;
+        }
+        // 收集计数:固定基线绝对增量(刚破矿的掉落物随后落袋会被算进来)。
+        HarvestCore.forcePickupNearbyAnyOf(bot, targetDrops, 3.0D, 3.0D);
+        int total = Math.max(0, HarvestCore.countInventoryItems(bot, targetDrops) - invBaseline);
+        if (total > collected) {
+            collected = total;
+            lastProgressTick = elapsed;
+            BotLog.action(bot, "ore_dig_collected", "total", collected + "/" + targetCount);
+            // P2 进度播报:挖到就说一声(面板可见),贵重矿尤其有"报喜"的真实感。
+            io.github.greytaiwolf.fakeaiplayer.brain.BotReporter.INSTANCE.onGoalMessage(bot,
+                    "挖到了!" + io.github.greytaiwolf.fakeaiplayer.craft.ItemNames.cn(targetDrops.iterator().next())
+                    + " " + collected + "/" + targetCount);
+        }
+        if (collected >= targetCount) {
+            miner.cancel(bot);
+            HarvestCore.sweepPickupAnyOf(bot, targetDrops, 16);
+            if (pickupGrace++ >= PICKUP_GRACE_TICKS
+                    || HarvestCore.countInventoryItems(bot, targetDrops) - invBaseline >= targetCount) {
+                markMineFace(bot);
+                complete();
+            }
+            return;
+        }
+
+        // 无进展看门狗:NO_PROGRESS_LIMIT 内没破任何块 → 干净失败。fail 前 dump 内部状态,
+        // 供无头测试诊断"找到矿却无进展"到底卡在哪个环节(锁定丢失/接近失败/挖不动)。
+        if (elapsed - lastProgressTick > NO_PROGRESS_LIMIT) {
+            // (原"一次性特赦"已被 EpisodeMemory 的 TTL 短排除取代:30s 自动复活,比大赦更细腻。)
+            BotLog.action(bot, "ore_dig_stall_dump",
+                    "target", targetOre == null ? "none"
+                            : targetOre.getX() + "," + targetOre.getY() + "," + targetOre.getZ(),
+                    "dist", targetOre == null ? "-"
+                            : String.format("%.1f", Math.sqrt(bot.getEyePosition().distanceToSqr(targetOre.getCenter()))),
+                    "miner", miner.target() == null ? "idle"
+                            : miner.target().getX() + "," + miner.target().getY() + "," + miner.target().getZ(),
+                    "ignored", EpisodeMemory.INSTANCE.excludedCount(bot.getUUID()),
+                    "vein_queue", veinQueue.size(),
+                    "strip_left", stripStepsLeft);
+            // 自动地形快照(诊断 real_diamond seed777 深层接近抖动的钥匙):把 bot↔矿 之间的几何
+            // 按 Y 层 dump 成紧凑 ASCII(#实心/.空气/O矿/~流体/B=bot/T=矿),记进日志(测试 log 可 grep
+            // 还原)。盲改深层接近已回归过 geo_deep——必须拿确切几何冻成确定性复现再精修。零行为改动。
+            dumpStallRegion(bot, world);
+            miner.cancel(bot);
+            fail("ore_dig_no_progress collected=" + collected);
+            return;
+        }
+
+        // 1) 先清相邻矿脉队列(挖到一块矿后,把同脉相邻矿一起挖净)。
+        if (advanceVein(bot, world)) {
+            return;
+        }
+
+        // R3 顺路矿(真实玩家肌肉记忆):赶路/掘进途中伸手可及处出现非目标矿——煤是燃料刚需、
+        // 铁是工具通货,白送的不捡是傻。锁定目标矿的接近途中正是顺路高发段(geo_bonus 首验:
+        // 原来只在'无锁定'分支扫,掘进全程锁着铁,顺路永不触发)。唯一不顺的时机:miner 正咬着
+        // 目标矿(挖一半换目标清进度)。约束:单块不追脉、预算封顶、不计目标数。
+        boolean bitingTarget = targetOre != null && miner.target() != null && miner.target().equals(targetOre);
+        if (bonusOre == null && !bitingTarget && bonusMined < BONUS_CAP
+                && bot.getServer().getTickCount() - lastBonusScanTick >= SCAN_INTERVAL
+                && !HarvestCore.isInventoryFull(bot)) {
+            lastBonusScanTick = bot.getServer().getTickCount();
+            bonusOre = scanBonusOre(bot, world);
+        }
+        if (bonusOre != null) {
+            if (!OreScan.isOreBlock(world.getBlockState(bonusOre).getBlock()) || !withinReach(bot, bonusOre)) {
+                bonusOre = null; // 挖完(executor 顺手)或走远:放手,别为顺路矿回头
+            } else {
+                BlockMiner.Status st = miner.target() != null && miner.target().equals(bonusOre)
+                        ? miner.tick(bot)
+                        : beginMine(bot, bonusOre);
+                targetApproachTick = elapsed; // 顺路一镐不算接近停滞,别让 APPROACH_LIMIT 误杀目标矿
+                if (st == BlockMiner.Status.DONE) {
+                    bonusMined++;
+                    lastMinedTick = elapsed;
+                    lastProgressTick = elapsed;
+                    HarvestCore.forcePickupNearbyAnyOf(bot, null, 7.0D, 4.0D); // 捡一切:掉落不在 targetDrops 里
+                    BotLog.action(bot, "ore_dig_bonus", "pos", bonusOre.toShortString(),
+                            "total", bonusMined + "/" + BONUS_CAP);
+                    bonusOre = null;
+                } else if (st == BlockMiner.Status.FAILED) {
+                    excludeOre(bot, bonusOre);
+                    bonusOre = null;
+                }
+                return;
+            }
+        }
+
+        // 2) 当前有锁定矿:可达就挖它(挖到后入脉队列),不可达就朝它挖一格隧道。
+        if (targetOre != null) {
+            if (!OreScan.isOre(world.getBlockState(targetOre), targetOres)) {
+                // 矿没了——多数是寻路执行器接近时把"头位=矿"顺手挖掉了(approach 目标=矿正下方的设计),
+                // 掉落已在地上:开驻留窗大半径捡(geo_wall 实测 mine_complete 由执行器打、不走 DONE 分支,
+                // 不在这接驻留就 0 捡取白挖)。同脉排队照旧。
+                lastMinedTick = elapsed;
+                HarvestCore.forcePickupNearbyAnyOf(bot, targetDrops, 7.0D, 4.0D);
+                queueVeinAround(bot, world, targetOre);
+                targetOre = null;
+                return;
+            }
+            // 接近途中改投更近矿(real_diamond seed777 主因,确诊):bot 从 35 格外锁定一块钻石、掘进
+            // 途中路过同脉更近的矿块(dist 3-4)却死盯远锁不放,最后 8 格在远矿局部几何里抖死
+            // (三个静态合成场景都复现不出——因为它们 bot 一开局 targetOre 为空就选了最近矿)。
+            // 每 SCAN_INTERVAL 重扫:发现显著更近(<0.6×当前距)且未排除的目标矿就改投——就近开挖,
+            // 自然绕开远矿的抖动死角。不打断正在挖的矿(miningNow),阈值 0.6 防同距反复横跳。
+            boolean miningNow = miner.target() != null && miner.target().equals(targetOre);
+            int nowRe = bot.getServer().getTickCount();
+            if (!miningNow && nowRe - lastReLockTick >= SCAN_INTERVAL) {
+                lastReLockTick = nowRe;
+                BlockPos nearer = nearestOre(bot, world);
+                if (nearer != null && !nearer.equals(targetOre)
+                        && bot.getEyePosition().distanceToSqr(nearer.getCenter())
+                           < bot.getEyePosition().distanceToSqr(targetOre.getCenter()) * 0.36D) {
+                    BotLog.action(bot, "ore_dig_relock_nearer",
+                            "from", targetOre.toShortString(), "to", nearer.toShortString());
+                    targetOre = nearer.immutable();
+                    lastTargetDist = Double.MAX_VALUE;
+                    targetApproachTick = elapsed;
+                    return;
+                }
+            }
+            // P0:接近监控——朝矿挖了一阵仍没靠近(斜下方够不到等)→ 放弃该矿,别原地空转
+            //(实测在 Y=48 反复锁定斜下方钻石、dist 卡死、no_progress 11 分钟的根因)。
+            double dist2 = bot.getEyePosition().distanceToSqr(targetOre.getCenter());
+            if (dist2 < lastTargetDist - 0.25D) {
+                lastTargetDist = dist2;
+                targetApproachTick = elapsed;
+                // 接近也是进展:远矿 DIG 接近一格一挖,16 格隧道就要 ~190t,只认"挖到矿"的
+                // no_progress(200t)会把正常长接近误杀在半路(geo_rich 单跑实测 dist 16→停在 201t)。
+                lastProgressTick = elapsed;
+            } else if (elapsed - targetApproachTick > APPROACH_LIMIT) {
+                excludeOre(bot, targetOre);
+                consecutiveSkips++; // 累计够不到的跳过;连跳超阈值 → 下面扫描分支强制 strip 推进,破"原地锁远矿-跳"死锁
+                BotLog.action(bot, "ore_dig_unreachable_skip",
+                        "pos", targetOre.getX() + "," + targetOre.getY() + "," + targetOre.getZ(),
+                        "skips", consecutiveSkips);
+                targetOre = null;
+                lastTargetDist = Double.MAX_VALUE;
+                // 主动换目标是决策性进展:嵌深处的天然矿可能要连排除好几块才轮到可达矿/富区兜底,合理轮换不该被误杀。
+                // 但【大配额(整套铁甲≥16)】下原地反复锁同片够不到的矿(位置不变)若无条件喂活看门狗,会 thrash 100s+
+                // 永不熔断、strip/replan 永不接管(real_armor 实测 found324/collected9/bot静止106s)。故大配额仅在 bot
+                // 真换territory(位移)才算进展;小配额(稀疏钻石 targetCount<16)沿用旧无条件喂活,零回归。
+                if (targetCount < 16 || !bot.blockPosition().equals(lastSkipPos)) {
+                    lastProgressTick = elapsed;
+                    lastSkipPos = bot.blockPosition().immutable();
+                }
+                return;
+            }
+            // 挖掘锁定:已对这块矿开挖就继续挖完,不管当前是否仍在 reach 内——bot 站在阶梯上微移会让
+            // dist 在 reach 边缘(4.5)来回抖,原逻辑 reach 内开挖→出 reach 切去挖隧道格→回 reach 重新开挖,
+            // 挖掘进度每次清零永远挖不完(实测 mine_start 5 坐标轮换 1s 一换、石镐 2.5s 的矿 300t 零产出)。
+            // bot 真走远时 BlockMiner 自身的失败判定会兜底(FAILED→ignored)。
+            boolean miningTarget = miner.target() != null && miner.target().equals(targetOre);
+            if (miningTarget || withinReach(bot, targetOre)) {
+                // P0 封岩浆再挖(真实玩家标准操作):矿邻面贴岩浆,挖掉矿的瞬间岩浆涌入——烧 bot+烧掉落。
+                // 独立封堵阶段:岩浆格可能比矿远一格,刚进 reach 时够不着 → 继续贴近(向矿正下走),
+                // 够着了用低值方块替换岩浆源(一 tick 一格);没块可封才安全弃挖(命比矿值钱)。
+                if (!miningTarget) {
+                    BlockPos lava = adjacentDangerFluidOf(world, targetOre);
+                    if (lava != null) {
+                        var blockSlot = io.github.greytaiwolf.fakeaiplayer.action.MaterialPalette.pickAnyBlockSlot(bot);
+                        if (blockSlot.isEmpty()) {
+                            BotLog.action(bot, "ore_dig_fluid_unsealable", "ore", targetOre.toShortString());
+                            excludeOre(bot, targetOre);
+                            targetOre = null;
+                            return;
+                        }
+                        if (bot.getEyePosition().distanceToSqr(lava.getCenter()) <= REACH_SQUARED) {
+                            // 放置走主手:镐在手时对浆格交互被原版判 PASS 静默吞掉
+                            //(geo_lava 实测 80 ticks 零放置日志,封堵纹丝不动直到接近超时弃矿)。
+                            io.github.greytaiwolf.fakeaiplayer.action.InventoryAction.equipFromSlot(bot, blockSlot.getAsInt());
+                            var sealResult = io.github.greytaiwolf.fakeaiplayer.action.BuildAction.placeBlockAt(bot, lava);
+                            if (!sealResult.isFailed()) {
+                                BotLog.action(bot, "ore_dig_fluid_seal", "sealed", lava.toShortString());
+                                lastProgressTick = elapsed; // 封堵也是进展
+                            } else {
+                                BotLog.action(bot, "ore_dig_seal_fail",
+                                        "lava", lava.toShortString(), "reason", sealResult.reason());
+                            }
+                        } else if (bot.getActionPack().isPathExecutorIdle()) {
+                            bot.getActionPack().startDigPathTo(targetOre.below()); // 贴近到封得着
+                        }
+                        return;
+                    }
+                }
+                BlockMiner.Status st = miningTarget
+                        ? miner.tick(bot)
+                        : beginMine(bot, targetOre);
+                if (st == BlockMiner.Status.DONE) {
+                    // 掉落捡取半径跟上 reach:寻路接近停在 reach 边缘(5.5)挖,掉落落在矿位、
+                    // 超出每 tick 3 格被动捡取(旧贴脸直挖 1-2 格才没暴露);挖掉即定向大半径捡一把,
+                    // 否则 collected 不涨、bot 被下一个目标拉走白挖(geo_wall 实测 mine_complete 后 0/1)。
+                    lastMinedTick = elapsed;
+                    HarvestCore.forcePickupNearbyAnyOf(bot, targetDrops, 7.0D, 4.0D);
+                    queueVeinAround(bot, world, targetOre);
+                    targetOre = null;
+                    lastProgressTick = elapsed;
+                    consecutiveSkips = 0; // 挖到了 → 清空跳过计数(当前这片可达,无需强制 strip)
+                } else if (st == BlockMiner.Status.FAILED) {
+                    excludeOre(bot, targetOre);
+                    targetOre = null;
+                }
+                return;
+            }
+            // 不在 reach → 统一接近原语:挖掘感知寻路直达矿邻位(A* DIG 大预算,终点豁免允许
+            // "挖开即站"的实心格)。任务私有的"朝矿挖一格隧道"几何特判(digTowardStep)就此退役——
+            // 它在山体侧面矿上"挖了洞人不进洞"(实测 dist 卡 5.5 三连败),而寻路执行器
+            // (PathExecutor.DIG_THROUGH)天然"挖完走进去"。寻路被拒(节流/无解)时这个 tick 空转,
+            // 接近监控(APPROACH_LIMIT)兜底换矿。
+            if (bot.getActionPack().isPathExecutorIdle()) {
+                // 接近目标=矿的下方格:DIG 邻居只有水平四向,矿高一格时同层泛洪永远够不到终点
+                //(geo_wall 实测 explored=8699 全图泛洪 TIMEOUT)。站位选矿正下,头位恰=矿格——
+                // 执行器挖头位时顺手把矿挖掉,掉落物落脚边直接入袋,反而少走一步。
+                // 例外:矿贴岩浆时不能让执行器顺手挖(挖头位=挖矿即涌浆)——接近目标改反岩浆侧水平邻位,
+                // 站安全面、岩浆格在 reach 内,封堵阶段封完才开挖。
+                var approach = bot.getActionPack().startDigPathTo(approachGoalFor(world, targetOre));
+                if (approach.isFailed() && !"pathfinding_throttled".equals(approach.reason())) { // 观测:首败必打(节流不打)
+                    BotLog.action(bot, "ore_dig_approach_rejected", "why", approach.reason(),
+                            "target", targetOre.toShortString());
+                    // A* 接近无解的兜底(real_diamond ore_dig 主因:深层 8-14 格全实心石,DIG-A* 超
+                    // 24k 节点/50ms 预算 TIMEOUT → bot 原地不动 → dist 不缩 → 200t no_progress)。
+                    // 退回控制式掘进 digTowardStep:朝矿一格一格挖脚头位+走进去(strip 同款可靠原语,
+                    // 不吃 A* 预算),保证 dist 持续缩、不空转。只在 A* 真失败时触发——A* 能解的干净场景
+                    // (geo_shaft/cave/deep 全 PASS)走不到这,零回归风险。
+                    digTowardStep(bot, world, targetOre);
+                }
+            }
+            return;
+        }
+
+        // 挖完驻留:掉落实体在破块的下一 tick 才落地,立刻奔赴新目标会永远错过(geo_wall 实测
+        // mine_complete 后 0 捡取、collected 不涨白挖)。原地等 15t 持续大半径捡,捡到计数自然推进。
+        if (elapsed - lastMinedTick < 15) {
+            HarvestCore.forcePickupNearbyAnyOf(bot, targetDrops, 7.0D, 4.0D);
+            return;
+        }
+
+        // 3) 无锁定矿:扫描最近目标矿(限频)。
+        int now = bot.getServer().getTickCount();
+        if (now - lastScanTick < SCAN_INTERVAL) {
+            return;
+        }
+        lastScanTick = now;
+        // 破"原地锁远矿-跳"死锁:连续 STRIP_AFTER_SKIPS 次锁矿都够不到被跳过 → 别再锁(多半又是够不到的远矿),
+        // 强制 strip 推进一步(直挖隧道前进,把矿挖近到 reach 内 + 暴露新矿面)。推进后清零,下轮正常扫描,
+        // 此时近处矿已可达即锁挖(real_armor 治本:原地 372 跳只挖 9 → strip 推进后稳定挖到)。
+        if (consecutiveSkips >= STRIP_AFTER_SKIPS) {
+            consecutiveSkips = 0;
+            stripMine(bot, world);
+            return;
+        }
+        BlockPos found = nearestOre(bot, world);
+        if (found != null) {
+            targetOre = found;
+            lastTargetDist = Double.MAX_VALUE;  // P0:新锁定矿,重置接近监控
+            targetApproachTick = elapsed;
+            // 情景记忆:资源发现入流 → 蒸馏成资源点(8 格去重),下次"附近有没有铁"先问知识库不瞎挖。
+            io.github.greytaiwolf.fakeaiplayer.memory.EpisodeLog.INSTANCE.record(bot,
+                    io.github.greytaiwolf.fakeaiplayer.memory.EpisodeLog.Type.RESOURCE_FOUND, found,
+                    net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(world.getBlockState(found).getBlock()).toString());
+            BotLog.action(bot, "ore_dig_found",
+                    "pos", found.getX() + "," + found.getY() + "," + found.getZ(),
+                    "dist", (int) Math.sqrt(bot.blockPosition().distSqr(found)),
+                    "collected", collected + "/" + targetCount);
+            return;
+        }
+        // 近处(24 格)无矿 → 大范围探矿(64 格,移植玩家 magic mod 的 HelmetOreLocator 扫描)定位最近矿脉,
+        // 锁定后由上面的 digTowardStep 定向挖隧道过去。比盲目 strip 高效——能找到几十格外的钻石,不再"附近没矿就放弃"。
+        BlockPos prospected = prospect(bot, world);
+        if (prospected != null) {
+            targetOre = prospected;
+            lastTargetDist = Double.MAX_VALUE;
+            targetApproachTick = elapsed;
+            BotLog.action(bot, "ore_dig_prospected",
+                    "pos", prospected.getX() + "," + prospected.getY() + "," + prospected.getZ(),
+                    "dist", (int) Math.sqrt(bot.blockPosition().distSqr(prospected)));
+            return;
+        }
+        // 探矿也没有 → 先问知识库富矿区(以前总在那挖到的地方,128 格内、≥3 点聚在 24 格):
+        // 簇心是"资源点坐标"不是矿格——当 targetOre 用会被"矿没了"分支秒清成死循环(实测每秒
+        // 重触发原地打转)。正确语义=导航去富区,人到了近距扫描自然接管;到了还没矿说明记忆过期,
+        // 销掉这片资源点换下一策略。
+        for (Block oreBlock : targetOres) {
+            String oreId = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(oreBlock).toString();
+            var rich = io.github.greytaiwolf.fakeaiplayer.memory.KnowledgeBase.INSTANCE
+                    .richZoneNear(bot.getUUID(), oreId, bot.blockPosition(), 128, 3, 24);
+            if (rich.isPresent() && !oreExcluded(bot, rich.get())) {
+                BlockPos zone = rich.get();
+                if (bot.blockPosition().closerThan(zone, 16)) {
+                    io.github.greytaiwolf.fakeaiplayer.memory.KnowledgeBase.INSTANCE
+                            .invalidateResource(bot.getUUID(), zone);
+                    BotLog.action(bot, "ore_dig_rich_zone_stale", "at", zone.toShortString());
+                } else if (bot.getActionPack().isPathExecutorIdle()) {
+                    // walk 优先(startPathTo 两阶段):富区常在百格级,大预算 DIG 单阶段 50ms 必
+                    // TIMEOUT→每个冷却期重发一次失败寻路,原地风暴到超时(实测每秒 2 发零移动)。
+                    bot.getActionPack().startPathTo(zone);
+                    BotLog.action(bot, "ore_dig_rich_zone", "to", zone.toShortString());
+                    lastProgressTick = elapsed; // 启程也是进展
+                }
+                return;
+            }
+        }
+        // 水平 strip-mine 掘进暴露新矿面。
+        stripMine(bot, world);
+    }
+
+    // 水平 strip-mine:沿当前方向直挖隧道暴露新矿面(每前进一格,下一轮 nearestOre 都会扫到隧道两侧新矿);
+    // 一整段(STRIP_SEGMENT)挖完仍无矿 → 向下换一层 + 换个水平方向继续。比旧的"只垂直换层"找矿快得多。
+    // 既是"附近彻底没矿"的兜底,也是"找到矿却全够不到(连跳 STRIP_AFTER_SKIPS 次)"时的破死锁手段——
+    // 推进到新territory + 把原本够不到的矿挖近到 reach 内(real_armor 实测:不强制 strip 会原地锁远矿-跳 372 次只挖到 9)。
+    private void stripMine(AIPlayerEntity bot, ServerLevel world) {
+        if (stripStepsLeft <= 0) {
+            if (stripDirIndex >= 0) {
+                // 跳 4 层换平面:垂直扫描 VERTICAL_SCAN=±10,逐层下沉的扫描区 90% 重叠纯浪费;
+                // 跳 4 仍有 6 层重叠余量不漏矿,贫瘠区迁移速度 ×4。
+                for (int i = 0; i < 4; i++) {
+                    digDownOneLayer(bot, world);
+                }
+            }
+            stripDirIndex = (stripDirIndex + 1) % STRIP_DIRS.length;
+            stripStepsLeft = STRIP_SEGMENT;
+            return;
+        }
+        stripStepsLeft--;
+        // 定距插火把(真实玩家 strip 标准操作):光照 <8 的巷道刷怪,不照明等于给自己挖刷怪走廊。
+        // 每 10 格一支、光照不足才插、有火把才插——照明是增益不是前置,缺火把不阻塞掘进。
+        if (stripStepsLeft % 10 == 0
+                && world.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, bot.blockPosition()) < 8) {
+            var torchSlot = io.github.greytaiwolf.fakeaiplayer.action.InventoryAction.findItem(bot, net.minecraft.world.item.Items.TORCH);
+            // R5 火把自补:没火把但有煤有棍(挖矿常态——顺路煤+随身棍)就地合 4 支(2x2 免台,
+            // 纯背包变换与 CraftTask 内核同式)。缺料不强求,照明始终是增益不是前置。
+            if (torchSlot.isEmpty()) {
+                var coal = io.github.greytaiwolf.fakeaiplayer.action.InventoryAction.findItem(bot, net.minecraft.world.item.Items.COAL);
+                var stick = io.github.greytaiwolf.fakeaiplayer.action.InventoryAction.findItem(bot, net.minecraft.world.item.Items.STICK);
+                if (coal.isPresent() && stick.isPresent()
+                        && io.github.greytaiwolf.fakeaiplayer.action.InventoryAction.removeItems(bot, net.minecraft.world.item.Items.COAL, 1)
+                        && io.github.greytaiwolf.fakeaiplayer.action.InventoryAction.removeItems(bot, net.minecraft.world.item.Items.STICK, 1)) {
+                    io.github.greytaiwolf.fakeaiplayer.action.InventoryAction.giveItem(bot,
+                            new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.TORCH, 4));
+                    BotLog.action(bot, "ore_dig_torch_crafted", "count", 4);
+                    torchSlot = io.github.greytaiwolf.fakeaiplayer.action.InventoryAction.findItem(bot, net.minecraft.world.item.Items.TORCH);
+                }
+            }
+            if (torchSlot.isPresent()) {
+                io.github.greytaiwolf.fakeaiplayer.action.InventoryAction.equipFromSlot(bot, torchSlot.getAsInt());
+                if (!io.github.greytaiwolf.fakeaiplayer.action.BuildAction.placeBlockAt(bot, bot.blockPosition()).isFailed()) {
+                    BotLog.action(bot, "ore_dig_torch", "pos", bot.blockPosition().toShortString());
+                }
+            }
+        }
+        Direction dir = STRIP_DIRS[stripDirIndex];
+        digTowardStep(bot, world, bot.blockPosition().relative(dir, 2)); // 复用掘进原语:挖脚位+头位→走进去
+    }
+
+    // ── 矿脉:挖净已锁定矿周围的同脉相邻矿 ──
+    private boolean advanceVein(AIPlayerEntity bot, ServerLevel world) {
+        if (veinQueue.isEmpty()) {
+            return false;
+        }
+        BlockPos v = veinQueue.peekFirst();
+        if (v == null || !OreScan.isOre(world.getBlockState(v), targetOres)) {
+            veinQueue.pollFirst();
+            return true;
+        }
+        if (!withinReach(bot, v)) {
+            // 脉里这块够不到 → 朝它挖一格(罕见,矿脉一般连续);够不到太久由看门狗兜底
+            digTowardStep(bot, world, v);
+            return true;
+        }
+        BlockMiner.Status st = miner.target() != null && miner.target().equals(v)
+                ? miner.tick(bot)
+                : beginMine(bot, v);
+        if (st == BlockMiner.Status.DONE) {
+            queueVeinAround(bot, world, v);
+            veinQueue.pollFirst();
+            lastProgressTick = elapsed;
+        } else if (st == BlockMiner.Status.FAILED) {
+            veinQueue.pollFirst();
+        }
+        return true;
+    }
+
+    private void queueVeinAround(AIPlayerEntity bot, ServerLevel world, BlockPos around) {
+        for (BlockPos p : OreScan.veinFrom(bot, around, targetOres, VEIN_CAP)) {
+            if (!oreExcluded(bot, p)
+                    && io.github.greytaiwolf.fakeaiplayer.mode.ObservableWorldQuery.canObserveBlock(bot, p)) {
+                veinQueue.addLast(p.immutable());
+            }
+        }
+    }
+
+    // ── 朝目标挖一格隧道(只挖伸手可及的那一格,BlockMiner 驱动) ──
+    private void digTowardStep(AIPlayerEntity bot, ServerLevel world, BlockPos goal) {
+        BlockPos feet = bot.blockPosition();
+        // P0(治深层斜下矿零位移空转):目标深在脚下(低≥2)且水平已贴近(≤2)→ 同层横向兜不到它,
+        // 改走安全台阶下沉一级(digDownOneLayer 自带避水/避岩浆/补头顶净空,与下潜矿道同款可靠原语)。
+        // 实测 real_armor:bot 站 Y47 锁 Y40 矿,stepToward 只水平东走永不下降→dist不降→skip→thrash 100s+。
+        int dyToGoal = goal.getY() - feet.getY();
+        if (dyToGoal <= -2) {
+            // 目标明显在下方(低≥2):同层横向永远够不到它(real_armor 实测死钉 Y47 锁 Y40 矿、skip265/collected9)。
+            // 走安全台阶下沉(digDownOneLayer 避水/避岩浆/补头顶净空),并把台阶方向【偏向矿的水平方位】——
+            // 形成"斜向下直奔矿"的阶梯:既降 Y 也朝矿靠拢,降到矿层后同层逻辑自然够到。比旧"仅水平≤2才降"宽。
+            int dx = goal.getX() - feet.getX();
+            int dz = goal.getZ() - feet.getZ();
+            if (Math.abs(dx) >= Math.abs(dz)) {
+                stripDirIndex = dx >= 0 ? 1 : 3; // STRIP_DIRS{N,E,S,W}: EAST=1 / WEST=3
+            } else {
+                stripDirIndex = dz >= 0 ? 2 : 0; // SOUTH=2 / NORTH=0
+            }
+            digDownOneLayer(bot, world);
+            return;
+        }
+        BlockPos step = stepToward(feet, goal);
+        if (step == null) {
+            excludeOre(bot, goal);
+            if (goal.equals(targetOre)) {
+                targetOre = null;
+            }
+            return;
+        }
+        // 安全:目标格相邻有岩浆 → 放弃此矿。
+        if (OreScan.adjacentHazard(world, step)) {
+            excludeOre(bot, goal);
+            if (goal.equals(targetOre)) {
+                targetOre = null;
+            }
+            miner.cancel(bot);
+            return;
+        }
+        // 要清出身位:挖 step(脚位)与 step.up()(头位)里第一个固体。
+        BlockPos solid = firstSolid(world, step, step.above());
+        if (solid == null) {
+            // 该格已挖通(空气)→ 走进去占住这一格,把 bot 推进到隧道前沿,再继续朝矿挖。
+            // 必须主动 walk:本任务不寻路,水平推进只能靠这一步,否则会站着不动直到看门狗失败。
+            miner.cancel(bot);
+            bot.getActionPack().startWalkTo(step.getCenter());
+            // 走到新格也算进展(避免在"挖通一段后走过去"的几 tick 里被看门狗误杀)。
+            if (bot.blockPosition().equals(step)) {
+                lastProgressTick = elapsed;
+            }
+            return;
+        }
+        BlockMiner.Status st = miner.target() != null && miner.target().equals(solid)
+                ? miner.tick(bot)
+                : beginMine(bot, solid);
+        if (st == BlockMiner.Status.DONE) {
+            lastProgressTick = elapsed;
+        } else if (st == BlockMiner.Status.FAILED) {
+            excludeOre(bot, goal);
+            if (goal.equals(targetOre)) {
+                targetOre = null;
+            }
+        }
+    }
+
+    // 台阶式斜向下换层(拟人 + 安全):绝不直挖脚下——下方可能是水/岩浆,一镐捅穿就溺水/葬身岩浆。
+    // 沿当前掘进方向斜前下方挖"下一级台阶"(ahead 头位 + next 脚位),遇水/岩浆就换斜下方向,
+    // 像挖楼梯一样下到新平面(与 DescendToYTask / DigDownTask 台阶逻辑一致)。
+    private void digDownOneLayer(AIPlayerEntity bot, ServerLevel world) {
+        BlockPos feet = bot.blockPosition();
+        if (feet.below().getY() <= MIN_Y) {
+            fail("ore_dig_reached_min_y collected=" + collected);
+            return;
+        }
+        Direction dir = safeStairDir(world, feet);
+        if (dir == null) {
+            // 四个斜下方向都被水/岩浆挡 → 硬停交还(规避层"困死撤离"兜底)。
+            fail("ore_dig_blocked_lava collected=" + collected);
+            return;
+        }
+        BlockPos ahead = feet.relative(dir);   // 下一级头位 (x+d, y)
+        BlockPos next = ahead.below();         // 下一级站位 (x+d, y-1)
+        // 清三格身位:ahead(前方头位,可见先挖) + ahead.up()(前上头顶净空) + next(脚位)。补挖 ahead.up()
+        // 让下潜矿道沿对角线 2 格可走高——只清 next+ahead 时玩家下台阶头撞前方实心顶,巷道等效 1 格高过不去。
+        BlockPos solid = firstSolid(world, ahead, ahead.above(), next);
+        if (solid != null) {
+            BlockMiner.Status st = miner.target() != null && miner.target().equals(solid)
+                    ? miner.tick(bot)
+                    : beginMine(bot, solid);
+            if (st == BlockMiner.Status.DONE) {
+                lastProgressTick = elapsed;
+            }
+            return;
+        }
+        // 身位已通 → 斜下踏到下一级台阶(1 格微位移,非 roam 那种跨图闪现)。
+        bot.getActionPack().descendInto(next);
+        lastProgressTick = elapsed;
+    }
+
+    // 选一个"不挨水/岩浆"的斜下台阶方向:优先沿当前掘进方向(自然延续隧道),否则按 STRIP_DIRS 顺序找;
+    // 四面斜下都被水/岩浆挡返回 null。
+    private Direction safeStairDir(ServerLevel world, BlockPos feet) {
+        int base = stripDirIndex < 0 ? 0 : stripDirIndex;
+        for (int i = 0; i < STRIP_DIRS.length; i++) {
+            Direction dir = STRIP_DIRS[(base + i) % STRIP_DIRS.length];
+            BlockPos ahead = feet.relative(dir);
+            BlockPos next = ahead.below();
+            if (!isLava(world, next) && !isLava(world, next.below()) && !isLava(world, ahead)
+                    && !isWater(world, next) && !isWater(world, next.below())) {
+                return dir;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isLava(ServerLevel world, BlockPos pos) {
+        return world.getBlockState(pos).getFluidState().is(FluidTags.LAVA);
+    }
+
+    private static boolean isWater(ServerLevel world, BlockPos pos) {
+        return world.getBlockState(pos).getFluidState().is(FluidTags.WATER);
+    }
+
+    // 接近落点:常规=矿正下(执行器顺手挖,少走一步);贴岩浆=反岩浆侧水平邻位(安全封堵位)。
+    private static BlockPos approachGoalFor(ServerLevel world, BlockPos ore) {
+        BlockPos lava = adjacentDangerFluidOf(world, ore);
+        if (lava == null) {
+            return ore.below();
+        }
+        int dx = Integer.compare(ore.getX(), lava.getX());
+        int dz = Integer.compare(ore.getZ(), lava.getZ());
+        Direction away = dx != 0 ? (dx > 0 ? Direction.EAST : Direction.WEST)
+                : dz != 0 ? (dz > 0 ? Direction.SOUTH : Direction.NORTH)
+                : Direction.NORTH; // 岩浆在正上/正下 → 任选水平面
+        return ore.relative(away);
+    }
+
+    // 危险流体(岩浆|水)统一:水虽不烧人,但挖开矿的瞬间涌入会推走 bot 和掉落物、淹没巷道,
+    // 接近监控反复超时弃矿(深层含水矿高发)。封堵语义与岩浆完全一致——放块替换源。
+    private static BlockPos adjacentDangerFluidOf(ServerLevel world, BlockPos pos) {
+        for (Direction d : Direction.values()) {
+            BlockPos side = pos.relative(d);
+            var fs = world.getFluidState(side);
+            if (fs.is(FluidTags.LAVA) || fs.is(FluidTags.WATER)) {
+                return side;
+            }
+        }
+        return null;
+    }
+
+    // 卡死现场地形快照:把 bot 与目标矿构成的包围盒(各向外扩 3)按 Y 层 dump 成 ASCII,记进日志。
+    // 字符:B=bot 脚位,T=目标矿,O=其它矿,~=流体,#=实心(挖得动),X=实心(挖不动/基岩),.=空气。
+    // 用途:把"A* 返回路径、执行器破块却不缩 dist"的真实地形冻成确定性复现场景,精修接近抖动。
+    private void dumpStallRegion(AIPlayerEntity bot, ServerLevel world) {
+        CapabilityRuntime.decide(bot, PrivilegedCapability.HIDDEN_BLOCK_SCAN, "ore_dig_stall_dump");
+        BlockPos b = bot.blockPosition();
+        BlockPos t = targetOre != null ? targetOre : b;
+        int minX = Math.min(b.getX(), t.getX()) - 3, maxX = Math.max(b.getX(), t.getX()) + 3;
+        int minY = Math.min(b.getY(), t.getY()) - 2, maxY = Math.max(b.getY(), t.getY()) + 3;
+        int minZ = Math.min(b.getZ(), t.getZ()) - 3, maxZ = Math.max(b.getZ(), t.getZ()) + 3;
+        BotLog.action(bot, "ore_dig_region_head",
+                "bot", b.toShortString(), "target", t.toShortString(),
+                "box", (maxX - minX + 1) + "x" + (maxY - minY + 1) + "x" + (maxZ - minZ + 1));
+        for (int y = maxY; y >= minY; y--) {
+            StringBuilder row = new StringBuilder();
+            for (int x = minX; x <= maxX; x++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    BlockPos p = new BlockPos(x, y, z);
+                    char c;
+                    if (p.equals(b)) c = 'B';
+                    else if (p.equals(t)) c = 'T';
+                    else if (!ObservableWorldQuery.canObserveBlock(bot, p)) c = '?';
+                    else {
+                        var st = world.getBlockState(p);
+                        if (!st.getFluidState().isEmpty()) c = '~';
+                        else if (OreScan.isOreBlock(st.getBlock())) c = 'O';
+                        else if (st.getCollisionShape(world, p).isEmpty()) c = '.';
+                        else c = st.getDestroySpeed(world, p) < 0 ? 'X' : '#';
+                    }
+                    row.append(c);
+                }
+                row.append('|'); // 分隔 x 行(每段是固定 z 跨度)
+            }
+            BotLog.action(bot, "ore_dig_region_y", "y", y, "row", row.toString());
+        }
+    }
+
+    private BlockMiner.Status beginMine(AIPlayerEntity bot, BlockPos pos) {
+        bot.getActionPack().stopMovement(); // 互斥:开挖矿本体即停掉接近寻路(执行器的 DIG_THROUGH 与 BlockMiner 不抢手)
+        miner.begin(bot, pos);
+        return miner.tick(bot);
+    }
+
+    // R3 顺路矿扫描:bot 周身 ±2(伸手范围)找任何"非目标、可挖、不贴危险流体"的矿。
+    // 范围刻意小(5×5×5=125 格逐查,限频复用 SCAN_INTERVAL 节拍)——顺路的定义就是不绕路。
+    private BlockPos scanBonusOre(AIPlayerEntity bot, ServerLevel world) {
+        BlockPos feet = bot.blockPosition();
+        for (BlockPos p : BlockPos.betweenClosed(feet.offset(-2, -1, -2), feet.offset(2, 3, 2))) {
+            if (!ObservableWorldQuery.canObserveBlock(bot, p)) {
+                continue;
+            }
+            Block b = world.getBlockState(p).getBlock();
+            if (!OreScan.isOreBlock(b) || targetOres.contains(b)) {
+                continue;
+            }
+            BlockPos pos = p.immutable();
+            if (oreExcluded(bot, pos) || !withinReach(bot, pos)) {
+                continue;
+            }
+            if (!ToolTier.canHarvestWithInventory(bot, world.getBlockState(pos))) {
+                continue; // 挖不动的不顺(挖钻石路过绿宝石但只有石镐:别空手刨)
+            }
+            if (adjacentDangerFluidOf(world, pos) != null) {
+                continue; // 贴浆/贴水的矿不顺路——顺路的代价必须是零
+            }
+            return pos;
+        }
+        return null;
+    }
+
+    // 探矿:近处扫不到矿时,在 PROSPECT_RANGE 大范围(只扫已加载区块)定位最近的目标矿;限频护 TPS。
+    private BlockPos prospect(AIPlayerEntity bot, ServerLevel world) {
+        int now = bot.getServer().getTickCount();
+        if (now - lastProspectTick < PROSPECT_INTERVAL) {
+            return null;
+        }
+        lastProspectTick = now;
+        // 拉黑过滤:不带 posFilter 时,unreachable_skip 刚排除的矿会被 prospect 原样再选——
+        // skip→prospect→同矿→skip 死循环直到 no_progress(geo_rich 套跑实测 637,47,-11 五连)。
+        return OreProspector.nearest(bot, PROSPECT_RANGE,
+                state -> OreScan.isOre(state, targetOres),
+                p -> !oreExcluded(bot, p));
+    }
+
+    private BlockPos nearestOre(AIPlayerEntity bot, ServerLevel world) {
+        BlockPos origin = bot.blockPosition();
+        BlockPos min = origin.offset(-SCAN_RADIUS, -VERTICAL_SCAN, -SCAN_RADIUS);
+        BlockPos max = origin.offset(SCAN_RADIUS, VERTICAL_SCAN, SCAN_RADIUS);
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (BlockPos pos : BlockPos.betweenClosed(min, max)) {
+            if (oreExcluded(bot, pos)
+                    || !io.github.greytaiwolf.fakeaiplayer.mode.ObservableWorldQuery.canObserveBlock(bot, pos)
+                    || !OreScan.isOre(world.getBlockState(pos), targetOres)) {
+                continue;
+            }
+            double dist = origin.distSqr(pos);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = pos.immutable();
+            }
+        }
+        return best;
+    }
+
+    private boolean canHarvestAnyTarget(AIPlayerEntity bot) {
+        for (Block ore : targetOres) {
+            if (ToolTier.canHarvestWithInventory(bot, ore.defaultBlockState())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean withinReach(AIPlayerEntity bot, BlockPos pos) {
+        return bot.getEyePosition().distanceToSqr(pos.getCenter()) <= REACH_SQUARED;
+    }
+
+    // 3 参版:依次返回第一个"固体且非流体"的格(流体跳过不挖→防溃浆/溃水)。下潜台阶清三格身位
+    // (ahead 头位 + ahead.up 头顶净空 + next 脚位),保证下潜矿道 2 格可走高、正常玩家能通过。
+    private static BlockPos firstSolid(ServerLevel world, BlockPos a, BlockPos b, BlockPos c) {
+        for (BlockPos p : new BlockPos[]{a, b, c}) {
+            if (!world.getBlockState(p).isAir() && world.getFluidState(p).isEmpty()) {
+                return p.immutable();
+            }
+        }
+        return null;
+    }
+
+    private static BlockPos firstSolid(ServerLevel world, BlockPos a, BlockPos b) {
+        if (!world.getBlockState(a).isAir()) {
+            return a.immutable();
+        }
+        if (!world.getBlockState(b).isAir()) {
+            return b.immutable();
+        }
+        return null;
+    }
+
+    // 朝目标的下一格:竖直优先(目标更低则下挖),否则较大的水平分量(避免对角穿墙角)。
+    private static BlockPos stepToward(BlockPos from, BlockPos target) {
+        int dy = target.getY() - from.getY();
+        int dx = target.getX() - from.getX();
+        int dz = target.getZ() - from.getZ();
+        if (dy < 0 && Math.abs(dx) <= 1 && Math.abs(dz) <= 1) {
+            return from.below();
+        }
+        if (Math.abs(dx) >= Math.abs(dz) && dx != 0) {
+            return from.relative(dx > 0 ? net.minecraft.core.Direction.EAST : net.minecraft.core.Direction.WEST);
+        }
+        if (dz != 0) {
+            return from.relative(dz > 0 ? net.minecraft.core.Direction.SOUTH : net.minecraft.core.Direction.NORTH);
+        }
+        if (dy < 0) {
+            return from.below();
+        }
+        if (dy > 0) {
+            return from.above();
+        }
+        return null;
+    }
+}

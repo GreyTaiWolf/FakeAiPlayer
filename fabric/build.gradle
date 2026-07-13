@@ -1,0 +1,129 @@
+plugins {
+    id 'multiloader-loader'
+    id 'fabric-loom'
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    mappings loom.layered() {
+        officialMojangMappings()
+        parchment("org.parchmentmc.data:parchment-${parchment_minecraft}:${parchment_version}@zip")
+    }
+    modImplementation "net.fabricmc:fabric-loader:${fabric_loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_version}"
+    implementation project(':common')
+}
+
+sourceSets {
+    gametest {
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+
+configurations {
+    gametestCompileClasspath.extendsFrom compileClasspath
+    gametestRuntimeClasspath.extendsFrom runtimeClasspath
+}
+
+loom {
+    mixin {
+        defaultRefmapName.set("${mod_id}.refmap.json")
+    }
+    mods {
+        register(mod_id) {
+            sourceSet sourceSets.main
+        }
+        register("${mod_id}-gametest") {
+            sourceSet sourceSets.gametest
+        }
+    }
+    runs {
+        client {
+            client()
+            setConfigName('FakeAiPlayer Fabric Client')
+            programArgs '--username', 'GreyTaiWolf'
+            runDir('run/client')
+        }
+        server {
+            server()
+            setConfigName('FakeAiPlayer Fabric Server')
+            runDir('run/server')
+        }
+        gameTest {
+            server()
+            setConfigName('FakeAiPlayer Fabric GameTest')
+            source sourceSets.gametest
+            property 'fabric-api.gametest'
+            property 'fabric-api.gametest.report-file',
+                    file("build/test-results/gametest/TEST-${mod_id}-gametest.xml").absolutePath
+            runDir('build/run/gameTest')
+        }
+    }
+}
+
+def prepareGameTestRun = tasks.register('prepareGameTestRun') {
+    group = 'verification'
+    description = 'Creates a clean, deterministic headless Fabric GameTest run directory.'
+    outputs.upToDateWhen { false }
+
+    doLast {
+        def directory = file('build/run/gameTest')
+        delete directory
+        directory.mkdirs()
+        new File(directory, 'eula.txt').setText('eula=true\n', 'UTF-8')
+        new File(directory, 'server.properties').setText(
+                'online-mode=false\nlevel-name=world\nlevel-seed=0\n', 'UTF-8')
+    }
+}
+
+tasks.named('runGameTest') {
+    dependsOn prepareGameTestRun
+}
+
+// Interactive command-driven verification server. The isolated gametest source set and its
+// commands are never packaged in the production Fabric jar.
+def harnessRunDir = providers.gradleProperty('fakeaiplayerHarnessRunDir')
+        .orElse('build/run/harness').get()
+def harnessRunInput = new File(harnessRunDir)
+def harnessRunFile = file(harnessRunDir).canonicalFile
+if (harnessRunInput.isAbsolute()
+        || !harnessRunFile.toPath().startsWith(project.projectDir.canonicalFile.toPath())
+        || harnessRunFile == project.projectDir.canonicalFile) {
+    throw new GradleException('fakeaiplayerHarnessRunDir must be a project-relative child directory')
+}
+
+loom.runs {
+    harnessServer {
+        server()
+        configName = 'FakeAiPlayer Fabric Harness Server'
+        source sourceSets.gametest
+        runDir harnessRunDir
+    }
+}
+
+def prepareHarnessRun = tasks.register('prepareHarnessRun') {
+    group = 'verification'
+    description = 'Creates missing files for an isolated command-driven Fabric harness server.'
+    outputs.upToDateWhen { false }
+
+    doLast {
+        harnessRunFile.mkdirs()
+        def eula = new File(harnessRunFile, 'eula.txt')
+        if (!eula.exists()) {
+            eula.setText('eula=true\n', 'UTF-8')
+        }
+        def properties = new File(harnessRunFile, 'server.properties')
+        if (!properties.exists()) {
+            def seed = System.getenv('FAKEAIPLAYER_TEST_SEED') ?: '20260610'
+            def port = System.getenv('FAKEAIPLAYER_TEST_PORT') ?: '25565'
+            properties.setText(
+                    "online-mode=false\nlevel-name=world\nlevel-seed=${seed}\nserver-port=${port}\n",
+                    'UTF-8')
+        }
+    }
+}
+
+tasks.named('runHarnessServer') {
+    dependsOn prepareHarnessRun
+}
