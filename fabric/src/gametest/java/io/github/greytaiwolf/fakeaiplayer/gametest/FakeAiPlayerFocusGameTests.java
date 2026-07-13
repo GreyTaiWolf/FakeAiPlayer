@@ -151,6 +151,10 @@ public final class FakeAiPlayerFocusGameTests implements FabricGameTest {
 
             String diamondToken = response.get("currentTargetToken").getAsString();
             context.setBlock(targetPos, Blocks.AIR);
+            BlockPos eyeColumn = BlockPos.containing(bot.getEyePosition());
+            for (int offset = 0; offset <= 10; offset++) {
+                bot.serverLevel().setBlockAndUpdate(eyeColumn.above(offset), Blocks.AIR.defaultBlockState());
+            }
             LookAction.lookAt(bot, bot.getEyePosition().add(0.0D, 20.0D, 0.0D));
             JsonObject missArgs = new JsonObject();
             missArgs.addProperty("detail", "full");
