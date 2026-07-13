@@ -40,7 +40,7 @@ public final class FakeAiPlayerFocusGameTests implements FabricGameTest {
             LookAction.lookAtBlock(bot, target, Direction.NORTH);
             FocusSnapshot focus = FocusResolver.inspectNow(bot);
             if (focus.kind() != FocusKind.BLOCK || !focus.id().equals("minecraft:iron_ore")) {
-                context.fail("Expected focused iron ore, got " + focus.toSummaryJson());
+                context.fail("Expected focused iron ore, got " + abbreviate(focus.toSummaryJson()));
             }
             context.succeed();
         } finally {
@@ -61,7 +61,7 @@ public final class FakeAiPlayerFocusGameTests implements FabricGameTest {
             LookAction.lookAt(bot, cow.getBoundingBox().getCenter());
             FocusSnapshot focus = FocusResolver.inspectNow(bot);
             if (focus.kind() != FocusKind.LIVING_ENTITY || !focus.id().equals("minecraft:cow")) {
-                context.fail("Expected focused cow before wall, got " + focus.toSummaryJson());
+                context.fail("Expected focused cow before wall, got " + abbreviate(focus.toSummaryJson()));
             }
             context.succeed();
         } finally {
@@ -89,7 +89,7 @@ public final class FakeAiPlayerFocusGameTests implements FabricGameTest {
                     || focus.block().x() != context.absolutePos(wallPos).getX()
                     || focus.block().y() != context.absolutePos(wallPos).getY()
                     || focus.block().z() != context.absolutePos(wallPos).getZ()) {
-                context.fail("Expected wall to occlude cow, got " + focus.toSummaryJson());
+                context.fail("Expected wall to occlude cow, got " + abbreviate(focus.toSummaryJson()));
             }
             context.succeed();
         } finally {
@@ -112,7 +112,7 @@ public final class FakeAiPlayerFocusGameTests implements FabricGameTest {
                     || focus.item() == null
                     || !focus.item().itemId().equals("minecraft:diamond")
                     || focus.item().count() != 1) {
-                context.fail("Expected focused diamond item, got " + focus.toJson());
+                context.fail("Expected focused diamond item, got " + abbreviate(focus.toJson()));
             }
             context.succeed();
         } finally {
@@ -145,11 +145,13 @@ public final class FakeAiPlayerFocusGameTests implements FabricGameTest {
             if (!result.ok()
                     || !response.get("targetChanged").getAsBoolean()
                     || !focus.get("id").getAsString().equals("minecraft:diamond_ore")) {
-                context.fail("Expected same-position replacement to change target token, got " + result.message());
+                context.fail("Expected same-position replacement to change target token, got "
+                        + abbreviate(result.message()));
             }
 
             String diamondToken = response.get("currentTargetToken").getAsString();
             context.setBlock(targetPos, Blocks.AIR);
+            LookAction.lookAt(bot, bot.getEyePosition().add(0.0D, 20.0D, 0.0D));
             JsonObject missArgs = new JsonObject();
             missArgs.addProperty("detail", "full");
             missArgs.addProperty("expected_target_token", diamondToken);
@@ -161,7 +163,8 @@ public final class FakeAiPlayerFocusGameTests implements FabricGameTest {
             if (!missResult.ok()
                     || !missResponse.get("targetChanged").getAsBoolean()
                     || !missResponse.getAsJsonObject("focus").get("kind").getAsString().equals("MISS")) {
-                context.fail("Expected fresh MISS to bypass tracking grace, got " + missResult.message());
+                context.fail("Expected fresh MISS to bypass tracking grace, got "
+                        + abbreviate(missResult.message()));
             }
             context.succeed();
         } finally {
@@ -188,13 +191,14 @@ public final class FakeAiPlayerFocusGameTests implements FabricGameTest {
                     || lightweight.block().blockEntity() == null
                     || lightweight.block().blockEntity().contentsReadable()
                     || !lightweight.block().blockEntity().itemCounts().isEmpty()) {
-                context.fail("Expected bounded lightweight chest snapshot, got " + lightweight.toJson());
+                context.fail("Expected bounded lightweight chest snapshot, got "
+                        + abbreviate(lightweight.toJson()));
             }
             if (detailed.block() == null
                     || detailed.block().blockEntity() == null
                     || !detailed.block().blockEntity().contentsReadable()
                     || detailed.block().blockEntity().itemCounts().getOrDefault("minecraft:diamond", 0) != 3) {
-                context.fail("Expected detailed chest contents, got " + detailed.toJson());
+                context.fail("Expected detailed chest contents, got " + abbreviate(detailed.toJson()));
             }
             context.succeed();
         } finally {
@@ -214,5 +218,9 @@ public final class FakeAiPlayerFocusGameTests implements FabricGameTest {
                         0.0F,
                         GameType.SURVIVAL)
                 .orElseThrow(() -> new IllegalStateException("Could not spawn GameTest Bot " + name));
+    }
+
+    private static String abbreviate(String value) {
+        return value.length() <= 400 ? value : value.substring(0, 400) + "...";
     }
 }
