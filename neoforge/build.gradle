@@ -1,0 +1,55 @@
+plugins {
+    id 'multiloader-loader'
+    id 'net.neoforged.moddev'
+}
+
+neoForge {
+    version = neoforge_version
+    parchment {
+        minecraftVersion = parchment_minecraft
+        mappingsVersion = parchment_version
+    }
+    mods {
+        register(mod_id) {
+            sourceSet sourceSets.main
+        }
+    }
+    runs {
+        client {
+            client()
+            loadedMods = mods
+            programArguments.addAll '--username', 'GreyTaiWolf'
+        }
+        server {
+            server()
+            loadedMods = mods
+            gameDirectory = file('run/server')
+        }
+    }
+}
+
+def neoForgeServerRunDir = file('run/server')
+def prepareNeoForgeServerRun = tasks.register('prepareNeoForgeServerRun') {
+    group = 'verification'
+    description = 'Creates missing files for the NeoForge development server.'
+    outputs.upToDateWhen { false }
+
+    doLast {
+        neoForgeServerRunDir.mkdirs()
+        def eula = new File(neoForgeServerRunDir, 'eula.txt')
+        if (!eula.exists()) {
+            eula.setText('eula=true\n', 'UTF-8')
+        }
+        def properties = new File(neoForgeServerRunDir, 'server.properties')
+        if (!properties.exists()) {
+            properties.setText(
+                    'online-mode=false\nlevel-name=world\nlevel-seed=0\nserver-port=25566\n',
+                    'UTF-8')
+        }
+    }
+}
+
+tasks.named('runServer') {
+    dependsOn prepareNeoForgeServerRun
+    standardInput = System.in
+}

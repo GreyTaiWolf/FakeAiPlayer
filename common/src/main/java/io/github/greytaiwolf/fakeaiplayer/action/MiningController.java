@@ -1,0 +1,120 @@
+package io.github.greytaiwolf.fakeaiplayer.action;
+
+import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
+import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
+import io.github.greytaiwolf.fakeaiplayer.log.LogFields;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.AStarPathfinder;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
+
+public final class MiningController {
+    private static final int MAX_TICKS = 600;
+
+    private final BlockPos pos;
+    private final Direction face;
+    private boolean started;
+    private BlockState targetState;
+    private float progress;
+    private int elapsed;
+
+    public MiningController(BlockPos pos, Direction face) {
+        this.pos = pos;
+        this.face = face;
+    }
+
+    public ActionResult tick(ActionPack pack) {
+        AIPlayerEntity player = pack.player();
+        var world = player.serverLevel();
+        BlockState state = world.getBlockState(pos);
+        if (state.isAir()) {
+            resetProgress(player);
+            return ActionResult.SUCCESS;
+        }
+        if (targetState != null && !state.equals(targetState)) {
+            resetProgress(player);
+        }
+
+        LookAction.lookAtBlock(player, pos, face);
+        double reach = player.getAttributeValue(Attributes.BLOCK_INTERACTION_RANGE);
+        if (player.getEyePosition().distanceTo(pos.getCenter()) > reach + 0.5D) {
+            abort(player);
+            return ActionResult.failed("out_of_reach");
+        }
+
+        if (!started) {
+            ToolSelector.equipBestTool(player, state);
+            BotLog.action(player, "mine_start", "pos", LogFields.pos(pos), "face", face);
+            player.gameMode.handleBlockBreakAction(
+                    pos,
+                    ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK,
+                    face,
+                    Level.MAX_ENTITY_SPAWN_Y,
+                    -1);
+            state.attack(world, pos, player);
+            started = true;
+            targetState = state;
+        }
+
+        progress += state.getDestroyProgress(player, world, pos);
+        world.destroyBlockProgress(player.getId(), pos, Math.min(9, (int) (progress * 10.0F)));
+        player.swing(InteractionHand.MAIN_HAND);
+        player.resetLastActionTime();
+
+        if (progress >= 1.0F) {
+            player.gameMode.handleBlockBreakAction(
+                    pos,
+                    ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK,
+                    face,
+                    Level.MAX_ENTITY_SPAWN_Y,
+                    -1);
+            world.destroyBlockProgress(player.getId(), pos, -1);
+            AStarPathfinder.invalidateCache("block_break");
+            return ActionResult.SUCCESS;
+        }
+
+        elapsed++;
+        if (elapsed > MAX_TICKS) {
+            abort(player);
+            return ActionResult.failed("timeout");
+        }
+        return ActionResult.IN_PROGRESS;
+    }
+
+    public void abort(AIPlayerEntity player) {
+        if (!started) {
+            return;
+        }
+        player.gameMode.handleBlockBreakAction(
+                pos,
+                ServerboundPlayerActionPacket.Action.ABORT_DESTROY_BLOCK,
+                face,
+                Level.MAX_ENTITY_SPAWN_Y,
+                -1);
+        player.serverLevel().destroyBlockProgress(player.getId(), pos, -1);
+        started = false;
+        targetState = null;
+        progress = 0.0F;
+        elapsed = 0;
+    }
+
+    private void resetProgress(AIPlayerEntity player) {
+        if (started) {
+            player.gameMode.handleBlockBreakAction(
+                    pos,
+                    ServerboundPlayerActionPacket.Action.ABORT_DESTROY_BLOCK,
+                    face,
+                    Level.MAX_ENTITY_SPAWN_Y,
+                    -1);
+        }
+        player.serverLevel().destroyBlockProgress(player.getId(), pos, -1);
+        started = false;
+        targetState = null;
+        progress = 0.0F;
+        elapsed = 0;
+    }
+}

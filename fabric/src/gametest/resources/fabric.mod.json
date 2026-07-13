@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "fakeaiplayer-gametest",
+  "version": "1.0.0",
+  "name": "FakeAiPlayer GameTests",
+  "description": "Deterministic, isolated GameTests for FakeAiPlayer.",
+  "environment": "server",
+  "entrypoints": {
+    "main": [
+      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerHarnessTestMod"
+    ],
+    "fabric-gametest": [
+      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerDeterministicGameTests"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.18.4",
+    "minecraft": "1.21.3",
+    "fabric-api": "*",
+    "fakeaiplayer": "*"
+  }
+}
