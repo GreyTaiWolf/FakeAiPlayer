@@ -30,6 +30,14 @@ final class ThreatResponsePolicyTest {
     }
 
     @Test
+    void terminalRouteIsRevalidatedAgainstCurrentHostiles() {
+        assertFalse(ThreatResponsePolicy.shouldCompleteRoute(true, true, false));
+        assertTrue(ThreatResponsePolicy.shouldCompleteRoute(true, true, true));
+        assertTrue(ThreatResponsePolicy.shouldCompleteRoute(true, false, false));
+        assertFalse(ThreatResponsePolicy.shouldCompleteRoute(false, false, false));
+    }
+
+    @Test
     void failedEscapeEscalatesFromBreakContactToLastStand() {
         assertEquals(ThreatResponsePolicy.Fallback.BREAK_CONTACT,
                 ThreatResponsePolicy.fallback(true, 14.0F, 1));
