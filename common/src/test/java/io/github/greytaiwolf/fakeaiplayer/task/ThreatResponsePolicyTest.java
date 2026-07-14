@@ -30,6 +30,15 @@ final class ThreatResponsePolicyTest {
     }
 
     @Test
+    void onlyHostileThreatSessionsMayCounterattack() {
+        assertTrue(ThreatResponsePolicy.canCounterattack(Threat.Type.HOSTILE));
+        assertTrue(ThreatResponsePolicy.canCounterattack(Threat.Type.LOW_HP));
+        assertFalse(ThreatResponsePolicy.canCounterattack(Threat.Type.DROWNING));
+        assertFalse(ThreatResponsePolicy.canCounterattack(Threat.Type.LAVA));
+        assertFalse(ThreatResponsePolicy.canCounterattack(Threat.Type.FALLING));
+    }
+
+    @Test
     void terminalRouteIsRevalidatedAgainstCurrentHostiles() {
         assertFalse(ThreatResponsePolicy.shouldCompleteRoute(true, true, false));
         assertTrue(ThreatResponsePolicy.shouldCompleteRoute(true, true, true));
