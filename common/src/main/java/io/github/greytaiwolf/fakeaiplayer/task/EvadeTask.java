@@ -81,6 +81,11 @@ public final class EvadeTask extends AbstractTask {
     @Override
     protected void onStart(AIPlayerEntity bot) {
         bot.getActionPack().stopAll();
+        if (threat.type() == Threat.Type.LOW_HP
+                && visibleHostiles(bot, SAFE_COMPLETE_DISTANCE).isEmpty()) {
+            finishCompleted(bot, "low_hp_without_hostile");
+            return;
+        }
         if (!installEscapePlan(bot, "initial")) {
             failedEscapePlans++;
             beginCombatFallback(bot, "no_initial_escape_route");
@@ -210,8 +215,7 @@ public final class EvadeTask extends AbstractTask {
 
         if (combatWalker == null
                 || combatWalkTarget == null
-                || combatWalkTarget.distanceToSqr(combatTarget.position()) > 2.25D
-                || phaseTicks % 12 == 0) {
+                || combatWalkTarget.distanceToSqr(combatTarget.position()) > 2.25D) {
             combatWalkTarget = combatTarget.position();
             combatWalker = new WalkToController(combatWalkTarget);
         }
