@@ -50,6 +50,10 @@ final class ThreatResponsePolicy {
                 && midRouteDistance >= Math.max(2.0D, startDistance - 2.0D);
     }
 
+    static boolean canCounterattack(Threat.Type threatType) {
+        return threatType == Threat.Type.HOSTILE || threatType == Threat.Type.LOW_HP;
+    }
+
     static boolean shouldCompleteRoute(boolean terminalRoute,
                                        boolean hostileThreat,
                                        boolean hostileSituationResolved) {
