@@ -50,6 +50,12 @@ final class ThreatResponsePolicy {
                 && midRouteDistance >= Math.max(2.0D, startDistance - 2.0D);
     }
 
+    static boolean shouldCompleteRoute(boolean terminalRoute,
+                                       boolean hostileThreat,
+                                       boolean hostileSituationResolved) {
+        return hostileSituationResolved || (terminalRoute && !hostileThreat);
+    }
+
     static Fallback fallback(boolean hostileAvailable, float health, int failedEscapePlans) {
         if (!hostileAvailable) {
             return Fallback.NONE;
