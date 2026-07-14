@@ -137,12 +137,18 @@ final class EscapePlanner {
             seen.add(hostile.getUUID());
             hazards.add(new Hazard(hostile.position(), hazardWeight(hostile)));
         }
-        if (primaryThreat.entity() != null
-                && primaryThreat.entity().isAlive()
-                && seen.add(primaryThreat.entity().getUUID())) {
-            hazards.add(new Hazard(primaryThreat.entity().position(), hazardWeight(primaryThreat.entity())));
+        LivingEntity primary = primaryThreat.entity();
+        if (primary != null
+                && primary.isAlive()
+                && ObservableWorldQuery.canObserveEntity(bot, primary)
+                && CombatCore.hasLineOfSight(bot, primary)
+                && seen.add(primary.getUUID())) {
+            hazards.add(new Hazard(primary.position(), hazardWeight(primary)));
         } else if (hazards.isEmpty() && primaryThreat.pos() != null) {
-            hazards.add(new Hazard(Vec3.atCenterOf(primaryThreat.pos()), 1.25D));
+            // Keep a weak last-known-position hint without letting a mob behind a wall dominate
+            // other currently reachable threats. Environmental hazards retain the stronger weight.
+            double rememberedWeight = primary == null ? 1.25D : 0.65D;
+            hazards.add(new Hazard(Vec3.atCenterOf(primaryThreat.pos()), rememberedWeight));
         }
         return hazards;
     }
