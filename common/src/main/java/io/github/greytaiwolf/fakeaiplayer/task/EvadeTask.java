@@ -128,7 +128,8 @@ public final class EvadeTask extends AbstractTask {
         }
         if (result.isSuccess()) {
             routeExecutor = null;
-            if (terminalRoute || hostileSituationResolved(bot)) {
+            if (ThreatResponsePolicy.shouldCompleteRoute(
+                    terminalRoute, isHostileThreat(), hostileSituationResolved(bot))) {
                 finishCompleted(bot, "safe_route_completed");
                 return;
             }
@@ -410,10 +411,11 @@ public final class EvadeTask extends AbstractTask {
     }
 
     private boolean hostileSituationResolved(AIPlayerEntity bot) {
-        if (threat.type() != Threat.Type.HOSTILE && threat.type() != Threat.Type.LOW_HP) {
-            return false;
-        }
-        return visibleHostiles(bot, SAFE_COMPLETE_DISTANCE).isEmpty();
+        return isHostileThreat() && visibleHostiles(bot, SAFE_COMPLETE_DISTANCE).isEmpty();
+    }
+
+    private boolean isHostileThreat() {
+        return threat.type() == Threat.Type.HOSTILE || threat.type() == Threat.Type.LOW_HP;
     }
 
     private void rejectCurrentGoal() {
