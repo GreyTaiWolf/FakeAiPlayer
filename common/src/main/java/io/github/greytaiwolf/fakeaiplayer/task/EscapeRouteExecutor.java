@@ -101,7 +101,8 @@ final class EscapeRouteExecutor {
                 LivingEntity.class,
                 pack.player().getBoundingBox().inflate(8.0D),
                 candidate -> candidate instanceof Monster && candidate.isAlive() && candidate != pack.player())) {
-            if (!ObservableWorldQuery.canObserveEntity(pack.player(), entity)) {
+            if (!ObservableWorldQuery.canObserveEntity(pack.player(), entity)
+                    || !CombatCore.hasLineOfSight(pack.player(), entity)) {
                 continue;
             }
             Vec3 toNext = Vec3.atCenterOf(next).subtract(pack.player().position());
