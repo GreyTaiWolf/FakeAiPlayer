@@ -10,7 +10,8 @@
       "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerHarnessTestMod"
     ],
     "fabric-gametest": [
-      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerDeterministicGameTests"
+      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerDeterministicGameTests",
+      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerFocusGameTests"
     ]
   },
   "depends": {

@@ -131,7 +131,8 @@ public record AIBotConfig(
                 OperatingProfile.STRICT_SURVIVAL,
                 OperatorCapabilities.defaults(),
                 new DeepSeek("", "https://api.deepseek.com", "deepseek-chat", 2048, 0.3D, 60, 3, 500),
-                new Perception(16, 20, 10, 10, false),
+                new Perception(16, 20, 10, 10, false,
+                        new Focus(true, 8, 2, 2, 4, 128, 4096)),
                 new Brain(36, 6, 12, false, true, false, 3, true), // 优化4:maxTurns 24→12——挖矿失败后大脑手动逐格挖会瞬间耗轮,早止损早复位(善后已有 clear+resetIdle)
                 new Watchdog(200),
                 new Logging(true, "logs/fakeaiplayer", true, "daily", 50, 30, true, Map.of(
@@ -217,14 +218,46 @@ public record AIBotConfig(
         }
     }
 
-    public record Perception(int radius, int maxBlocks, int maxEntities, int maxItems, boolean includeRawLists) {
+    public record Perception(int radius,
+                             int maxBlocks,
+                             int maxEntities,
+                             int maxItems,
+                             boolean includeRawLists,
+                             Focus focus) {
         Perception withDefaults(Perception defaults) {
             return new Perception(
                     positiveOrDefault(radius, defaults.radius),
                     positiveOrDefault(maxBlocks, defaults.maxBlocks),
                     positiveOrDefault(maxEntities, defaults.maxEntities),
                     positiveOrDefault(maxItems, defaults.maxItems),
-                    includeRawLists);
+                    includeRawLists,
+                    focus == null ? defaults.focus : focus.withDefaults(defaults.focus));
+        }
+    }
+
+    /** Configuration for the independent semantic-gaze state machine. */
+    public record Focus(
+            Boolean enabled,
+            int range,
+            int sampleIntervalTicks,
+            int stableSamples,
+            int lostGraceSamples,
+            int historySize,
+            int maxDetailChars
+    ) {
+        Focus withDefaults(Focus defaults) {
+            return new Focus(
+                    boolOrDefault(enabled, defaults.enabled),
+                    boundedPositiveOrDefault(range, defaults.range, 1, 64),
+                    boundedPositiveOrDefault(sampleIntervalTicks, defaults.sampleIntervalTicks, 1, 200),
+                    boundedPositiveOrDefault(stableSamples, defaults.stableSamples, 1, 20),
+                    boundedPositiveOrDefault(lostGraceSamples, defaults.lostGraceSamples, 1, 100),
+                    boundedPositiveOrDefault(historySize, defaults.historySize, 1, 1024),
+                    boundedPositiveOrDefault(maxDetailChars, defaults.maxDetailChars, 1024, 16384));
+        }
+
+        public boolean enabledValue() {
+            return Boolean.TRUE.equals(enabled);
         }
     }
 
@@ -384,6 +417,11 @@ public record AIBotConfig(
 
     private static double positiveDoubleOrDefault(double value, double defaultValue) {
         return value > 0.0D ? value : defaultValue;
+    }
+
+    private static int boundedPositiveOrDefault(int value, int defaultValue, int minimum, int maximum) {
+        int resolved = value > 0 ? value : defaultValue;
+        return Math.max(minimum, Math.min(resolved, maximum));
     }
 
     private static Boolean boolOrDefault(Boolean value, Boolean defaultValue) {

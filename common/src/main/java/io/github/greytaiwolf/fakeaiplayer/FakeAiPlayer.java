@@ -11,6 +11,7 @@ import io.github.greytaiwolf.fakeaiplayer.network.AIBotServerNetworking;
 import io.github.greytaiwolf.fakeaiplayer.network.ServerNetworkTransport;
 import io.github.greytaiwolf.fakeaiplayer.observe.TpsGuard;
 import io.github.greytaiwolf.fakeaiplayer.persist.BotPersistence;
+import io.github.greytaiwolf.fakeaiplayer.perception.focus.FocusTracker;
 import io.github.greytaiwolf.fakeaiplayer.platform.PlatformEnvironment;
 import io.github.greytaiwolf.fakeaiplayer.platform.PlatformServices;
 import io.github.greytaiwolf.fakeaiplayer.runtime.RuntimeLifecycleCoordinator;
@@ -57,6 +58,9 @@ public final class FakeAiPlayer {
                         .toList(),
                 "deepseek_model", config.deepseek().model(),
                 "perception_radius", config.perception().radius(),
+                "focus_enabled", config.perception().focus().enabledValue(),
+                "focus_range", config.perception().focus().range(),
+                "focus_sample_interval", config.perception().focus().sampleIntervalTicks(),
                 "nav_lookahead", config.nav().lookahead(),
                 "pickup_force_radius", config.pickup().forceRadiusH(),
                 "logging_enabled", config.logging().enabled());
@@ -87,6 +91,7 @@ public final class FakeAiPlayer {
         TpsGuard.INSTANCE.tick(server);
         TaskManager.INSTANCE.tickAll(server);
         BotTickCoordinator.INSTANCE.tick(server);
+        FocusTracker.INSTANCE.tick(server);
         AIBotServerNetworking.INSTANCE.tick(server);
         io.github.greytaiwolf.fakeaiplayer.log.DiagnosticLogger.INSTANCE.tick(server);
         if (server.getTickCount() > 0 && server.getTickCount() % 6000 == 0) {

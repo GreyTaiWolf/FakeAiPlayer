@@ -22,6 +22,7 @@ import io.github.greytaiwolf.fakeaiplayer.observe.BotProfiler;
 import io.github.greytaiwolf.fakeaiplayer.observe.ReplayRecorder;
 import io.github.greytaiwolf.fakeaiplayer.observe.TpsGuard;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.AStarPathfinder;
+import io.github.greytaiwolf.fakeaiplayer.perception.focus.FocusTracker;
 import io.github.greytaiwolf.fakeaiplayer.persist.BotPersistence;
 import io.github.greytaiwolf.fakeaiplayer.task.DangerWatcher;
 import io.github.greytaiwolf.fakeaiplayer.task.EpisodeMemory;
@@ -113,6 +114,7 @@ public final class RuntimeLifecycleCoordinator {
         EpisodeMemory.INSTANCE.reset(bot.getUUID());
         BotReporter.INSTANCE.onCleared(bot);
         DiagnosticLogger.INSTANCE.clear(bot);
+        FocusTracker.INSTANCE.clear(bot);
         CapabilityRuntime.clear(bot);
     }
 
@@ -144,6 +146,7 @@ public final class RuntimeLifecycleCoordinator {
         ReplayRecorder.INSTANCE.clearAll();
         BotProfiler.INSTANCE.clearAll();
         AIBotServerNetworking.INSTANCE.clear();
+        FocusTracker.INSTANCE.clearAll();
         CapabilityRuntime.clearAll();
         TpsGuard.INSTANCE.reset();
         AStarPathfinder.invalidateCache("runtime_world_boundary");

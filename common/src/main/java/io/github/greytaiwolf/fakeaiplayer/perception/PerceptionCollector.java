@@ -8,6 +8,8 @@ import io.github.greytaiwolf.fakeaiplayer.log.LogFields;
 import io.github.greytaiwolf.fakeaiplayer.mode.CapabilityRuntime;
 import io.github.greytaiwolf.fakeaiplayer.mode.ObservableWorldQuery;
 import io.github.greytaiwolf.fakeaiplayer.mode.PrivilegedCapability;
+import io.github.greytaiwolf.fakeaiplayer.perception.focus.FocusSnapshot;
+import io.github.greytaiwolf.fakeaiplayer.perception.focus.FocusTracker;
 import io.github.greytaiwolf.fakeaiplayer.task.TaskManager;
 import io.github.greytaiwolf.fakeaiplayer.task.TaskStatus;
 import java.util.ArrayList;
@@ -46,6 +48,7 @@ public final class PerceptionCollector {
                 bot.getFoodData().getFoodLevel(),
                 BuiltInRegistries.ITEM.getKey(bot.getMainHandItem().getItem()).toString(),
                 InventoryAction.summarize(bot));
+        FocusSnapshot focus = FocusTracker.INSTANCE.observeNow(bot);
 
         CapabilityRuntime.decide(bot, PrivilegedCapability.HIDDEN_BLOCK_SCAN, "perception_snapshot");
         BlockScan blockScan = collectBlocks(bot, world, center, Math.min(config.radius(), 8), config.maxBlocks());
@@ -69,6 +72,8 @@ public final class PerceptionCollector {
                 "hunger", bot.getFoodData().getFoodLevel(),
                 "pos", LogFields.pos(center),
                 "holding", BuiltInRegistries.ITEM.getKey(bot.getMainHandItem().getItem()),
+                "focus_kind", focus.kind(),
+                "focus_id", focus.id(),
                 "blocks_n", blockScan.blocks().size(),
                 "entities_n", entities.size(),
                 "items_n", items.size(),
@@ -78,6 +83,7 @@ public final class PerceptionCollector {
         }
         return new PerceptionSnapshot(
                 self,
+                focus.summary(),
                 task,
                 highlights,
                 blocks,

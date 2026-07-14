@@ -4,6 +4,7 @@
   "package": "io.github.greytaiwolf.fakeaiplayer.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
+    "BaseContainerBlockEntityAccessorMixin",
     "ClientConnectionAccessorMixin",
     "PlayerManagerFakePlayerMixin",
     "MerchantEntityInvokerMixin"
