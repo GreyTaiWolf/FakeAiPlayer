@@ -308,7 +308,7 @@ public final class EvadeTask extends AbstractTask {
         stopExecutors(bot);
         combatTarget = selectCombatTarget(bot);
         ThreatResponsePolicy.Fallback fallback = ThreatResponsePolicy.fallback(
-                combatTarget != null, bot.getHealth(), failedEscapePlans);
+                isHostileThreat() && combatTarget != null, bot.getHealth(), failedEscapePlans);
         if (fallback == ThreatResponsePolicy.Fallback.NONE) {
             if (hostileSituationResolved(bot)) {
                 finishCompleted(bot, "no_reachable_hostile");
@@ -415,7 +415,7 @@ public final class EvadeTask extends AbstractTask {
     }
 
     private boolean isHostileThreat() {
-        return threat.type() == Threat.Type.HOSTILE || threat.type() == Threat.Type.LOW_HP;
+        return ThreatResponsePolicy.canCounterattack(threat.type());
     }
 
     private void rejectCurrentGoal() {
