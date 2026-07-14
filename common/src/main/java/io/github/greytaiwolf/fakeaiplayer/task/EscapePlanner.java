@@ -2,6 +2,7 @@ package io.github.greytaiwolf.fakeaiplayer.task;
 
 import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.mode.ObservableWorldQuery;
+import io.github.greytaiwolf.fakeaiplayer.observe.TpsGuard;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.AStarPathfinder;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.Node;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.PathfindingResult;
@@ -35,9 +36,12 @@ final class EscapePlanner {
     private static final double[] ANGLES_DEGREES = {0.0D, 35.0D, -35.0D, 70.0D, -70.0D, 110.0D, -110.0D, 180.0D};
     private static final double[] DISTANCES = {20.0D, 19.0D, 19.0D, 17.0D, 17.0D, 15.0D, 15.0D, 12.0D};
     private static final int CANDIDATE_RADIUS = 4;
-    private static final int MAX_SEARCH_NODES = 2_500;
-    private static final long PER_CANDIDATE_MILLIS = 6L;
-    private static final long GLOBAL_BUDGET_NANOS = 30_000_000L;
+    private static final int NORMAL_MAX_SEARCH_NODES = 1_800;
+    private static final int DEGRADED_MAX_SEARCH_NODES = 700;
+    private static final long NORMAL_PER_CANDIDATE_MILLIS = 4L;
+    private static final long DEGRADED_PER_CANDIDATE_MILLIS = 2L;
+    private static final long NORMAL_GLOBAL_BUDGET_NANOS = 16_000_000L;
+    private static final long DEGRADED_GLOBAL_BUDGET_NANOS = 6_000_000L;
 
     private EscapePlanner() {
     }
@@ -48,7 +52,13 @@ final class EscapePlanner {
         Vec3 preferredAway = preferredAway(bot, primaryThreat, hazards);
         BlockPos start = bot.blockPosition();
         double startDistance = hazards.isEmpty() ? 0.0D : nearestHazardDistance(start, hazards);
-        long deadline = System.nanoTime() + GLOBAL_BUDGET_NANOS;
+        boolean degraded = TpsGuard.INSTANCE.degraded(bot.getServer());
+        int maxSearchNodes = degraded ? DEGRADED_MAX_SEARCH_NODES : NORMAL_MAX_SEARCH_NODES;
+        long perCandidateMillis = degraded
+                ? DEGRADED_PER_CANDIDATE_MILLIS : NORMAL_PER_CANDIDATE_MILLIS;
+        long globalBudgetNanos = degraded
+                ? DEGRADED_GLOBAL_BUDGET_NANOS : NORMAL_GLOBAL_BUDGET_NANOS;
+        long deadline = System.nanoTime() + globalBudgetNanos;
 
         Plan bestSafe = null;
         Plan bestImproving = null;
@@ -74,10 +84,10 @@ final class EscapePlanner {
                 break;
             }
             long remainingMillis = Math.max(1L, (remainingNanos + 999_999L) / 1_000_000L);
-            long searchMillis = Math.min(PER_CANDIDATE_MILLIS, remainingMillis);
+            long searchMillis = Math.min(perCandidateMillis, remainingMillis);
             PathfindingResult result = new AStarPathfinder(
                     bot.serverLevel(), start, goal,
-                    MAX_SEARCH_NODES, searchMillis,
+                    maxSearchNodes, searchMillis,
                     false, false, 1.35D).findPath();
             if (!result.success() || result.path().size() < 2) {
                 continue;
