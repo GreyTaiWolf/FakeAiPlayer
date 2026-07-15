@@ -123,6 +123,21 @@ public final class ActionPack {
     }
 
     public ActionResult startPathTo(BlockPos goal) {
+        return startPathTo(goal, PathExecutor.hasPlaceableBlock(player), true, false);
+    }
+
+    /**
+     * Navigate only through already walkable cells. Reviewed construction uses this path so a
+     * work-pose request cannot silently dig a wall or leave an untracked pillar beside the plan.
+     */
+    public ActionResult startNonMutatingPathTo(BlockPos goal) {
+        return startPathTo(goal, false, false, true);
+    }
+
+    private ActionResult startPathTo(BlockPos goal,
+                                     boolean canPillar,
+                                     boolean allowDigFallback,
+                                     boolean exactGoal) {
         int now = player.getServer().getTickCount();
         BlockPos immutableGoal = goal.immutable();
         if (lastPathGoal != null && lastPathGoal.equals(immutableGoal) && now < nextPathfindTick) {
@@ -134,14 +149,13 @@ public final class ActionPack {
             nextPathfindTick = now + PATHFIND_FAILURE_COOLDOWN_TICKS;
             return ActionResult.failed("pathfinding_failed: NO_START");
         }
-        boolean canPillar = PathExecutor.hasPlaceableBlock(player);
         ServerLevel world = player.serverLevel();
         BlockPos from = player.blockPosition();
         // NAV-OPT 两阶段寻路:先纯步行(禁挖,搜索空间=空气格,收敛快、不会被挖穿邻居撑爆到 SEARCH_LIMIT);
         // 纯步行无解再允许挖穿兜底(隧道/破障),挖穿预算更小以限制被困/地下时的 3D 体积爆搜。
         PathfindingResult result =
                 new AStarPathfinder(world, from, goal, WALK_MAX_NODES, PATHFIND_MAX_MILLIS, canPillar, false).findPath();
-        if (!result.success()) {
+        if (!result.success() && allowDigFallback) {
             PathfindingResult dig =
                     new AStarPathfinder(world, from, goal, DIG_MAX_NODES, PATHFIND_MAX_MILLIS, canPillar, true).findPath();
             if (dig.success()) {
@@ -158,7 +172,8 @@ public final class ActionPack {
         nextPathfindTick = now + PATHFIND_SUCCESS_COOLDOWN_TICKS;
         BlockPos resolvedGoal = result.resolvedGoal() == null ? immutableGoal : result.resolvedGoal();
         activePathGoal = resolvedGoal;
-        this.pathExecutor = new PathExecutor(result.path(), resolvedGoal);
+        this.pathExecutor = new PathExecutor(
+                result.path(), resolvedGoal, exactGoal, canPillar, allowDigFallback);
         this.walkTo = null;
         this.mining = null;
         return ActionResult.IN_PROGRESS;

@@ -2,6 +2,7 @@ package io.github.greytaiwolf.fakeaiplayer.platform.neoforge;
 
 import io.github.greytaiwolf.fakeaiplayer.FakeAiPlayer;
 import io.github.greytaiwolf.fakeaiplayer.brain.ChatCaptureListener;
+import io.github.greytaiwolf.fakeaiplayer.building.preview.BuildingPreviewService;
 import io.github.greytaiwolf.fakeaiplayer.network.AIBotServerNetworking;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -47,6 +48,7 @@ public final class NeoForgeGameEvents {
     public static void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             AIBotServerNetworking.INSTANCE.onDisconnect(player);
+            BuildingPreviewService.INSTANCE.onDisconnect(player);
         }
     }
 }

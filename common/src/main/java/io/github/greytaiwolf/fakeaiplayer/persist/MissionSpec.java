@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 
@@ -56,6 +57,17 @@ public record MissionSpec(String type, Map<String, String> params, List<String> 
             case Goal.Build g -> {
                 type = "build";
                 params.put("blueprint", g.blueprint());
+                if (g.anchor() != null) {
+                    params.put("anchor_x", String.valueOf(g.anchor().getX()));
+                    params.put("anchor_y", String.valueOf(g.anchor().getY()));
+                    params.put("anchor_z", String.valueOf(g.anchor().getZ()));
+                }
+                if (g.dimension() != null) {
+                    params.put("dimension", g.dimension());
+                }
+                if (g.blueprintDigest() != null) {
+                    params.put("blueprint_digest", g.blueprintDigest());
+                }
             }
         }
         return new MissionSpec(type, params, values);
@@ -76,7 +88,9 @@ public record MissionSpec(String type, Map<String, String> params, List<String> 
                 case "workstation" -> new Goal.Workstation();
                 case "stockpile" -> new Goal.Stockpile(item("item"), integer("count"));
                 case "food" -> new Goal.Food(integer("count"));
-                case "build" -> new Goal.Build(required("blueprint"));
+                case "build" -> new Goal.Build(
+                        required("blueprint"), optionalAnchor(), params.get("dimension"),
+                        params.get("blueprint_digest"));
                 default -> throw new IllegalArgumentException("unknown_mission_type:" + type);
             });
         } catch (RuntimeException exception) {
@@ -94,6 +108,19 @@ public record MissionSpec(String type, Map<String, String> params, List<String> 
 
     private int integer(String key) {
         return Integer.parseInt(required(key));
+    }
+
+    private BlockPos optionalAnchor() {
+        boolean hasX = params.containsKey("anchor_x");
+        boolean hasY = params.containsKey("anchor_y");
+        boolean hasZ = params.containsKey("anchor_z");
+        if (!hasX && !hasY && !hasZ) {
+            return null;
+        }
+        if (!(hasX && hasY && hasZ)) {
+            throw new IllegalArgumentException("incomplete_build_anchor");
+        }
+        return new BlockPos(integer("anchor_x"), integer("anchor_y"), integer("anchor_z"));
     }
 
     private String required(String key) {

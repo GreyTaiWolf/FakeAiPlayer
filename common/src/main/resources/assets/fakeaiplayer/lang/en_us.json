@@ -2,6 +2,8 @@
   "key.categories.fakeaiplayer": "FakeAiPlayer",
   "key.fakeaiplayer.open_panel": "Open FakeAiPlayer Panel",
   "key.fakeaiplayer.open_actions": "Open FakeAiPlayer Actions",
+  "key.fakeaiplayer.confirm_building_preview": "Confirm Building Preview",
+  "key.fakeaiplayer.cancel_building_preview": "Cancel Building Preview",
   "screen.fakeaiplayer.panel": "FakeAiPlayer Panel",
   "screen.fakeaiplayer.actions_panel": "FakeAiPlayer Actions",
   "screen.fakeaiplayer.settings_panel": "FakeAiPlayer Settings",

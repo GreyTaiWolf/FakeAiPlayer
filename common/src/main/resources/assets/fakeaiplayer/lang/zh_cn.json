@@ -2,6 +2,8 @@
   "key.categories.fakeaiplayer": "FakeAiPlayer",
   "key.fakeaiplayer.open_panel": "打开 FakeAiPlayer 面板",
   "key.fakeaiplayer.open_actions": "打开 FakeAiPlayer 功能区",
+  "key.fakeaiplayer.confirm_building_preview": "确认建筑投影",
+  "key.fakeaiplayer.cancel_building_preview": "取消建筑投影",
   "screen.fakeaiplayer.panel": "FakeAiPlayer 控制面板",
   "screen.fakeaiplayer.actions_panel": "FakeAiPlayer 功能区",
   "screen.fakeaiplayer.settings_panel": "FakeAiPlayer 设置",

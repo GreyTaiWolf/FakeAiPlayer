@@ -25,6 +25,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -125,14 +127,15 @@ public final class GoalPlanner {
         return MiningChain.bestY(ores); // S2:推荐挖掘 Y 层收敛到 MiningChain 单一数据源(混合矿取最深层)
     }
 
-    private static List<GoalStep> mergeGathers(List<GoalStep> steps) {
-        // GATHER:无前置依赖 → 合并并提到计划最前(一次在地表砍够)。
+    static List<GoalStep> mergeGathers(List<GoalStep> steps) {
+        // GATHER/GATHER_EXACT:无前置依赖 → 合并并提到计划最前。精确与家族采集
+        // 是不同语义，即使 item 相同也绝不合并，否则会把建筑的树种约束静默丢掉。
         // S9:同物 MINE(如圆石)合并数量到**首次出现位置**——不提最前,因 MINE 依赖镐,提前会无镐空挖。
-        Map<Item, Integer> gatherTotals = new LinkedHashMap<>();
+        Map<GatherKey, Integer> gatherTotals = new LinkedHashMap<>();
         Map<Block, Integer> mineTotals = new LinkedHashMap<>();
         for (GoalStep step : steps) {
-            if (step.kind() == GoalStep.Kind.GATHER) {
-                gatherTotals.merge(step.item(), step.count(), Integer::sum);
+            if (step.kind() == GoalStep.Kind.GATHER || step.kind() == GoalStep.Kind.GATHER_EXACT) {
+                gatherTotals.merge(new GatherKey(step.kind(), step.item()), step.count(), Integer::sum);
             } else if (step.kind() == GoalStep.Kind.MINE) {
                 mineTotals.merge(step.block(), step.count(), Integer::sum);
             }
@@ -141,12 +144,15 @@ public final class GoalPlanner {
             return steps;
         }
         List<GoalStep> result = new ArrayList<>();
-        for (Map.Entry<Item, Integer> entry : gatherTotals.entrySet()) {
-            result.add(GoalStep.gather(entry.getKey(), entry.getValue()));
+        for (Map.Entry<GatherKey, Integer> entry : gatherTotals.entrySet()) {
+            GatherKey key = entry.getKey();
+            result.add(key.kind() == GoalStep.Kind.GATHER_EXACT
+                    ? GoalStep.gatherExact(key.item(), entry.getValue())
+                    : GoalStep.gather(key.item(), entry.getValue()));
         }
         HashSet<Block> emittedMine = new HashSet<>();
         for (GoalStep step : steps) {
-            if (step.kind() == GoalStep.Kind.GATHER) {
+            if (step.kind() == GoalStep.Kind.GATHER || step.kind() == GoalStep.Kind.GATHER_EXACT) {
                 continue; // 已提到最前
             }
             if (step.kind() == GoalStep.Kind.MINE) {
@@ -158,6 +164,84 @@ public final class GoalPlanner {
             result.add(step);
         }
         return result;
+    }
+
+    private record GatherKey(GoalStep.Kind kind, Item item) {
+    }
+
+    /**
+     * Keeps final building materials unavailable to prerequisite crafting in the planner's
+     * simulated inventory. This is stronger than sorting material requests: smelting glass may
+     * implicitly craft a furnace and pickaxes may consume wood, so not every dependency is a
+     * direct {@link RecipeRegistry} ingredient.
+     */
+    static final class MaterialReservations {
+        private final Map<Item, Integer> counts;
+        private final Map<Item, Integer> reserved = new HashMap<>();
+
+        MaterialReservations(Map<Item, Integer> counts) {
+            this.counts = counts;
+        }
+
+        int available(Item item) {
+            return Math.max(0, counts.getOrDefault(item, 0) - reserved.getOrDefault(item, 0));
+        }
+
+        int available(List<Item> family) {
+            int total = 0;
+            for (Item item : family) {
+                total += available(item);
+            }
+            return total;
+        }
+
+        int reserved(Item item) {
+            return reserved.getOrDefault(item, 0);
+        }
+
+        int reserved(List<Item> family) {
+            int total = 0;
+            for (Item item : family) {
+                total += reserved(item);
+            }
+            return total;
+        }
+
+        boolean reserve(Item item, int count) {
+            if (count < 0 || available(item) < count) {
+                return false;
+            }
+            if (count > 0) {
+                reserved.merge(item, count, Integer::sum);
+            }
+            return true;
+        }
+
+        boolean reserve(List<Item> family, int count) {
+            if (count < 0 || available(family) < count) {
+                return false;
+            }
+            int remaining = count;
+            for (Item item : family) {
+                int take = Math.min(available(item), remaining);
+                if (take > 0) {
+                    reserved.merge(item, take, Integer::sum);
+                    remaining -= take;
+                }
+                if (remaining == 0) {
+                    return true;
+                }
+            }
+            return remaining == 0;
+        }
+
+        int takeAvailable(Item item, int count) {
+            int take = Math.min(Math.max(0, count), available(item));
+            if (take > 0) {
+                counts.put(item, counts.getOrDefault(item, 0) - take);
+            }
+            return take;
+        }
     }
 
     public static List<GoalStep> planSteps(AIPlayerEntity bot, Goal goal) {
@@ -193,9 +277,71 @@ public final class GoalPlanner {
         counts.merge(stack.getItem(), stack.getCount(), Integer::sum);
     }
 
+    /**
+     * Select material-consuming cells without coupling this accounting rule to a live world.
+     * CLEAR and PRESERVE are evidence/mutation instructions, not inventory requirements. One
+     * unresolved cell represents an atomic multi-cell item (doors, beds, etc.), so a named atomic
+     * group contributes at most one item even though verification still checks every cell.
+     */
+    static List<BlueprintSchema.BlockPlacement> materialPlacements(
+            BlueprintSchema schema,
+            Predicate<BlueprintSchema.BlockPlacement> alreadySatisfied) {
+        List<BlueprintSchema.BlockPlacement> result = new ArrayList<>();
+        Set<String> countedAtomicGroups = new HashSet<>();
+        Predicate<BlueprintSchema.BlockPlacement> satisfied = alreadySatisfied == null
+                ? ignored -> false
+                : alreadySatisfied;
+        for (BlueprintSchema.BlockPlacement placement : schema.placements()) {
+            if (placement.operation()
+                    == io.github.greytaiwolf.fakeaiplayer.building.plan.CellOperation.CLEAR
+                    || placement.operation()
+                    == io.github.greytaiwolf.fakeaiplayer.building.plan.CellOperation.PRESERVE
+                    || "minecraft:air".equals(placement.blockId())
+                    || satisfied.test(placement)) {
+                continue;
+            }
+            String atomicGroup = placement.atomicGroup();
+            if (atomicGroup != null && !atomicGroup.isBlank()
+                    && !countedAtomicGroups.add(atomicGroup)) {
+                continue;
+            }
+            result.add(placement);
+        }
+        return List.copyOf(result);
+    }
+
+    /** Surface block materials that use GatherQuotaTask's observable scan/path/harvest loop. */
+    static boolean isDirectGatherItem(Item item) {
+        return item == Items.SAND || RecipeRegistry.LOGS.contains(item);
+    }
+
+    static boolean usesExactBuildingMaterials(String blueprintName) {
+        return blueprintName != null && blueprintName.startsWith("generated_");
+    }
+
+    static GoalStep directGatherStep(Item item, int count, boolean exactBuildingMaterials) {
+        return exactBuildingMaterials && RecipeRegistry.LOGS.contains(item)
+                ? GoalStep.gatherExact(item, count)
+                : GoalStep.gather(item, count);
+    }
+
+    /**
+     * Deterministic return-to-site point for a player-confirmed build. It sits two blocks outside
+     * the compiled footprint, centered on its minimum-Z edge, so it cannot later be occupied by a
+     * reviewed plan cell and is already inside strict observation range of that edge. The normal
+     * pathfinder may snap this requested point to nearby standable terrain.
+     */
+    static BlockPos buildStagingPoint(BlueprintSchema schema, BlockPos anchor) {
+        if (schema == null || anchor == null) {
+            throw new IllegalArgumentException("build_staging_requires_schema_and_anchor");
+        }
+        return anchor.offset((schema.width() - 1) / 2, 0, -2);
+    }
+
     private static final class Planner {
         private final AIPlayerEntity bot;
         private final Map<Item, Integer> counts;
+        private final MaterialReservations materialReservations;
         private final int maxDepth;
         private final int botY; // 规划时 bot 的 Y,用于判断深层矿是否需先下竖井到矿层
         private final boolean hasPreyNearby;  // 周围有可猎动物(食物择源:有→打猎)
@@ -203,6 +349,7 @@ public final class GoalPlanner {
         private final boolean hasBerriesNearby; // 周围有甜浆果丛(食物择源:无动物无现成粮→采浆果兜底)
         private final java.util.function.Predicate<Set<Block>> oreNearby; // 目标矿是否已在身边(48格)→跳过下潜
         private final GoalSnapshotCollector.Context resumeContext;
+        private boolean exactBuildingMaterials;
         private final List<GoalStep> steps = new ArrayList<>();
         private final List<String> unresolved = new ArrayList<>();
 
@@ -212,6 +359,7 @@ public final class GoalPlanner {
                         GoalSnapshotCollector.Context resumeContext) {
             this.bot = bot;
             this.counts = counts;
+            this.materialReservations = new MaterialReservations(counts);
             this.maxDepth = maxDepth;
             this.botY = botY;
             this.hasPreyNearby = hasPreyNearby;
@@ -472,16 +620,24 @@ public final class GoalPlanner {
         }
 
         // 盖房全链:"盖房子"一句话 = 备料(自动砍树/挖石/熔玻璃,复用 ensureItem 倒推) + 建造一条链。
-        // 材料统计口径:BlueprintLoader.load 已把 ops 全部展开成逐格 placements——
-        // hollow_box=外壳格数、layer/box/fill=区间内全格数,且同坐标去重(显式 placement 覆盖 op 格,
-        // 如 small_hut 门洞的两格 air 覆盖墙体),所以逐 placement 计数与 BuildTask 实际放置完全一致。
+        // 材料统计口径:BlueprintLoader.load 已把 ops 全部展开成逐格 placements，同坐标
+        // 去重(显式 placement 覆盖 op 格)。PLACE/TEMPORARY 按未完成格备料；CLEAR/PRESERVE 不
+        // 消耗背包材料；门、床等 atomicGroup 虽保留每格验收，但整组只消耗一个物品。
         private boolean ensureBuild(Goal.Build g, int depth, Set<String> visiting) {
             BlueprintSchema schema;
-            try {
-                schema = BlueprintLoader.load(g.blueprint());
-            } catch (IOException e) {
-                unresolved.add("blueprint_missing:" + g.blueprint());
-                return false;
+            if (resumeContext != null && resumeContext.blueprint() != null) {
+                // Confirmation preflight deliberately runs before the generated file is written:
+                // a rejected material plan must not leave an orphaned executable blueprint. The
+                // context is the exact immutable schema that will be persisted after preflight.
+                // Active build replans also carry this same schema in their snapshot context.
+                schema = resumeContext.blueprint();
+            } else {
+                try {
+                    schema = BlueprintLoader.load(g.blueprint());
+                } catch (IOException e) {
+                    unresolved.add("blueprint_missing:" + g.blueprint());
+                    return false;
+                }
             }
             // 防御:万一拿到未展开 schema(load 已保证展开,这里仅保险)按同一几何再展开一次。
             if (schema.ops() != null && !schema.ops().isEmpty()) {
@@ -499,14 +655,11 @@ public final class GoalPlanner {
             // 预算(real_build 实测 54/116 超时根因)。修:palette 材料按家族 owned 合计判足,够则不插采料步。
             Map<String, Integer> paletteNeeds = new LinkedHashMap<>();
             Map<Item, Integer> exactNeeds = new LinkedHashMap<>();
-            for (BlueprintSchema.BlockPlacement placement : schema.placements()) {
-                if (resumeContext != null && resumeContext.buildAnchor() != null
-                        && StructureVerifier.matches(bot.serverLevel(), resumeContext.buildAnchor(), placement)) {
-                    continue;
-                }
-                if ("minecraft:air".equals(placement.blockId())) {
-                    continue;
-                }
+            List<BlueprintSchema.BlockPlacement> materialPlacements = materialPlacements(schema,
+                    placement -> resumeContext != null && resumeContext.buildAnchor() != null
+                            && StructureVerifier.matches(
+                                    bot.serverLevel(), resumeContext.buildAnchor(), placement));
+            for (BlueprintSchema.BlockPlacement placement : materialPlacements) {
                 if (placement.palette() != null && !placement.palette().isBlank()
                         && MaterialPalette.isKnown(placement.palette())) {
                     paletteNeeds.merge(placement.palette(), 1, Integer::sum);
@@ -526,34 +679,50 @@ public final class GoalPlanner {
             boolean anyResolved = paletteNeeds.isEmpty() && exactNeeds.isEmpty();
             for (Map.Entry<String, Integer> entry : paletteNeeds.entrySet()) {
                 int need = entry.getValue();
-                int ownedInFamily = 0;
                 List<Item> family = MaterialPalette.GROUPS.get(entry.getKey());
-                if (family != null) {
-                    for (Item member : family) {
-                        ownedInFamily += counts.getOrDefault(member, 0);
-                    }
-                }
-                if (ownedInFamily >= need) {
-                    anyResolved = true; // 家族合计已够,不插采料步
-                    continue;
-                }
+                int availableInFamily = family == null ? 0 : materialReservations.available(family);
                 Item species = paletteDefaultItem(entry.getKey());
-                if (species == null) {
+                if (family == null || species == null) {
                     continue;
                 }
-                // 只补家族缺口:desiredCount = 该木种现有 + 全家族缺口,ensureItem 内部扣减后只采缺口部分。
-                int desired = counts.getOrDefault(species, 0) + (need - ownedInFamily);
-                if (ensureItem(species, desired, depth, visiting)) {
+                boolean supplied = availableInFamily >= need;
+                if (!supplied) {
+                    // Existing unreserved members of another species still count. Only acquire
+                    // the family shortfall on the chosen default species.
+                    int desiredAvailable = materialReservations.available(species)
+                            + (need - availableInFamily);
+                    supplied = ensureItem(species, desiredAvailable, depth, visiting);
+                }
+                if (supplied && materialReservations.reserve(family, need)) {
                     anyResolved = true;
+                } else if (supplied) {
+                    unresolved.add("building_material_reservation_failed:" + entry.getKey() + " x" + need);
                 }
             }
             for (Map.Entry<Item, Integer> entry : exactNeeds.entrySet()) {
-                if (ensureItem(entry.getKey(), entry.getValue(), depth, visiting)) {
-                    anyResolved = true;
+                boolean previousExact = exactBuildingMaterials;
+                exactBuildingMaterials = usesExactBuildingMaterials(g.blueprint());
+                try {
+                    if (ensureItem(entry.getKey(), entry.getValue(), depth, visiting)
+                            && materialReservations.reserve(entry.getKey(), entry.getValue())) {
+                        anyResolved = true;
+                    } else if (materialReservations.available(entry.getKey()) >= entry.getValue()) {
+                        unresolved.add("building_material_reservation_failed:"
+                                + BuiltInRegistries.ITEM.getKey(entry.getKey()) + " x" + entry.getValue());
+                    }
+                } finally {
+                    exactBuildingMaterials = previousExact;
                 }
             }
             if (!anyResolved) {
                 return false;
+            }
+            // Material gathering/smelting can leave the bot far outside ObservableWorldQuery's
+            // strict radius. Return beside the exact player-confirmed footprint before BuildTask
+            // starts selecting observable work poses. Legacy auto-site builds still select their
+            // own site and therefore have no fixed staging point yet.
+            if (g.anchor() != null) {
+                addStep(GoalStep.move(buildStagingPoint(schema, g.anchor())));
             }
             addStep(GoalStep.build(g.blueprint()));
             return true;
@@ -602,12 +771,12 @@ public final class GoalPlanner {
         // 失败触发的重规划读到背包里的桦木,自动改备桦木板;palette 建造接受任意木板,链路自愈。
         private Item preferredPlanks() {
             for (Item planks : RecipeRegistry.PLANKS) {
-                if (counts.getOrDefault(planks, 0) > 0) {
+                if (materialReservations.available(planks) > 0) {
                     return planks;
                 }
             }
             for (int i = 0; i < RecipeRegistry.LOGS.size(); i++) {
-                if (counts.getOrDefault(RecipeRegistry.LOGS.get(i), 0) > 0) {
+                if (materialReservations.available(RecipeRegistry.LOGS.get(i)) > 0) {
                     return RecipeRegistry.PLANKS.get(i);
                 }
             }
@@ -688,7 +857,7 @@ public final class GoalPlanner {
                 unresolved.add("max_depth:" + id(item));
                 return false;
             }
-            int available = counts.getOrDefault(item, 0);
+            int available = materialReservations.available(item);
             if (available >= desiredCount) {
                 return true;
             }
@@ -716,6 +885,8 @@ public final class GoalPlanner {
         private boolean craftItem(Item item, int missing, RecipeRegistry.Recipe recipe, int depth, Set<String> visiting) {
             int crafts = divideRoundUp(missing, recipe.outputCount());
             int stepsBefore = steps.size(); // S7:本配方失败时回滚已下发的中间步骤
+            boolean protectedPlankCraft = RecipeRegistry.PLANKS.contains(item)
+                    && materialReservations.reserved(RecipeRegistry.PLANKS) > 0;
             if (recipe.needsCraftingTable() && item != Items.CRAFTING_TABLE) {
                 if (!ensureItem(Items.CRAFTING_TABLE, 1, depth + 1, visiting)) {
                     rollbackSteps(stepsBefore);
@@ -727,7 +898,20 @@ public final class GoalPlanner {
                 Item candidate = chooseIngredient(ingredient);
                 // 只补缺口:ensureItem 内部按 desired-available 计算,传 need 即可。
                 // (原写 counts+need = 已有量也再凑一份 → 背包已有材料还重复采/挖,实测有 8 石料做炉仍去挖石。)
-                if (candidate == null || !ensureItem(candidate, need, depth + 1, visiting)) {
+                boolean previousExact = exactBuildingMaterials;
+                if (protectedPlankCraft) {
+                    // The emitted absolute CRAFT step names one plank species, so its source log
+                    // must be gathered as that exact species instead of the legacy any-log family.
+                    exactBuildingMaterials = true;
+                }
+                boolean ingredientReady;
+                try {
+                    ingredientReady = candidate != null
+                            && ensureItem(candidate, need, depth + 1, visiting);
+                } finally {
+                    exactBuildingMaterials = previousExact;
+                }
+                if (!ingredientReady) {
                     unresolved.add("missing:" + ingredient.anyOf() + " x" + need + " for " + id(item));
                     rollbackSteps(stepsBefore);
                     return false;
@@ -740,15 +924,20 @@ public final class GoalPlanner {
             // 采到的原木种类(可能是桦木/云杉…)自动展开木板。若仍下发 "CRAFT oak_planks" 步,在只有
             // 桦木的生物群系会失败。仅当木板本身是顶层目标(depth==0,如 achieve_goal planks)才保留,
             // 否则该目标会没有任何产出步骤。原木的 GATHER 步仍照常下发(在 acquireBaseItem)。
-            if (!(depth > 0 && RecipeRegistry.PLANKS.contains(item))) {
-                addStep(GoalStep.craft(item, recipe.outputCount() * crafts));
+            // A building reservation changes that rule: a later CraftTask must first materialize
+            // the extra planks and then consume those, otherwise it will eat the already reserved
+            // floor/wall stack and leave the newly gathered logs untouched. CraftTask's count is
+            // an absolute inventory target, so publish the simulated post-craft total rather than
+            // this invocation's incremental recipe output.
+            if (!(depth > 0 && RecipeRegistry.PLANKS.contains(item) && !protectedPlankCraft)) {
+                addStep(GoalStep.craft(item, counts.getOrDefault(item, 0)));
             }
             return true;
         }
 
         private boolean acquireBaseItem(Item item, int missing, int depth, Set<String> visiting) {
-            if (RecipeRegistry.LOGS.contains(item)) {
-                addStep(GoalStep.gather(item, missing));
+            if (isDirectGatherItem(item)) {
+                addStep(directGatherStep(item, missing, exactBuildingMaterials));
                 counts.merge(item, missing, Integer::sum);
                 return true;
             }
@@ -867,7 +1056,8 @@ public final class GoalPlanner {
             }
             // 燃料:优先用背包已有的煤/木炭(1 个烧 8 个),只在不足时才砍原木补缺口(1 原木烧 1.5 个)。
             // (原来无脑砍原木、背包有煤也不用 → 给了煤仍去砍树、无树则 no_resource;实测铁/金锭挂在此。)
-            int coalLike = counts.getOrDefault(Items.COAL, 0) + counts.getOrDefault(Items.CHARCOAL, 0);
+            int coalLike = materialReservations.available(Items.COAL)
+                    + materialReservations.available(Items.CHARCOAL);
             int fuelDeficit = missing - coalLike * 8;
             Item fuel = preferredFuelLog();
             int fuelLogs = 0;
@@ -891,7 +1081,15 @@ public final class GoalPlanner {
 
         private Item chooseIngredient(RecipeRegistry.Ingredient ingredient) {
             for (Item item : ingredient.anyOf()) {
-                if (counts.getOrDefault(item, 0) >= ingredient.count()) {
+                if (materialReservations.available(item) >= ingredient.count()) {
+                    return item;
+                }
+            }
+            // If every family member is currently reserved for the final structure, acquire the
+            // recipe surplus on that same species. This keeps a spruce lodge from unexpectedly
+            // requiring oak just because oak is first in the generic planks ingredient list.
+            for (Item item : ingredient.anyOf()) {
+                if (materialReservations.reserved(item) > 0 && RecipeRegistry.find(item).isPresent()) {
                     return item;
                 }
             }
@@ -909,23 +1107,27 @@ public final class GoalPlanner {
                 if (remaining <= 0) {
                     return;
                 }
-                int available = counts.getOrDefault(item, 0);
-                int take = Math.min(available, remaining);
-                if (take > 0) {
-                    counts.put(item, available - take);
-                    remaining -= take;
-                }
+                remaining -= materialReservations.takeAvailable(item, remaining);
             }
         }
 
         private void consumeItem(Item item, int count) {
-            counts.put(item, Math.max(0, counts.getOrDefault(item, 0) - count));
+            materialReservations.takeAvailable(item, count);
         }
 
         // GOALFIX-GF3:选熔炼燃料——优先背包已有的任意原木种类(spruce/birch…),都没有则默认橡木。
         private Item preferredFuelLog() {
+            // Runtime fuel selection follows RecipeRegistry/FUEL_TICKS species order and cannot
+            // see this planner's reservation map. If the building promises logs, acquire the fuel
+            // surplus on the earliest reserved species so runtime consumption leaves its reserved
+            // remainder instead of skipping to and eating a different promised stack.
             for (Item log : RecipeRegistry.LOGS) {
-                if (counts.getOrDefault(log, 0) > 0) {
+                if (materialReservations.reserved(log) > 0) {
+                    return log;
+                }
+            }
+            for (Item log : RecipeRegistry.LOGS) {
+                if (materialReservations.available(log) > 0) {
                     return log;
                 }
             }
@@ -958,7 +1160,9 @@ public final class GoalPlanner {
         private void addStep(GoalStep step) {
             if (!steps.isEmpty()) {
                 GoalStep previous = steps.get(steps.size() - 1);
-                if (previous.sameTarget(step)) {
+                // CraftTask interprets count as an absolute inventory target. Adding two targets
+                // would turn (64 then 72) into 136; keep them as ordered checkpoints instead.
+                if (step.kind() != GoalStep.Kind.CRAFT && previous.sameTarget(step)) {
                     steps.set(steps.size() - 1, previous.withCount(previous.count() + step.count()));
                     return;
                 }

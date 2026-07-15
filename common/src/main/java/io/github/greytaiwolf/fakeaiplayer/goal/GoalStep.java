@@ -18,6 +18,7 @@ public record GoalStep(Kind kind,
                        String tag) {
     public enum Kind {
         GATHER,
+        GATHER_EXACT,
         MINE,
         MINE_ORE,
         CRAFT,
@@ -42,6 +43,11 @@ public record GoalStep(Kind kind,
 
     public static GoalStep gather(Item item, int count) {
         return new GoalStep(Kind.GATHER, item, count, null, Set.of(), null, null, null, null);
+    }
+
+    /** Gather one exact block-item species instead of accepting its normal material family. */
+    public static GoalStep gatherExact(Item item, int count) {
+        return new GoalStep(Kind.GATHER_EXACT, item, count, null, Set.of(), null, null, null, null);
     }
 
     public static GoalStep mine(Block block, int count) {
@@ -129,6 +135,7 @@ public record GoalStep(Kind kind,
     public String describe() {
         return switch (kind) {
             case GATHER -> "采集 " + ItemNames.cn(item) + " ×" + count;
+            case GATHER_EXACT -> "精确采集 " + ItemNames.cn(item) + " ×" + count;
             case MINE -> "挖 " + ItemNames.cn(block) + " ×" + count;
             case MINE_ORE -> "采矿 " + ores.stream()
                     .map(ItemNames::cn)

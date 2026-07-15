@@ -1,6 +1,9 @@
 package io.github.greytaiwolf.fakeaiplayer.goal;
 
+import java.util.Locale;
 import java.util.Set;
+import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.level.block.Block;
 
@@ -54,7 +57,58 @@ public sealed interface Goal permits Goal.HaveItem, Goal.HavePickaxeTier, Goal.M
         }
     }
 
-    /** 盖房目标:按蓝图建造("盖房子"一句话全链:自动备料→建造),蓝图名如 small_hut/hut_5x5。 */
-    record Build(String blueprint) implements Goal {
+    /**
+     * 盖房目标:按蓝图建造("盖房子"一句话全链:自动备料→建造)。
+     *
+     * <p>{@code anchor} 与 {@code dimension} 固化用户确认过的世界位置，
+     * {@code blueprintDigest} 则把任务绑定到确认时审核过的规范化蓝图内容。旧命令和旧的
+     * 非 generated 存档仍可省略这些字段并让 {@code BuildTask} 自动选址；旧的 generated
+     * 任务若没有摘要会由执行器失败关闭，绝不按一个后来被替换的同名文件施工。</p>
+     */
+    record Build(String blueprint,
+                 BlockPos anchor,
+                 String dimension,
+                 String blueprintDigest) implements Goal {
+        public Build {
+            anchor = anchor == null ? null : anchor.immutable();
+            if (dimension == null || dimension.isBlank()) {
+                dimension = null;
+            } else {
+                ResourceLocation parsed = ResourceLocation.tryParse(dimension);
+                if (parsed == null) {
+                    throw new IllegalArgumentException("invalid_build_dimension: " + dimension);
+                }
+                dimension = parsed.toString();
+            }
+            if (blueprintDigest == null || blueprintDigest.isBlank()) {
+                blueprintDigest = null;
+            } else {
+                blueprintDigest = blueprintDigest.toLowerCase(Locale.ROOT);
+                if (!blueprintDigest.matches("[0-9a-f]{64}")) {
+                    throw new IllegalArgumentException("invalid_blueprint_digest");
+                }
+            }
+        }
+
+        public Build(String blueprint, BlockPos anchor, String dimension) {
+            this(blueprint, anchor, dimension, null);
+        }
+
+        public Build(String blueprint, BlockPos anchor) {
+            this(blueprint, anchor, null, null);
+        }
+
+        public Build(String blueprint) {
+            this(blueprint, null, null, null);
+        }
+
+        public boolean isGeneratedReference() {
+            return blueprint != null && blueprint.startsWith("generated_");
+        }
+
+        public boolean hasCompleteConfirmedBinding() {
+            return !isGeneratedReference()
+                    || anchor != null && dimension != null && blueprintDigest != null;
+        }
     }
 }

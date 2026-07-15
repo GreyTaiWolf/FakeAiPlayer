@@ -17,6 +17,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.function.ToIntFunction;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -525,27 +526,28 @@ public final class SmeltTask extends AbstractTask {
     }
 
     private static FuelChoice chooseFuel(AIPlayerEntity bot, int smeltCount) {
+        return chooseFuel(smeltCount, item -> InventoryAction.countItem(bot, item));
+    }
+
+    static FuelChoice chooseFuel(Map<Item, Integer> inventory, int smeltCount) {
+        return chooseFuel(smeltCount, item -> inventory.getOrDefault(item, 0));
+    }
+
+    private static FuelChoice chooseFuel(int smeltCount, ToIntFunction<Item> availableCount) {
         int ticksNeeded = smeltCount * 200;
-        FuelChoice partial = null; // 没有单一类型够全部时的"部分装填"候选(选能烧最久的那种)
+        // FUEL_TICKS is deliberately ordered from efficient fuel to fallback fuel. Always exhaust
+        // the first available class before moving on: returning a low-efficiency full batch while
+        // coal is partially available can burn logs reserved for a confirmed building. SmeltTask
+        // re-enters LOADING after a partial stack burns out, so mixed fuels remain supported.
         for (Map.Entry<Item, Integer> entry : FUEL_TICKS.entrySet()) {
-            int available = InventoryAction.countItem(bot, entry.getKey());
+            int available = availableCount.applyAsInt(entry.getKey());
             if (available <= 0) {
                 continue;
             }
             int needed = divideRoundUp(ticksNeeded, entry.getValue());
-            if (available >= needed) {
-                return new FuelChoice(entry.getKey(), needed); // 单一类型够全部 → 直接用
-            }
-            // 治本(real_armor out_of_fuel):熔 26 铁需 18 根同种木,但燃料常拆成 oak13+birch6,单种都不够→旧逻辑返 null
-            // 误判没燃料。其实熔炉烧完会重入 LOADING 再装下一种,故"有多少装多少"——选总热值最高的一种先装满,
-            // 余量靠重装填补齐。优先 available*ticks 最大者(烧最久、重装次数最少)。
-            if (partial == null
-                    || (long) available * entry.getValue()
-                       > (long) partial.count() * FUEL_TICKS.get(partial.item())) {
-                partial = new FuelChoice(entry.getKey(), available);
-            }
+            return new FuelChoice(entry.getKey(), Math.min(available, needed));
         }
-        return partial; // 全部装入部分燃料;彻底没任何燃料才 null
+        return null;
     }
 
     private static void fetchFuelFromBase(AIPlayerEntity bot, int smeltCount) {
@@ -605,6 +607,6 @@ public final class SmeltTask extends AbstractTask {
         return (value + divisor - 1) / divisor;
     }
 
-    private record FuelChoice(Item item, int count) {
+    record FuelChoice(Item item, int count) {
     }
 }

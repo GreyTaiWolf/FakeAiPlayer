@@ -1,12 +1,13 @@
 package io.github.greytaiwolf.fakeaiplayer.goal;
 
 import io.github.greytaiwolf.fakeaiplayer.action.MaterialPalette;
+import io.github.greytaiwolf.fakeaiplayer.building.plan.BlockStateResolver;
+import io.github.greytaiwolf.fakeaiplayer.building.plan.BlockStateSpec;
+import io.github.greytaiwolf.fakeaiplayer.building.plan.CellOperation;
 import io.github.greytaiwolf.fakeaiplayer.task.BlueprintSchema;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.level.block.Block;
 
 public final class StructureVerifier {
     private StructureVerifier() {
@@ -49,14 +50,23 @@ public final class StructureVerifier {
         }
         BlockPos pos = anchor.offset(placement.dx(), placement.dy(), placement.dz());
         var state = world.getBlockState(pos);
-        if ("minecraft:air".equals(placement.blockId())) {
+        // CLEAR is an operation, not a magic block ID. This also makes verification robust for
+        // legacy/serialized air variants while PRESERVE of a specific state still uses the exact
+        // state matcher below.
+        if (placement.operation() == CellOperation.CLEAR) {
             return state.isAir();
         }
         if (placement.palette() != null && !placement.palette().isBlank()) {
-            return MaterialPalette.matchesBlock(state, placement.palette());
+            return MaterialPalette.matchesBlock(state, placement.palette())
+                    && BlockStateResolver.matchesProperties(state, placement.properties());
         }
-        Block expected = BuiltInRegistries.BLOCK.getOptional(expectedId).orElse(null);
-        return expected != null && state.is(expected);
+        try {
+            return BlockStateResolver.matches(
+                    state,
+                    new BlockStateSpec(expectedId.toString(), placement.properties()));
+        } catch (IllegalArgumentException exception) {
+            return false;
+        }
     }
 
     private static String compact(BlockPos pos) {

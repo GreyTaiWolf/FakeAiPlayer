@@ -65,6 +65,19 @@ public final class GoalExecutor {
     }
 
     private boolean submit(AIPlayerEntity bot, Goal goal, RestoreSeed restore) {
+        BlueprintSchema verifiedBuildBlueprint = null;
+        if (goal instanceof Goal.Build build) {
+            try {
+                verifiedBuildBlueprint = validateAndLoadBuildGoal(bot, build);
+            } catch (IOException exception) {
+                BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.TASK, bot,
+                        "build_goal_binding_rejected",
+                        "blueprint", build.blueprint(),
+                        "reason", exception.getMessage(),
+                        "actual_dimension", bot.serverLevel().dimension().location());
+                return false;
+            }
+        }
         // GOALFIX-GF3:幂等——同一 bot 已有相同目标的活跃计划时,忽略重复 submit
         //(防大脑连点 mine_ore/achieve_goal 覆盖计划、打断进行中的步骤)。
         ActivePlan existing = activePlans.get(bot.getUUID());
@@ -103,7 +116,9 @@ public final class GoalExecutor {
         UUID missionId = restore == null ? UUID.randomUUID() : restore.missionId();
         int startedTick = restore == null ? bot.getServer().getTickCount() : restore.startedTick();
         GoalPredicate predicate = GoalPredicates.forGoal(goal);
-        GoalSnapshotCollector.Context context = restore == null ? initialContext(bot, goal) : restore.context();
+        GoalSnapshotCollector.Context context = restore == null
+                ? initialContext(bot, goal, verifiedBuildBlueprint)
+                : restore.context();
         GoalEvaluation initialEvaluation = predicate.evaluate(GoalSnapshotCollector.collect(bot, goal, context));
         if (initialEvaluation.state() == GoalEvaluation.State.SATISFIED) {
             queued.removeFirstOccurrence(goal);
@@ -154,10 +169,18 @@ public final class GoalExecutor {
     }
 
     public boolean tickBot(MinecraftServer server, AIPlayerEntity bot) {
+        ActivePlan plan = activePlans.get(bot.getUUID());
+        if (plan != null && plan.goal instanceof Goal.Build build
+                && build.dimension() != null
+                && !build.dimension().equals(bot.serverLevel().dimension().location().toString())) {
+            TaskManager.INSTANCE.cancelIntentTasks(bot, "confirmed_build_dimension_changed");
+            finishActive(bot, plan, evaluate(bot, plan),
+                    "confirmed_build_dimension_mismatch", false, false, GoalResult.Status.FAILED);
+            return false;
+        }
         if (TaskManager.INSTANCE.isUserPaused(bot)) {
             return hasActivePlan(bot) || queuedGoalCount(bot) > 0 || TaskManager.INSTANCE.hasPaused(bot);
         }
-        ActivePlan plan = activePlans.get(bot.getUUID());
         if (plan == null) {
             if (TaskManager.INSTANCE.getActive(bot).isEmpty()
                     && !TaskManager.INSTANCE.hasPaused(bot)
@@ -326,7 +349,16 @@ public final class GoalExecutor {
         if (activeRecord != null && activeRecord.spec() != null) {
             Optional<Goal> restored = activeRecord.spec().toGoal();
             if (restored.isPresent()) {
-                submit(bot, restored.get(), restoreSeed(bot, restored.get(), activeRecord));
+                try {
+                    // Recovery itself re-reads and verifies the persisted generated blueprint.
+                    // submit performs the same check again after seed construction, closing the
+                    // restore-time file replacement window.
+                    submit(bot, restored.get(), restoreSeed(bot, restored.get(), activeRecord));
+                } catch (IOException exception) {
+                    BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE, bot,
+                            "mission_restore_isolated", "type", activeRecord.spec().type(),
+                            "reason", exception.getMessage());
+                }
             } else if (restored.isEmpty()) {
                 BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE, bot,
                         "mission_restore_isolated", "type", activeRecord.spec().type(), "reason", "invalid_spec");
@@ -363,9 +395,11 @@ public final class GoalExecutor {
         return Map.copyOf(checkpoint);
     }
 
-    private static RestoreSeed restoreSeed(AIPlayerEntity bot, Goal goal, MissionRecord record) {
+    private static RestoreSeed restoreSeed(AIPlayerEntity bot,
+                                           Goal goal,
+                                           MissionRecord record) throws IOException {
         Map<String, String> checkpoint = record.checkpoint() == null ? Map.of() : record.checkpoint();
-        GoalSnapshotCollector.Context fallback = initialContext(bot, goal);
+        GoalSnapshotCollector.Context fallback = initialContext(bot, goal, null);
         BlockPos origin = decodePos(checkpoint.get("origin")).orElse(fallback.origin());
         Set<BlockPos> containers = new HashSet<>();
         String encodedContainers = checkpoint.get("containers");
@@ -374,15 +408,15 @@ public final class GoalExecutor {
                 decodePos(encoded).ifPresent(containers::add);
             }
         }
-        BlockPos buildAnchor = decodePos(checkpoint.get("build_anchor")).orElse(null);
+        // A confirmation-time anchor carried by Goal.Build is authoritative. The checkpoint
+        // anchor remains the recovery path for legacy auto-site builds that discovered their
+        // location only after BuildTask started.
+        BlockPos buildAnchor = goal instanceof Goal.Build build && build.anchor() != null
+                ? build.anchor()
+                : decodePos(checkpoint.get("build_anchor")).orElse(fallback.buildAnchor());
         BlueprintSchema blueprint = null;
         if (goal instanceof Goal.Build build && buildAnchor != null) {
-            try {
-                blueprint = BlueprintLoader.load(build.blueprint());
-            } catch (IOException exception) {
-                BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE, bot,
-                        "mission_checkpoint_blueprint_missing", "blueprint", build.blueprint());
-            }
+            blueprint = validateAndLoadBuildGoal(bot, build);
         }
         GoalSnapshotCollector.Context context = new GoalSnapshotCollector.Context(
                 origin, containers, blueprint, buildAnchor,
@@ -687,6 +721,7 @@ public final class GoalExecutor {
     private static Optional<Task> stepToTask(AIPlayerEntity bot, GoalStep step, ActivePlan plan) {
         return switch (step.kind()) {
             case GATHER -> Optional.of(new GatherQuotaTask(step.item(), step.count()));
+            case GATHER_EXACT -> Optional.of(new GatherQuotaTask(step.item(), step.count(), true));
             // DIGDOWN(实测#8):MINE 步改用 DigDownTask——站着就近垂直下挖,不定位/不寻路,
             // 永不"够不到/走不过去"空转。取代旧的 OreSeekTask.digBlocks(它会锁定垂直够不到的石头 stuck)。
             case MINE -> Optional.of(new DigDownTask(step.block(), step.count()));
@@ -717,9 +752,18 @@ public final class GoalExecutor {
             // flatten=true:真实地形罕有现成平地,lenient 选址选最平点 + FLATTEN 挖高填低整平(治 real_build no_flat_site)。
             case BUILD -> {
                 try {
+                    if (!(plan.goal instanceof Goal.Build build)
+                            || !build.blueprint().equals(step.tag())) {
+                        yield Optional.empty();
+                    }
                     BlockPos anchor = plan.buildAnchor;
                     yield Optional.of(new BuildTask(
-                            BlueprintLoader.load(step.tag()), anchor, anchor == null, anchor == null));
+                            loadBuildBlueprint(build),
+                            anchor,
+                            anchor == null,
+                            anchor == null,
+                            build.blueprintDigest(),
+                            build.dimension()));
                 } catch (IOException e) {
                     yield Optional.empty();
                 }
@@ -756,7 +800,13 @@ public final class GoalExecutor {
         }
     }
 
-    private static GoalSnapshotCollector.Context initialContext(AIPlayerEntity bot, Goal goal) {
+    private static GoalSnapshotCollector.Context initialContext(AIPlayerEntity bot,
+                                                                Goal goal,
+                                                                BlueprintSchema verifiedBlueprint) {
+        if (goal instanceof Goal.Build build && build.anchor() != null) {
+            return new GoalSnapshotCollector.Context(
+                    build.anchor(), Set.of(), verifiedBlueprint, build.anchor(), 0, 0);
+        }
         if (goal instanceof Goal.Stockpile) {
             net.minecraft.core.BlockPos base = io.github.greytaiwolf.fakeaiplayer.memory.BotMemoryStore.INSTANCE
                     .of(bot.getUUID())
@@ -765,6 +815,31 @@ public final class GoalExecutor {
             return GoalSnapshotCollector.Context.at(base);
         }
         return GoalSnapshotCollector.Context.at(bot.blockPosition());
+    }
+
+    private static BlueprintSchema validateAndLoadBuildGoal(AIPlayerEntity bot,
+                                                            Goal.Build build) throws IOException {
+        boolean generated = build.isGeneratedReference();
+        if (generated && !BlueprintLoader.isGeneratedName(build.blueprint())) {
+            throw new IOException("generated_blueprint_name_invalid");
+        }
+        if (generated && !build.hasCompleteConfirmedBinding()) {
+            // Old mission JSON still decodes so the rest of the snapshot remains compatible, but
+            // its generated file is not trusted without the confirmation-time content binding.
+            throw new IOException("generated_blueprint_binding_incomplete");
+        }
+        if (build.dimension() != null
+                && !build.dimension().equals(bot.serverLevel().dimension().location().toString())) {
+            throw new IOException("build_goal_wrong_dimension: expected=" + build.dimension()
+                    + " actual=" + bot.serverLevel().dimension().location());
+        }
+        return loadBuildBlueprint(build);
+    }
+
+    private static BlueprintSchema loadBuildBlueprint(Goal.Build build) throws IOException {
+        return build.blueprintDigest() == null
+                ? BlueprintLoader.load(build.blueprint())
+                : BlueprintLoader.loadVerified(build.blueprint(), build.blueprintDigest());
     }
 
     private void finishActive(AIPlayerEntity bot,

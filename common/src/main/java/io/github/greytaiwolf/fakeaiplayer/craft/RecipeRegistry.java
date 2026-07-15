@@ -92,6 +92,10 @@ public final class RecipeRegistry {
         put(new Recipe(Items.FURNACE, 1, List.of(new Ingredient(STONE_LIKE, 8)), true));
         put(new Recipe(Items.CHEST, 1, List.of(new Ingredient(PLANKS, 8)), true));
         put(new Recipe(Items.LADDER, 3, List.of(new Ingredient(STICKS, 7)), true));
+        // 内置建筑风格的确定性木构件链。运行时配方索引也能发现它们，但建筑
+        // 确认后应能立即倒推备料，不应依赖索引初始化时序。用量/产量与 vanilla 一致。
+        woodenBuildingParts(Items.OAK_PLANKS, Items.OAK_DOOR, Items.OAK_STAIRS);
+        woodenBuildingParts(Items.SPRUCE_PLANKS, Items.SPRUCE_DOOR, Items.SPRUCE_STAIRS);
 
         tool(Items.WOODEN_PICKAXE, PLANKS, 3);
         tool(Items.STONE_PICKAXE, STONE_LIKE, 3);
@@ -150,6 +154,11 @@ public final class RecipeRegistry {
 
     private static void tool(Item output, List<Item> head, int headCount) {
         put(new Recipe(output, 1, List.of(new Ingredient(head, headCount), new Ingredient(STICKS, 2)), true));
+    }
+
+    private static void woodenBuildingParts(Item planks, Item door, Item stairs) {
+        put(new Recipe(door, 3, List.of(new Ingredient(List.of(planks), 6)), true));
+        put(new Recipe(stairs, 4, List.of(new Ingredient(List.of(planks), 6)), true));
     }
 
     private static void sword(Item output, List<Item> head, int headCount) {

@@ -49,6 +49,7 @@ public final class AIBotCommand {
                 .then(AIBotObserveSubcommand.replay())
                 .then(AIBotObserveSubcommand.tps())
                 .then(AIBotTaskSubcommand.build())
+                .then(AIBotBuildingSubcommand.build())
                 .then(AIBotDeplintSubcommand.build())
                 .then(AIBotSnapshotSubcommand.build()));
     }

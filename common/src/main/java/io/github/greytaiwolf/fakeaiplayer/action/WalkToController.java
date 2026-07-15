@@ -19,6 +19,7 @@ public final class WalkToController {
     private static final int SIDLE_STEP_TICKS = 8;
 
     private final Vec3 target;
+    private final BlockPos requiredArrivalColumn;
     private Vec3 lastPos;
     private int noProgressTicks;
     private int hardStuckTicks;
@@ -26,7 +27,18 @@ public final class WalkToController {
     private int elapsed;
 
     public WalkToController(Vec3 target) {
+        this(target, null);
+    }
+
+    /**
+     * @param requiredArrivalColumn optional final path column; when present, the ordinary
+     *                              0.6-block tolerance cannot complete from an adjacent cell
+     */
+    public WalkToController(Vec3 target, BlockPos requiredArrivalColumn) {
         this.target = target;
+        this.requiredArrivalColumn = requiredArrivalColumn == null
+                ? null
+                : requiredArrivalColumn.immutable();
     }
 
     public ActionResult tick(ActionPack pack) {
@@ -43,9 +55,13 @@ public final class WalkToController {
         double dx = target.x - current.x;
         double dz = target.z - current.z;
         double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
-        if (horizontalDistance <= ARRIVAL_THRESHOLD) {
+        if (horizontalDistance <= ARRIVAL_THRESHOLD && hasReachedRequiredColumn(player.blockPosition())) {
             pack.stopMovement();
             return ActionResult.SUCCESS;
+        }
+        if (horizontalDistance < 1.0E-6D) {
+            pack.stopMovement();
+            return ActionResult.failed("arrival_column_height_mismatch");
         }
 
         Vec3 move = new Vec3(dx / horizontalDistance, 0.0D, dz / horizontalDistance);
@@ -92,6 +108,13 @@ public final class WalkToController {
             return ActionResult.failed("stuck_blocked");
         }
         return ActionResult.IN_PROGRESS;
+    }
+
+    private boolean hasReachedRequiredColumn(BlockPos current) {
+        return requiredArrivalColumn == null
+                || current.getX() == requiredArrivalColumn.getX()
+                        && current.getZ() == requiredArrivalColumn.getZ()
+                        && Math.abs(current.getY() - requiredArrivalColumn.getY()) <= 1;
     }
 
     private SidleCommand sidleCommand(Vec3 move, AIBotConfig.Nav nav) {

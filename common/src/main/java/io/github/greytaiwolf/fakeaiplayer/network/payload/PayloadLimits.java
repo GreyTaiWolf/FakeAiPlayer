@@ -1,6 +1,7 @@
 package io.github.greytaiwolf.fakeaiplayer.network.payload;
 
 import io.netty.handler.codec.DecoderException;
+import java.nio.charset.StandardCharsets;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 
 /**
@@ -27,11 +28,22 @@ public final class PayloadLimits {
     public static final int PROFILE_LENGTH = 64;
     public static final int CAPABILITY_LENGTH = 64;
     public static final int ITEM_ID_LENGTH = 256;
+    public static final int PREVIEW_PLAN_ID_LENGTH = 160;
+    public static final int PREVIEW_HASH_LENGTH = 64;
+    public static final int PREVIEW_DIMENSION_LENGTH = 256;
+    public static final int PREVIEW_REASON_LENGTH = 512;
+    public static final int BLOCK_PROPERTY_LENGTH = 64;
 
     public static final int MAX_GOAL_STEPS = 64;
     public static final int MAX_CAPABILITIES = 64;
     public static final int MAX_INVENTORY_ENTRIES = 64;
     public static final int MAX_EQUIPMENT_ENTRIES = 6;
+    public static final int MAX_PREVIEW_PLACEMENTS = 4_096;
+    public static final int MAX_PREVIEW_PALETTE = 256;
+    public static final int MAX_PREVIEW_PROPERTIES = 16;
+    public static final int MAX_PREVIEW_CHUNK_CELLS = 256;
+    public static final int MAX_PREVIEW_CHUNKS = 16;
+    public static final int MAX_PREVIEW_BEGIN_BYTES = 256 * 1_024;
 
     public static final int MAX_COMMAND_COUNT = 4_096;
     public static final int MAX_INVENTORY_SLOT = 63;
@@ -58,6 +70,31 @@ public final class PayloadLimits {
 
     public static boolean validBotName(String value) {
         return value != null && !value.isBlank() && value.length() <= BOT_NAME_LENGTH;
+    }
+
+    public static void requireUtf(String value, int maximumLength, String field) {
+        if (value == null || value.length() > maximumLength) {
+            throw new IllegalArgumentException(field + " length is outside 0.." + maximumLength);
+        }
+    }
+
+    /** Conservative encoded size: UTF-8 bytes plus the maximum five-byte VarInt prefix. */
+    public static int estimatedUtfBytes(String value) {
+        return 5 + (value == null ? 0 : value.getBytes(StandardCharsets.UTF_8).length);
+    }
+
+    public static boolean validSha256Hex(String value) {
+        if (value == null || value.length() != PREVIEW_HASH_LENGTH) {
+            return false;
+        }
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if (!((character >= '0' && character <= '9')
+                    || (character >= 'a' && character <= 'f'))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Bounds dynamic server-generated text without splitting a UTF-16 surrogate pair. */

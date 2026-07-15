@@ -20,5 +20,7 @@ public final class NeoForgeClientSetup {
     private static void registerKeys(RegisterKeyMappingsEvent event) {
         event.register(AIBotKeyBindings.openPanel());
         event.register(AIBotKeyBindings.openActions());
+        event.register(AIBotKeyBindings.confirmBuildingPreview());
+        event.register(AIBotKeyBindings.cancelBuildingPreview());
     }
 }

@@ -63,6 +63,7 @@ public final class GatherQuotaTask extends AbstractTask {
 
     private final Item targetItem;
     private final int targetCount;
+    private final boolean exactItem;
     // Fix C:目标是原木时,接受/采集**任意**树种(生物群系不一定有橡木)。进度按整族原木总数计。
     private final Set<Item> acceptItems;
     private final Set<Block> harvestBlocks;
@@ -70,6 +71,7 @@ public final class GatherQuotaTask extends AbstractTask {
     private Phase phase = Phase.SURVEY;
     private BlockPos targetPos;
     private int countSoFar;
+    private int acceptedBaseline;
     private int countBeforeHarvest;
     private int pickupTicks;
     private int pickupMisses; // 连续"砍了但没捡到掉落物"的次数,超限才判 pickup_timeout(避免一棵没捡到就整个采集失败)
@@ -106,9 +108,17 @@ public final class GatherQuotaTask extends AbstractTask {
     private int gotoStuckTick;
 
     public GatherQuotaTask(Item targetItem, int targetCount) {
+        this(targetItem, targetCount, false);
+    }
+
+    /**
+     * @param exactItem when true, do not widen a requested log to the all-log family
+     */
+    public GatherQuotaTask(Item targetItem, int targetCount, boolean exactItem) {
         this.targetItem = targetItem;
         this.targetCount = Math.max(1, targetCount);
-        this.acceptItems = acceptItemsFor(targetItem);
+        this.exactItem = exactItem;
+        this.acceptItems = acceptItemsFor(targetItem, exactItem);
         this.harvestBlocks = harvestBlocksFor(this.acceptItems);
         this.probabilisticDrop = harvestBlocks.contains(Blocks.SHORT_GRASS)
                 || harvestBlocks.contains(Blocks.SWEET_BERRY_BUSH);
@@ -140,7 +150,12 @@ public final class GatherQuotaTask extends AbstractTask {
 
     @Override
     protected void onStart(AIPlayerEntity bot) {
-        countSoFar = countAccepted(bot);
+        // Legacy tasks interpret count as an absolute inventory quota. GATHER_EXACT is emitted by
+        // the planner as a missing amount, so it tracks a delta from this task's immutable start
+        // baseline; otherwise a bot holding 2/5 required logs would gather only one of the three
+        // missing logs and stop at an absolute count of 3.
+        acceptedBaseline = exactItem ? countAccepted(bot) : 0;
+        countSoFar = progressCount(bot);
         phase = countSoFar >= targetCount ? Phase.DONE : Phase.SURVEY;
         stockpileTask = null;
     }
@@ -149,7 +164,7 @@ public final class GatherQuotaTask extends AbstractTask {
     protected void onTick(AIPlayerEntity bot) {
         // 工作记忆:记录走过的轨迹(4 格去抖),roam 选点避开已搜过的区域(不再盲目转圈)。
         EpisodeMemory.INSTANCE.recordTrail(bot.getUUID(), bot.blockPosition());
-        countSoFar = countAccepted(bot);
+        countSoFar = progressCount(bot);
         if (countSoFar >= targetCount) {
             phase = Phase.DONE;
         }
@@ -747,7 +762,7 @@ public final class GatherQuotaTask extends AbstractTask {
 
     private void pickup(AIPlayerEntity bot) {
         HarvestCore.forcePickupNearbyAnyOf(bot, acceptItems);
-        countSoFar = countAccepted(bot);
+        countSoFar = progressCount(bot);
         if (countSoFar > countBeforeHarvest) {
             phase = countSoFar >= targetCount ? Phase.DONE : Phase.SURVEY;
             return;
@@ -761,7 +776,7 @@ public final class GatherQuotaTask extends AbstractTask {
                 pickupTicks = 60;
                 return;
             }
-            countSoFar = countAccepted(bot);
+            countSoFar = progressCount(bot);
             if (countSoFar > countBeforeHarvest) {
                 pickupMisses = 0;
                 phase = countSoFar >= targetCount ? Phase.DONE : Phase.SURVEY;
@@ -803,7 +818,7 @@ public final class GatherQuotaTask extends AbstractTask {
     }
 
     private void startHarvest(AIPlayerEntity bot) {
-        countBeforeHarvest = countAccepted(bot);
+        countBeforeHarvest = progressCount(bot);
         pickupSweepAttempted = false;
         HarvestCore.startMining(bot, targetPos);
         phase = Phase.HARVEST;
@@ -813,6 +828,14 @@ public final class GatherQuotaTask extends AbstractTask {
         return HarvestCore.countInventoryItems(bot, acceptItems);
     }
 
+    private int progressCount(AIPlayerEntity bot) {
+        return progressFromAbsolute(exactItem, acceptedBaseline, countAccepted(bot));
+    }
+
+    static int progressFromAbsolute(boolean exactItem, int baseline, int absoluteCount) {
+        return exactItem ? Math.max(0, absoluteCount - baseline) : Math.max(0, absoluteCount);
+    }
+
     private boolean isHarvestBlock(AIPlayerEntity bot, BlockPos pos) {
         return harvestBlocks.contains(bot.serverLevel().getBlockState(pos).getBlock());
     }
@@ -820,7 +843,10 @@ public final class GatherQuotaTask extends AbstractTask {
     // 觅食野食族:浆果 / 西瓜片(都是野生即取、可直接吃);采任一凑数(哪个近采哪个)。
     private static final Set<Item> FORAGE_FOODS = Set.of(Items.SWEET_BERRIES, Items.MELON_SLICE);
 
-    private static Set<Item> acceptItemsFor(Item item) {
+    static Set<Item> acceptItemsFor(Item item, boolean exactItem) {
+        if (exactItem) {
+            return Set.of(item);
+        }
         // 原木:接受任意树种(配方下游 planks/stick/工具都接受任意 planks 家族)。
         if (RecipeRegistry.LOGS.contains(item)) {
             return Set.copyOf(RecipeRegistry.LOGS);

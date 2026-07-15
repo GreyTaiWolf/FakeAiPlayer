@@ -1,7 +1,13 @@
 package io.github.greytaiwolf.fakeaiplayer.task;
 
+import io.github.greytaiwolf.fakeaiplayer.building.plan.CellOperation;
+import io.github.greytaiwolf.fakeaiplayer.building.plan.ReplacePolicy;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 
 public record BlueprintSchema(
         String name,
@@ -11,13 +17,121 @@ public record BlueprintSchema(
         List<BlockPlacement> placements,
         List<Op> ops
 ) {
-    public record BlockPlacement(int dx, int dy, int dz, String blockId, String palette) {
+    /**
+     * One ordered executor cell. The final five fields carry the reviewed V2 plan semantics into
+     * the legacy task/persistence format; their defaults keep old JSON blueprints compatible.
+     *
+     * <p>{@code sequence} is nullable only for legacy blueprints. Once one expanded cell has a
+     * sequence, {@link BlueprintLoader} requires every cell to have a unique sequence so a saved
+     * dependency order can never silently fall back to coordinate sorting.</p>
+     */
+    public record BlockPlacement(
+            int dx,
+            int dy,
+            int dz,
+            String blockId,
+            String palette,
+            Map<String, String> properties,
+            CellOperation operation,
+            ReplacePolicy replacePolicy,
+            String atomicGroup,
+            Integer sequence,
+            List<Integer> prerequisites
+    ) {
+        public BlockPlacement {
+            TreeMap<String, String> normalized = new TreeMap<>();
+            if (properties != null) {
+                normalized.putAll(properties);
+            }
+            properties = Collections.unmodifiableMap(normalized);
+            boolean air = "minecraft:air".equals(blockId);
+            operation = operation == null ? air ? CellOperation.CLEAR : CellOperation.PLACE : operation;
+            replacePolicy = replacePolicy == null
+                    ? operation == CellOperation.CLEAR
+                            ? ReplacePolicy.CLEAR_AUTHORIZED
+                            : operation == CellOperation.PRESERVE
+                                    ? ReplacePolicy.PRESERVE_EXISTING
+                                    : ReplacePolicy.REPLACE_REPLACEABLE
+                    : replacePolicy;
+            atomicGroup = atomicGroup == null ? "" : atomicGroup.strip();
+            if (sequence != null && sequence < 0) {
+                throw new IllegalArgumentException("blueprint_sequence_negative");
+            }
+            LinkedHashSet<Integer> normalizedPrerequisites = new LinkedHashSet<>();
+            if (prerequisites != null) {
+                for (Integer prerequisite : prerequisites) {
+                    if (prerequisite == null || prerequisite < 0) {
+                        throw new IllegalArgumentException("blueprint_prerequisite_negative");
+                    }
+                    if (!normalizedPrerequisites.add(prerequisite)) {
+                        throw new IllegalArgumentException("blueprint_prerequisite_duplicate");
+                    }
+                }
+            }
+            prerequisites = List.copyOf(normalizedPrerequisites);
+        }
+
+        public BlockPlacement(int dx,
+                              int dy,
+                              int dz,
+                              String blockId,
+                              String palette,
+                              Map<String, String> properties,
+                              CellOperation operation,
+                              ReplacePolicy replacePolicy,
+                              String atomicGroup,
+                              Integer sequence) {
+            this(dx, dy, dz, blockId, palette, properties, operation, replacePolicy,
+                    atomicGroup, sequence, List.of());
+        }
+
+        public BlockPlacement(int dx,
+                              int dy,
+                              int dz,
+                              String blockId,
+                              String palette,
+                              Map<String, String> properties) {
+            this(dx, dy, dz, blockId, palette, properties, null, null, "", null, List.of());
+        }
+
+        public BlockPlacement(int dx, int dy, int dz, String blockId, String palette) {
+            this(dx, dy, dz, blockId, palette, Map.of(), null, null, "", null);
+        }
+
         public BlockPlacement(int dx, int dy, int dz, String blockId) {
-            this(dx, dy, dz, blockId, null);
+            this(dx, dy, dz, blockId, null, Map.of(), null, null, "", null);
         }
     }
 
-    public record Op(String type, int[] from, int[] to, String block, String palette) {
+    public record Op(
+            String type,
+            int[] from,
+            int[] to,
+            String block,
+            String palette,
+            Map<String, String> properties
+    ) {
+        public Op {
+            from = from == null ? null : from.clone();
+            to = to == null ? null : to.clone();
+            TreeMap<String, String> normalized = new TreeMap<>();
+            if (properties != null) {
+                normalized.putAll(properties);
+            }
+            properties = Collections.unmodifiableMap(normalized);
+        }
+
+        public Op(String type, int[] from, int[] to, String block, String palette) {
+            this(type, from, to, block, palette, Map.of());
+        }
+
+        public int[] from() {
+            return from == null ? null : from.clone();
+        }
+
+        public int[] to() {
+            return to == null ? null : to.clone();
+        }
     }
 
     public static BlueprintSchema hut5x5() {
@@ -78,7 +192,16 @@ public record BlueprintSchema(
             int w = Math.max(3, Math.min(16, Integer.parseInt(dims[0].trim())));
             int d = Math.max(3, Math.min(16, Integer.parseInt(dims[1].trim())));
             int h = Math.max(2, Math.min(8, Integer.parseInt(dims[2].trim())));
-            String palette = parts.length >= 3 && !parts[2].isBlank() ? parts[2].trim() : "planks";
+            String requestedPalette = parts.length >= 3 && !parts[2].isBlank()
+                    ? parts[2].trim()
+                    : "planks";
+            String palette = switch (requestedPalette) {
+                case "planks", "logs", "stone_like", "dirt_like", "glass" -> requestedPalette;
+                case "wood", "oak" -> "planks";
+                case "stone" -> "stone_like";
+                case "dirt" -> "dirt_like";
+                default -> "planks";
+            };
             int doorX = w / 2; // 正面(z=0)居中门洞,2 格高
             List<BlockPlacement> door = List.of(
                     new BlockPlacement(doorX, 1, 0, "minecraft:air"),
