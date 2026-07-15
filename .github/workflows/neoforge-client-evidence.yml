@@ -1,0 +1,456 @@
+name: NeoForge client visual evidence
+
+on:
+  push:
+    branches:
+      - agent/neoforge-client-visual-evidence
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neoforge-client-visual-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  visual-evidence:
+    name: Launch NeoForge client and capture gameplay evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install virtual desktop tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb x11-utils xdotool openbox imagemagick
+
+      - name: Build NeoForge production jar
+        run: ./gradlew --no-daemon --console=plain :common:test :neoforge:build
+
+      - name: Launch server and client, exercise visible features, and capture screenshots
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          evidence="$GITHUB_WORKSPACE/artifacts/neoforge-client-evidence"
+          shots="$evidence/screenshots"
+          logs="$evidence/logs"
+          mkdir -p "$shots" "$logs" neoforge/run/client neoforge/run/server
+
+          server_pid=""
+          client_pid=""
+          xvfb_pid=""
+          openbox_pid=""
+          fifo=""
+          fd_open=0
+
+          cleanup() {
+            set +e
+            if [[ $fd_open -eq 1 ]]; then
+              printf 'stop\n' >&9
+              exec 9>&-
+              exec 9<&-
+            fi
+            [[ -z "$client_pid" ]] || kill "$client_pid" 2>/dev/null || true
+            [[ -z "$server_pid" ]] || kill "$server_pid" 2>/dev/null || true
+            [[ -z "$openbox_pid" ]] || kill "$openbox_pid" 2>/dev/null || true
+            [[ -z "$xvfb_pid" ]] || kill "$xvfb_pid" 2>/dev/null || true
+            [[ -z "$fifo" ]] || rm -f "$fifo"
+          }
+          trap cleanup EXIT
+
+          cat > neoforge/run/client/options.txt <<'EOF'
+          guiScale:2
+          lang:zh_cn
+          fullscreen:false
+          graphicsMode:0
+          renderDistance:8
+          simulationDistance:5
+          entityDistanceScaling:1.0
+          maxFps:60
+          enableVsync:false
+          narrator:0
+          darkMojangStudiosBackground:true
+          skipMultiplayerWarning:true
+          EOF
+
+          cat > neoforge/run/server/server.properties <<'EOF'
+          allow-flight=true
+          difficulty=easy
+          enable-command-block=false
+          enable-query=false
+          enable-rcon=false
+          enable-status=true
+          enforce-secure-profile=false
+          force-gamemode=false
+          gamemode=survival
+          generate-structures=true
+          level-name=world
+          level-seed=20260715
+          max-players=8
+          max-tick-time=120000
+          motd=FakeAiPlayer NeoForge visual evidence
+          online-mode=false
+          pause-when-empty-seconds=-1
+          player-idle-timeout=0
+          server-ip=127.0.0.1
+          server-port=25566
+          simulation-distance=6
+          spawn-protection=0
+          sync-chunk-writes=true
+          view-distance=8
+          white-list=false
+          EOF
+          printf 'eula=true\n' > neoforge/run/server/eula.txt
+
+          export DISPLAY=:99
+          export LIBGL_ALWAYS_SOFTWARE=1
+          export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
+          export __GLX_VENDOR_LIBRARY_NAME=mesa
+          Xvfb :99 -screen 0 1600x900x24 -ac +extension GLX +render -noreset >"$logs/xvfb.log" 2>&1 &
+          xvfb_pid=$!
+          for _ in $(seq 1 50); do
+            xdpyinfo -display :99 >/dev/null 2>&1 && break
+            sleep 0.2
+          done
+          openbox >"$logs/openbox.log" 2>&1 &
+          openbox_pid=$!
+
+          fifo="$(mktemp -u /tmp/fakeaiplayer-neoforge-server.XXXXXX)"
+          mkfifo "$fifo"
+          exec 9<>"$fifo"
+          fd_open=1
+
+          ./gradlew --no-daemon --console=plain :neoforge:runServer <&9 >"$logs/server-console.log" 2>&1 &
+          server_pid=$!
+          ready=0
+          for _ in $(seq 1 720); do
+            if grep -q 'Done (' "$logs/server-console.log"; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo 'NeoForge server exited before becoming ready' >&2
+              tail -120 "$logs/server-console.log" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          [[ $ready -eq 1 ]] || { echo 'NeoForge server startup timed out' >&2; exit 1; }
+
+          ./gradlew --no-daemon --console=plain :neoforge:runClient \
+            --args='--username GreyTaiWolf --quickPlayMultiplayer 127.0.0.1:25566 --width 1600 --height 900' \
+            >"$logs/client-console.log" 2>&1 &
+          client_pid=$!
+
+          joined=0
+          for _ in $(seq 1 720); do
+            if grep -qE 'GreyTaiWolf.*joined the game|GreyTaiWolf.*logged in' "$logs/server-console.log"; then
+              joined=1
+              break
+            fi
+            if ! kill -0 "$client_pid" 2>/dev/null; then
+              echo 'NeoForge client exited before joining' >&2
+              tail -160 "$logs/client-console.log" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          [[ $joined -eq 1 ]] || { echo 'NeoForge client did not join in time' >&2; exit 1; }
+
+          window=""
+          for _ in $(seq 1 120); do
+            window="$(xdotool search --onlyvisible --name 'Minecraft' 2>/dev/null | tail -1 || true)"
+            [[ -n "$window" ]] && break
+            sleep 1
+          done
+          [[ -n "$window" ]] || { echo 'Minecraft window was not found' >&2; exit 1; }
+          xdotool windowactivate --sync "$window"
+
+          server_cmd() {
+            printf '%s\n' "$*" >&9
+            printf '%s\t%s\n' "$(date -u +%FT%TZ)" "$*" >> "$logs/commands.tsv"
+            sleep 0.6
+          }
+
+          as_player() {
+            server_cmd "execute as GreyTaiWolf at @s run $*"
+          }
+
+          wait_for_log() {
+            local pattern="$1"
+            local seconds="${2:-60}"
+            for _ in $(seq 1 "$seconds"); do
+              grep -qE "$pattern" "$logs/server-console.log" && return 0
+              sleep 1
+            done
+            return 1
+          }
+
+          press_combo() {
+            local first="$1"
+            local second="$2"
+            xdotool windowactivate --sync "$window"
+            xdotool keydown "$first"
+            sleep 0.25
+            xdotool keydown "$second"
+            sleep 0.35
+            xdotool keyup "$second"
+            xdotool keyup "$first"
+            sleep 1
+          }
+
+          capture() {
+            local name="$1"
+            xdotool windowactivate --sync "$window"
+            sleep 1
+            if ! import -window "$window" "$shots/$name.png" 2>>"$logs/capture.log"; then
+              import -window root "$shots/$name.png" 2>>"$logs/capture.log"
+            fi
+            identify "$shots/$name.png" >> "$logs/capture.log"
+          }
+
+          close_screen() {
+            xdotool windowactivate --sync "$window"
+            xdotool key Escape
+            sleep 1
+          }
+
+          # Stable, daylight test arena with a dry foundation for the projection validator.
+          server_cmd 'op GreyTaiWolf'
+          server_cmd 'gamerule doDaylightCycle false'
+          server_cmd 'gamerule doWeatherCycle false'
+          server_cmd 'gamerule keepInventory true'
+          server_cmd 'time set day'
+          server_cmd 'weather clear'
+          server_cmd 'difficulty easy'
+          server_cmd 'fill -24 90 -24 24 102 24 minecraft:air'
+          server_cmd 'fill -24 99 -24 24 99 24 minecraft:grass_block'
+          server_cmd 'tp GreyTaiWolf 0 100 -10 0 8'
+          server_cmd 'gamemode survival GreyTaiWolf'
+          sleep 3
+          capture '01_neoforge_world_loaded'
+
+          # Lifecycle, owner binding, role, and player-list integration.
+          as_player 'fakeaiplayer spawn TestBot builder'
+          wait_for_log 'Spawned TestBot|Fake player TestBot|TestBot.*joined' 60 || true
+          as_player 'fakeaiplayer list'
+          server_cmd 'tp TestBot 0 100 2 180 0'
+          server_cmd 'tp GreyTaiWolf 0 100 -8 0 5'
+          sleep 3
+          capture '02_bot_spawn_and_lifecycle'
+
+          # Client status/chat panel and live bot snapshot.
+          press_combo alt 0
+          sleep 3
+          capture '03_status_and_chat_panel'
+
+          # Goal view, then inventory view with real item snapshots.
+          xdotool mousemove 1260 46 click 1
+          sleep 2
+          capture '04_goal_execution_panel'
+          xdotool mousemove 1260 46 click 1
+          close_screen
+          server_cmd 'give TestBot minecraft:iron_pickaxe 1'
+          server_cmd 'give TestBot minecraft:diamond_sword 1'
+          server_cmd 'give TestBot minecraft:bread 8'
+          server_cmd 'give TestBot minecraft:torch 32'
+          server_cmd 'give GreyTaiWolf minecraft:oak_log 16'
+          press_combo alt 0
+          xdotool mousemove 1348 46 click 1
+          sleep 3
+          capture '05_interactive_inventory_panel'
+
+          # Settings/capability panel and deterministic quick-action panel.
+          xdotool mousemove 1436 46 click 1
+          sleep 2
+          capture '06_settings_and_capabilities'
+          close_screen
+          press_combo alt 9
+          sleep 2
+          capture '07_quick_actions_panel'
+          close_screen
+
+          # Navigation with a visible Goal chain, plus pause/resume semantics.
+          as_player 'fakeaiplayer task assign TestBot move 14 100 0'
+          sleep 2
+          as_player 'fakeaiplayer task pause TestBot'
+          press_combo alt 0
+          xdotool mousemove 1260 46 click 1
+          sleep 2
+          capture '08_navigation_goal_paused'
+          close_screen
+          as_player 'fakeaiplayer task resume TestBot'
+          sleep 12
+          as_player 'fakeaiplayer task status TestBot'
+          server_cmd 'tp GreyTaiWolf 14 102 -10 0 10'
+          sleep 2
+          capture '09_navigation_completed'
+
+          # Combat response against real hostile mobs.
+          as_player 'fakeaiplayer task abort TestBot'
+          server_cmd 'tp TestBot 10 100 10 0 0'
+          server_cmd 'tp GreyTaiWolf 10 103 0 0 12'
+          server_cmd 'summon minecraft:husk 10 100 15'
+          server_cmd 'summon minecraft:husk 13 100 15'
+          server_cmd 'summon minecraft:husk 7 100 15'
+          as_player 'fakeaiplayer task assign TestBot attack minecraft:husk 3'
+          sleep 4
+          capture '10_combat_task'
+          sleep 12
+          as_player 'fakeaiplayer task status TestBot'
+
+          # Mining a real ore cluster with normal tools and drops.
+          as_player 'fakeaiplayer task abort TestBot'
+          server_cmd 'kill @e[type=minecraft:husk]'
+          server_cmd 'tp TestBot -14 100 0 -90 0'
+          server_cmd 'tp GreyTaiWolf -20 103 0 -90 10'
+          server_cmd 'fill -9 100 -1 -7 101 1 minecraft:stone'
+          server_cmd 'setblock -9 100 0 minecraft:diamond_ore'
+          server_cmd 'setblock -8 100 0 minecraft:diamond_ore'
+          server_cmd 'setblock -8 101 0 minecraft:diamond_ore'
+          as_player 'fakeaiplayer task assign TestBot mine minecraft:diamond_ore 3'
+          sleep 5
+          capture '11_mining_task_in_world'
+          sleep 15
+          as_player 'fakeaiplayer task status TestBot'
+
+          # Farming and harvesting on real farmland/block states.
+          as_player 'fakeaiplayer task abort TestBot'
+          server_cmd 'tp TestBot -8 100 14 0 0'
+          server_cmd 'tp GreyTaiWolf -8 105 4 0 30'
+          server_cmd 'fill -12 99 10 -4 99 18 minecraft:farmland[moisture=7]'
+          server_cmd 'setblock -8 99 14 minecraft:water'
+          server_cmd 'fill -11 100 11 -5 100 17 minecraft:wheat[age=7]'
+          server_cmd 'give TestBot minecraft:wheat_seeds 32'
+          server_cmd 'give TestBot minecraft:iron_hoe 1'
+          as_player 'fakeaiplayer task assign TestBot harvest -8 100 14 5 minecraft:wheat'
+          sleep 5
+          capture '12_harvest_task'
+          sleep 15
+          as_player 'fakeaiplayer task status TestBot'
+
+          # Container deposit/withdraw and inventory state.
+          as_player 'fakeaiplayer task abort TestBot'
+          server_cmd 'tp TestBot 10 100 -12 0 0'
+          server_cmd 'setblock 10 100 -9 minecraft:chest[facing=south]'
+          server_cmd 'give TestBot minecraft:cobblestone 32'
+          as_player 'fakeaiplayer task assign TestBot deposit at 10 100 -9 item minecraft:cobblestone 16'
+          sleep 12
+          as_player 'fakeaiplayer task status TestBot'
+          server_cmd 'tp GreyTaiWolf 10 102 -18 0 10'
+          capture '13_container_deposit_task'
+          as_player 'fakeaiplayer task assign TestBot withdraw at 10 100 -9 minecraft:cobblestone 8'
+          sleep 12
+          as_player 'fakeaiplayer task status TestBot'
+
+          # Survival utilities: lighting and sleep operate on real world blocks.
+          as_player 'fakeaiplayer task abort TestBot'
+          server_cmd 'tp TestBot 20 100 10 0 0'
+          server_cmd 'tp GreyTaiWolf 20 104 0 0 25'
+          server_cmd 'time set night'
+          as_player 'fakeaiplayer task assign TestBot light_area 6 8'
+          sleep 10
+          capture '14_light_area_task'
+          as_player 'fakeaiplayer task abort TestBot'
+          server_cmd 'setblock 20 100 13 minecraft:red_bed[part=foot,facing=south]'
+          server_cmd 'setblock 20 100 14 minecraft:red_bed[part=head,facing=south]'
+          as_player 'fakeaiplayer task assign TestBot sleep'
+          sleep 5
+          capture '15_sleep_task'
+          as_player 'fakeaiplayer task abort TestBot'
+          server_cmd 'time set day'
+
+          # Memory, jobs, persistence, observability, and deterministic brain failure handling.
+          as_player 'fakeaiplayer memory TestBot remember visual_test passed'
+          as_player 'fakeaiplayer memory TestBot recall visual_test'
+          as_player 'fakeaiplayer memory TestBot set_base'
+          as_player 'fakeaiplayer job post gather builder minecraft:oak_log 4'
+          as_player 'fakeaiplayer job list'
+          as_player 'fakeaiplayer persist save'
+          as_player 'fakeaiplayer tps'
+          as_player 'fakeaiplayer brain validate TestBot api-failure'
+          as_player 'fakeaiplayer brain validate TestBot bad-tool-args'
+          as_player 'fakeaiplayer brain validate TestBot bad-response'
+          press_combo alt 0
+          sleep 4
+          capture '16_memory_jobs_persistence_diagnostics'
+          close_screen
+
+          # NeoForge-only modular-house projection, move/rotate payloads, renderer and status.
+          server_cmd 'fill -24 99 -4 8 99 28 minecraft:grass_block'
+          server_cmd 'fill -24 100 -4 8 125 28 minecraft:air'
+          server_cmd 'gamemode spectator GreyTaiWolf'
+          server_cmd 'tp GreyTaiWolf 18 116 -12 42 28'
+          as_player 'fakeaiplayer building draft TestBot oak_cottage 9 9 5 20260715'
+          sleep 6
+          as_player 'fakeaiplayer building move -8 100 8'
+          as_player 'fakeaiplayer building rotate east'
+          as_player 'fakeaiplayer building status'
+          sleep 6
+          capture '17_oak_house_projection_rotated'
+
+          # Confirm requires a complete client Ready acknowledgement and revalidates the world.
+          as_player 'fakeaiplayer building confirm'
+          sleep 5
+          press_combo alt 0
+          xdotool mousemove 1260 46 click 1
+          sleep 3
+          capture '18_confirmed_build_goal'
+          close_screen
+          as_player 'fakeaiplayer task abort TestBot'
+
+          # A second style proves cancel and replacement/clear payloads.
+          as_player 'fakeaiplayer building draft TestBot spruce_lodge 7 11 4 42'
+          as_player 'fakeaiplayer building move -8 100 8'
+          sleep 5
+          capture '19_spruce_house_projection'
+          as_player 'fakeaiplayer building cancel'
+          sleep 3
+          capture '20_projection_cancelled'
+
+          # Final lifecycle cleanup.
+          as_player 'fakeaiplayer role TestBot explorer'
+          as_player 'fakeaiplayer list'
+          as_player 'fakeaiplayer despawn TestBot'
+          as_player 'fakeaiplayer list'
+          press_combo alt 0
+          sleep 3
+          capture '21_despawn_and_final_status'
+
+          printf 'screenshot\tsha256\n' > "$evidence/checksums.tsv"
+          while IFS= read -r file; do
+            printf '%s\t%s\n' "$(basename "$file")" "$(sha256sum "$file" | awk '{print $1}')" >> "$evidence/checksums.tsv"
+          done < <(find "$shots" -maxdepth 1 -type f -name '*.png' | sort)
+
+          screenshots="$(find "$shots" -maxdepth 1 -type f -name '*.png' | wc -l)"
+          printf 'commit_sha\t%s\nloader\tNeoForge 21.3.96\nminecraft\t1.21.3\njava\t%s\nscreenshots\t%s\n' \
+            "$GITHUB_SHA" "$(java -version 2>&1 | head -1)" "$screenshots" > "$evidence/manifest.tsv"
+          [[ "$screenshots" -ge 18 ]]
+
+      - name: Upload NeoForge visual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neoforge-client-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            artifacts/neoforge-client-evidence/**
+            neoforge/run/client/logs/**
+            neoforge/run/client/crash-reports/**
+            neoforge/run/server/logs/**
+            neoforge/run/server/crash-reports/**
