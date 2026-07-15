@@ -330,10 +330,12 @@ jobs:
           capture '10_combat_task'
           sleep 12
           as_player 'fakeaiplayer task status TestBot'
+          server_cmd 'difficulty peaceful'
+          server_cmd 'kill @e[type=minecraft:husk]'
+          server_cmd 'effect give TestBot minecraft:instant_health 1 10 true'
 
           # Mining a real ore cluster with normal tools and drops.
           as_player 'fakeaiplayer task abort TestBot'
-          server_cmd 'kill @e[type=minecraft:husk]'
           server_cmd 'tp TestBot -14 100 0 -90 0'
           server_cmd 'tp GreyTaiWolf -20 103 0 -90 10'
           server_cmd 'fill -9 100 -1 -7 101 1 minecraft:stone'
@@ -389,24 +391,244 @@ jobs:
           as_player 'fakeaiplayer task assign TestBot sleep'
           sleep 5
           capture '15_sleep_task'
+          as_player 'fakeaiplayer task status TestBot'
           as_player 'fakeaiplayer task abort TestBot'
           server_cmd 'time set day'
+          server_cmd 'difficulty peaceful'
+          server_cmd 'effect give TestBot minecraft:instant_health 1 10 true'
 
-          # Memory, jobs, persistence, observability, and deterministic brain failure handling.
+          # Ordinary block mining uses MineTask (ore IDs use the separate OreDigTask above).
+          server_cmd 'clear TestBot minecraft:stone'
+          server_cmd 'tp TestBot -23 100 21 -90 0'
+          server_cmd 'tp GreyTaiWolf -29 105 21 -90 22'
+          server_cmd 'fill -18 100 20 -16 101 22 minecraft:stone'
+          server_cmd 'give TestBot minecraft:iron_pickaxe 1'
+          as_player 'fakeaiplayer task assign TestBot mine minecraft:stone 3'
+          sleep 5
+          capture '16_regular_stone_mining'
+          sleep 8
+          as_player 'fakeaiplayer task status TestBot'
+          as_player 'fakeaiplayer task abort TestBot'
+
+          # Forage is a sweet-berry quota task; stage mature bushes without preloading berries.
+          server_cmd 'clear TestBot minecraft:sweet_berries'
+          server_cmd 'tp TestBot -8 100 25 -90 0'
+          server_cmd 'tp GreyTaiWolf -14 105 25 -90 24'
+          server_cmd 'setblock -3 99 24 minecraft:dirt'
+          server_cmd 'setblock -3 100 24 minecraft:sweet_berry_bush[age=3]'
+          server_cmd 'setblock -2 99 25 minecraft:dirt'
+          server_cmd 'setblock -2 100 25 minecraft:sweet_berry_bush[age=3]'
+          server_cmd 'setblock -1 99 26 minecraft:dirt'
+          server_cmd 'setblock -1 100 26 minecraft:sweet_berry_bush[age=3]'
+          server_cmd 'setblock 0 99 24 minecraft:dirt'
+          server_cmd 'setblock 0 100 24 minecraft:sweet_berry_bush[age=3]'
+          as_player 'fakeaiplayer task assign TestBot forage 4'
+          sleep 6
+          capture '17_forage_sweet_berries'
+          sleep 10
+          as_player 'fakeaiplayer task status TestBot'
+          as_player 'fakeaiplayer task abort TestBot'
+
+          # Exact item gathering from visible world blocks.
+          server_cmd 'clear TestBot minecraft:oak_log'
+          server_cmd 'tp TestBot 2 100 25 -90 0'
+          server_cmd 'tp GreyTaiWolf -4 105 25 -90 24'
+          server_cmd 'fill 6 100 24 6 102 24 minecraft:oak_log[axis=y]'
+          server_cmd 'fill 7 100 26 7 102 26 minecraft:oak_log[axis=y]'
+          server_cmd 'give TestBot minecraft:iron_axe 1'
+          as_player 'fakeaiplayer task assign TestBot gather minecraft:oak_log 3'
+          sleep 6
+          capture '18_gather_logs'
+          sleep 10
+          as_player 'fakeaiplayer task status TestBot'
+          as_player 'fakeaiplayer task abort TestBot'
+
+          # Inventory-only survival crafting.
+          server_cmd 'clear TestBot minecraft:stick'
+          server_cmd 'give TestBot minecraft:oak_planks 2'
+          as_player 'fakeaiplayer task assign TestBot craft minecraft:stick 4'
+          sleep 4
+          as_player 'fakeaiplayer task status TestBot'
+          capture '19_craft_sticks'
+          as_player 'fakeaiplayer task abort TestBot'
+
+          # Lower hunger through the vanilla effect, then verify real item use.
+          server_cmd 'tp TestBot 12 100 20 0 0'
+          server_cmd 'tp GreyTaiWolf 12 104 14 0 22'
+          server_cmd 'difficulty normal'
+          server_cmd 'effect give TestBot minecraft:hunger 2 40 true'
+          sleep 3
+          server_cmd 'effect clear TestBot minecraft:hunger'
+          server_cmd 'give TestBot minecraft:bread 2'
+          as_player 'fakeaiplayer task assign TestBot eat'
+          sleep 3
+          capture '20_eat_task'
+          sleep 5
+          as_player 'fakeaiplayer task status TestBot'
+          as_player 'fakeaiplayer task abort TestBot'
+          server_cmd 'difficulty peaceful'
+
+          # Branch/strip mining through a deterministic stone wall.
+          server_cmd 'tp TestBot -24 100 21 -90 0'
+          server_cmd 'tp GreyTaiWolf -30 105 21 -90 22'
+          server_cmd 'fill -22 100 18 -12 103 24 minecraft:stone'
+          server_cmd 'give TestBot minecraft:iron_pickaxe 1'
+          server_cmd 'give TestBot minecraft:torch 16'
+          as_player 'fakeaiplayer task assign TestBot strip_mine east 6 2'
+          sleep 7
+          capture '21_strip_mine_task'
+          sleep 12
+          as_player 'fakeaiplayer task status TestBot'
+          as_player 'fakeaiplayer task abort TestBot'
+
+          # Nearby vein mode is distinct from quota ore prospecting.
+          server_cmd 'tp TestBot -10 100 28 -90 0'
+          server_cmd 'tp GreyTaiWolf -16 105 28 -90 22'
+          server_cmd 'setblock -5 100 28 minecraft:coal_ore'
+          server_cmd 'setblock -4 100 28 minecraft:coal_ore'
+          server_cmd 'setblock -5 101 28 minecraft:coal_ore'
+          server_cmd 'setblock -5 100 29 minecraft:coal_ore'
+          as_player 'fakeaiplayer task assign TestBot mine_vein minecraft:coal_ore'
+          sleep 7
+          capture '22_mine_nearby_vein'
+          sleep 12
+          as_player 'fakeaiplayer task status TestBot'
+          as_player 'fakeaiplayer task abort TestBot'
+
+          # Full farm mode: survey, harvest and replant a real hydrated plot.
+          server_cmd 'tp TestBot 14 100 16 0 0'
+          server_cmd 'tp GreyTaiWolf 14 108 10 0 35'
+          server_cmd 'fill 10 99 20 18 99 28 minecraft:farmland[moisture=7]'
+          server_cmd 'setblock 14 99 24 minecraft:water'
+          server_cmd 'fill 11 100 21 17 100 27 minecraft:wheat[age=7]'
+          server_cmd 'give TestBot minecraft:wheat_seeds 32'
+          server_cmd 'give TestBot minecraft:iron_hoe 1'
+          as_player 'fakeaiplayer task assign TestBot farm 14 100 24 4 minecraft:wheat'
+          sleep 7
+          capture '23_farm_harvest_and_replant'
+          sleep 12
+          as_player 'fakeaiplayer task status TestBot'
+          as_player 'fakeaiplayer task abort TestBot'
+
+          # Animal breeding with real adult entities and food consumption.
+          server_cmd 'kill @e[type=minecraft:cow]'
+          server_cmd 'tp TestBot 22 100 -24 0 0'
+          server_cmd 'tp GreyTaiWolf 24 106 -31 0 30'
+          server_cmd 'summon minecraft:cow 23 100 -20'
+          server_cmd 'summon minecraft:cow 26 100 -20'
+          server_cmd 'give TestBot minecraft:wheat 4'
+          as_player 'fakeaiplayer task assign TestBot breed minecraft:cow 1'
+          sleep 6
+          capture '24_breed_cows'
+          sleep 6
+          as_player 'fakeaiplayer task status TestBot'
+          as_player 'fakeaiplayer task abort TestBot'
+
+          # Re-test explicit container transfer plus automatic stockpiling on the stable arena.
+          server_cmd 'tp TestBot 0 100 24 0 0'
+          server_cmd 'tp GreyTaiWolf 0 105 17 0 25'
+          server_cmd 'setblock 0 100 28 minecraft:chest[facing=south]'
+          server_cmd 'give TestBot minecraft:cobblestone 24'
+          server_cmd 'give TestBot minecraft:dirt 16'
+          as_player 'fakeaiplayer task assign TestBot deposit at 0 100 28 item minecraft:cobblestone 16'
+          sleep 10
+          as_player 'fakeaiplayer task status TestBot'
+          as_player 'fakeaiplayer task assign TestBot withdraw at 0 100 28 minecraft:cobblestone 8'
+          sleep 10
+          as_player 'fakeaiplayer task status TestBot'
+          as_player 'fakeaiplayer task assign TestBot stockpile'
+          sleep 10
+          as_player 'fakeaiplayer task status TestBot'
+          capture '25_container_withdraw_and_stockpile'
+          as_player 'fakeaiplayer task abort TestBot'
+
+          # Furnace loading, vanilla cook time and output collection.
+          server_cmd 'tp TestBot 12 100 24 0 0'
+          server_cmd 'tp GreyTaiWolf 12 105 17 0 25'
+          server_cmd 'setblock 12 100 28 minecraft:furnace[facing=south]'
+          server_cmd 'clear TestBot minecraft:iron_ingot'
+          server_cmd 'give TestBot minecraft:raw_iron 2'
+          server_cmd 'give TestBot minecraft:coal 1'
+          as_player 'fakeaiplayer task assign TestBot smelt minecraft:raw_iron minecraft:iron_ingot 1'
+          sleep 7
+          capture '26_smelt_raw_iron'
+          sleep 18
+          as_player 'fakeaiplayer task status TestBot'
+          as_player 'fakeaiplayer task abort TestBot'
+
+          # Legacy deterministic BuildTask remains a separate explicit-command path.
+          server_cmd 'tp TestBot -24 100 -24 135 0'
+          server_cmd 'tp GreyTaiWolf -18 110 -18 135 32'
+          server_cmd 'fill -30 100 -30 -26 105 -26 minecraft:air'
+          server_cmd 'give TestBot minecraft:cobblestone 64'
+          as_player 'fakeaiplayer task assign TestBot build custom:3x3x2:stone -30 100 -30'
+          sleep 9
+          capture '27_deterministic_custom_build'
+          sleep 20
+          as_player 'fakeaiplayer task status TestBot'
+          as_player 'fakeaiplayer task abort TestBot'
+
+          # Full memory command family: facts, places, base and long-term goal progression.
+          server_cmd 'tp TestBot 0 100 0 0 0'
           as_player 'fakeaiplayer memory TestBot remember visual_test passed'
           as_player 'fakeaiplayer memory TestBot recall visual_test'
+          as_player 'fakeaiplayer memory TestBot forget visual_test'
+          as_player 'fakeaiplayer memory TestBot mark_place visual_camp'
           as_player 'fakeaiplayer memory TestBot set_base'
-          as_player 'fakeaiplayer job post gather builder minecraft:oak_log 4'
+          server_cmd 'tp TestBot 6 100 0 90 0'
+          as_player 'fakeaiplayer memory TestBot goto_place visual_camp'
+          sleep 6
+          as_player 'fakeaiplayer memory TestBot set_goal visual_goal step_one|step_two'
+          as_player 'fakeaiplayer memory TestBot goal_status'
+          as_player 'fakeaiplayer memory TestBot advance_goal first_step_done'
+          as_player 'fakeaiplayer memory TestBot goal_status'
+          as_player 'fakeaiplayer memory TestBot inject'
+          capture '28_memory_places_and_goals'
+          as_player 'fakeaiplayer task abort TestBot'
+
+          # Multi-Bot lifecycle, TaskBoard claim/list/tell/clear and role matching.
+          server_cmd 'fakeaiplayer spawn HelperBot builder'
+          server_cmd 'tp HelperBot 5 100 -20 0 0'
+          server_cmd 'tp TestBot 0 100 -20 0 0'
+          server_cmd 'tp GreyTaiWolf 3 105 -29 0 28'
+          as_player 'fakeaiplayer job post move builder x=8 y=100 z=-20'
+          sleep 8
           as_player 'fakeaiplayer job list'
+          as_player 'fakeaiplayer job tell TestBot HelperBot coordination_ping'
+          sleep 3
+          as_player 'fakeaiplayer job clear'
+          capture '29_multi_bot_jobs_and_coordination'
+
+          # Brain controls and both command/chat model entry points (missing-key is expected here).
+          as_player 'fakeaiplayer brain status TestBot'
+          as_player 'fakeaiplayer brain manual TestBot on'
+          as_player 'fakeaiplayer brain manual TestBot off'
+          as_player 'fakeaiplayer brain reset TestBot'
+          as_player 'fakeaiplayer brain say TestBot visual model route check'
+          sleep 3
+          xdotool windowactivate --sync "$window"
+          xdotool key t
+          xdotool type --delay 20 '@TestBot visual chat route check'
+          xdotool key Return
+          sleep 4
+          capture '30_brain_command_and_chat_routes'
+
+          # Persistence, observability and administrator diagnostics.
           as_player 'fakeaiplayer persist save'
+          as_player 'fakeaiplayer persist reload'
+          as_player 'fakeaiplayer profile TestBot'
+          as_player 'fakeaiplayer replay TestBot 10'
           as_player 'fakeaiplayer tps'
+          as_player 'fakeaiplayer log status'
+          as_player 'fakeaiplayer log rotate'
+          as_player 'fakeaiplayer log overflow 1'
+          as_player 'fakeaiplayer snapshot 2'
+          as_player 'fakeaiplayer deplint TestBot item:bread:3'
           as_player 'fakeaiplayer brain validate TestBot api-failure'
           as_player 'fakeaiplayer brain validate TestBot bad-tool-args'
           as_player 'fakeaiplayer brain validate TestBot bad-response'
-          press_combo alt 0
           sleep 4
-          capture '16_memory_jobs_persistence_diagnostics'
-          close_screen
+          capture '31_persistence_and_diagnostics'
 
           # NeoForge-only modular-house projection, move/rotate payloads, renderer and status.
           server_cmd 'fill -24 99 -4 8 99 28 minecraft:grass_block'
@@ -419,7 +641,7 @@ jobs:
           as_player 'fakeaiplayer building rotate east'
           as_player 'fakeaiplayer building status'
           sleep 6
-          capture '17_oak_house_projection_rotated'
+          capture '32_oak_house_projection_rotated'
 
           # Confirm requires a complete client Ready acknowledgement and revalidates the world.
           as_player 'fakeaiplayer building confirm'
@@ -427,7 +649,7 @@ jobs:
           press_combo alt 0
           xdotool mousemove 1260 46 click 1
           sleep 3
-          capture '18_confirmed_build_goal'
+          capture '33_confirmed_build_goal'
           close_screen
           as_player 'fakeaiplayer task abort TestBot'
 
@@ -435,19 +657,20 @@ jobs:
           as_player 'fakeaiplayer building draft TestBot spruce_lodge 7 11 4 42'
           as_player 'fakeaiplayer building move -8 100 8'
           sleep 5
-          capture '19_spruce_house_projection'
+          capture '34_spruce_house_projection'
           as_player 'fakeaiplayer building cancel'
           sleep 3
-          capture '20_projection_cancelled'
+          capture '35_projection_cancelled'
 
           # Final lifecycle cleanup.
+          server_cmd 'fakeaiplayer despawn HelperBot'
           as_player 'fakeaiplayer role TestBot explorer'
           as_player 'fakeaiplayer list'
           as_player 'fakeaiplayer despawn TestBot'
           as_player 'fakeaiplayer list'
           press_combo alt 0
           sleep 3
-          capture '21_despawn_and_final_status'
+          capture '36_despawn_and_final_status'
 
           printf 'screenshot\tsha256\n' > "$evidence/checksums.tsv"
           while IFS= read -r file; do
@@ -457,7 +680,7 @@ jobs:
           screenshots="$(find "$shots" -maxdepth 1 -type f -name '*.png' | wc -l)"
           printf 'commit_sha\t%s\nloader\tNeoForge 21.3.96\nminecraft\t1.21.3\njava\t%s\nscreenshots\t%s\n' \
             "$GITHUB_SHA" "$(java -version 2>&1 | head -1)" "$screenshots" > "$evidence/manifest.tsv"
-          [[ "$screenshots" -ge 18 ]]
+          [[ "$screenshots" -ge 34 ]]
 
       - name: Upload NeoForge visual evidence
         if: always()
