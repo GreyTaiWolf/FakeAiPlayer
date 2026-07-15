@@ -18,11 +18,14 @@ public record GoalStep(Kind kind,
                        String tag) {
     public enum Kind {
         GATHER,
+        GATHER_EXACT,
         MINE,
+        MINE_EXACT,
         MINE_ORE,
         CRAFT,
         SMELT,
         MOVE,
+        MOVE_NON_MUTATING,
         FARM,
         HUNT,
         COOK_FOOD,
@@ -44,8 +47,21 @@ public record GoalStep(Kind kind,
         return new GoalStep(Kind.GATHER, item, count, null, Set.of(), null, null, null, null);
     }
 
+    /**
+     * Gather {@code count} new items from the task-start baseline and, for material families such
+     * as logs, keep the requested species exact.
+     */
+    public static GoalStep gatherExact(Item item, int count) {
+        return new GoalStep(Kind.GATHER_EXACT, item, count, null, Set.of(), null, null, null, null);
+    }
+
     public static GoalStep mine(Block block, int count) {
         return new GoalStep(Kind.MINE, null, count, block, Set.of(), null, null, null, null);
+    }
+
+    /** Mine the requested block while counting only its literal expected drop. */
+    public static GoalStep mineExact(Block block, int count) {
+        return new GoalStep(Kind.MINE_EXACT, null, count, block, Set.of(), null, null, null, null);
     }
 
     public static GoalStep mineOre(Set<Block> ores, int count) {
@@ -62,6 +78,11 @@ public record GoalStep(Kind kind,
 
     public static GoalStep move(BlockPos pos) {
         return new GoalStep(Kind.MOVE, null, 1, null, Set.of(), null, null, pos, null);
+    }
+
+    /** Return to a player-confirmed site without digging or placing navigation blocks. */
+    public static GoalStep moveNonMutating(BlockPos pos) {
+        return new GoalStep(Kind.MOVE_NON_MUTATING, null, 1, null, Set.of(), null, null, pos, null);
     }
 
     /** P3:FARM 步——block=作物方块,input=种子,item=产出物,count=要收的数量。 */
@@ -129,7 +150,9 @@ public record GoalStep(Kind kind,
     public String describe() {
         return switch (kind) {
             case GATHER -> "采集 " + ItemNames.cn(item) + " ×" + count;
+            case GATHER_EXACT -> "精确采集 " + ItemNames.cn(item) + " ×" + count;
             case MINE -> "挖 " + ItemNames.cn(block) + " ×" + count;
+            case MINE_EXACT -> "精确挖掘 " + ItemNames.cn(block) + " ×" + count;
             case MINE_ORE -> "采矿 " + ores.stream()
                     .map(ItemNames::cn)
                     .sorted()
@@ -137,6 +160,7 @@ public record GoalStep(Kind kind,
             case CRAFT -> "合成 " + ItemNames.cn(item) + " ×" + count;
             case SMELT -> "熔炼 " + ItemNames.cn(input) + " → " + ItemNames.cn(output) + " ×" + count;
             case MOVE -> "移动到 " + pos.getX() + "," + pos.getY() + "," + pos.getZ();
+            case MOVE_NON_MUTATING -> "安全移动到 " + pos.getX() + "," + pos.getY() + "," + pos.getZ();
             case FARM -> "种植 " + ItemNames.cn(block) + " ×" + count;
             case HUNT -> "打猎取肉 ×" + count;
             case COOK_FOOD -> "烤制食物 ×" + count;

@@ -2,6 +2,7 @@ package io.github.greytaiwolf.fakeaiplayer;
 
 import com.mojang.brigadier.CommandDispatcher;
 import io.github.greytaiwolf.fakeaiplayer.brain.BrainCoordinator;
+import io.github.greytaiwolf.fakeaiplayer.building.preview.BuildingPreviewService;
 import io.github.greytaiwolf.fakeaiplayer.command.AIBotCommand;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLogWriter;
@@ -44,6 +45,7 @@ public final class FakeAiPlayer {
         }
         PlatformServices.initialize(environment);
         AIBotServerNetworking.INSTANCE.configure(networkTransport);
+        BuildingPreviewService.INSTANCE.configure(networkTransport);
 
         config = AIBotConfig.load();
         BotLogWriter.INSTANCE.start(config);
@@ -82,6 +84,7 @@ public final class FakeAiPlayer {
 
     public static void onServerStopping(MinecraftServer server) {
         if (initialized) {
+            BuildingPreviewService.INSTANCE.clear(server);
             RuntimeLifecycleCoordinator.INSTANCE.onServerStopping(server);
         }
     }
@@ -93,6 +96,7 @@ public final class FakeAiPlayer {
         BotTickCoordinator.INSTANCE.tick(server);
         FocusTracker.INSTANCE.tick(server);
         AIBotServerNetworking.INSTANCE.tick(server);
+        BuildingPreviewService.INSTANCE.tick(server);
         io.github.greytaiwolf.fakeaiplayer.log.DiagnosticLogger.INSTANCE.tick(server);
         if (server.getTickCount() > 0 && server.getTickCount() % 6000 == 0) {
             BotPersistence.INSTANCE.saveAllAsync(server);

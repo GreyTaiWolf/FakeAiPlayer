@@ -11,6 +11,14 @@ import io.github.greytaiwolf.fakeaiplayer.action.LookAction;
 import io.github.greytaiwolf.fakeaiplayer.action.MiningAction;
 import io.github.greytaiwolf.fakeaiplayer.action.MovementAction;
 import io.github.greytaiwolf.fakeaiplayer.action.ToolSelector;
+import io.github.greytaiwolf.fakeaiplayer.building.generator.HouseDimensions;
+import io.github.greytaiwolf.fakeaiplayer.building.generator.ModularHouseGenerator;
+import io.github.greytaiwolf.fakeaiplayer.building.generator.ModularHouseRequest;
+import io.github.greytaiwolf.fakeaiplayer.building.plan.BuildingPlan;
+import io.github.greytaiwolf.fakeaiplayer.building.plan.PlanTransform;
+import io.github.greytaiwolf.fakeaiplayer.building.preview.BuildingPreviewService;
+import io.github.greytaiwolf.fakeaiplayer.building.style.HouseMaterialStyle;
+import io.github.greytaiwolf.fakeaiplayer.building.style.VanillaHouseStyles;
 import io.github.greytaiwolf.fakeaiplayer.coordination.Job;
 import io.github.greytaiwolf.fakeaiplayer.coordination.TaskBoard;
 import io.github.greytaiwolf.fakeaiplayer.auth.BotAuthorizationGate;
@@ -32,9 +40,7 @@ import io.github.greytaiwolf.fakeaiplayer.perception.focus.FocusTracker;
 import io.github.greytaiwolf.fakeaiplayer.runtime.IntentController;
 import io.github.greytaiwolf.fakeaiplayer.runtime.TaskOrigin;
 import io.github.greytaiwolf.fakeaiplayer.runtime.IntentControlTransaction;
-import io.github.greytaiwolf.fakeaiplayer.task.BlueprintLoader;
 import io.github.greytaiwolf.fakeaiplayer.task.BreedTask;
-import io.github.greytaiwolf.fakeaiplayer.task.BuildTask;
 import io.github.greytaiwolf.fakeaiplayer.task.CombatTask;
 import io.github.greytaiwolf.fakeaiplayer.task.ContainerTask;
 import io.github.greytaiwolf.fakeaiplayer.task.CraftTask;
@@ -69,13 +75,18 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Mirror;
+import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.phys.Vec3;
 
 public final class ToolRegistry {
+    private static final String BUILDING_PREVIEW_REQUIRED =
+            "building_requires_player_confirmation: use draft_building";
     private final Map<String, ToolDefinition> tools = new LinkedHashMap<>();
 
     public ToolRegistry() {
@@ -377,33 +388,90 @@ public final class ToolRegistry {
             return started ? ok("goal_assigned: achieve_armor") : fail("goal_plan_failed");
         });
 
-        register("achieve_workstation", "Set up a base: craft and place a crafting table, furnace and chest nearby. Use for 建个家/搭个工作台/摆好工作台熔炉箱子/set up a base. Auto-plans gathering and crafting; do not decompose manually.", objectSchema()
+        register("achieve_workstation", "Set up a utility station cluster: craft and place a crafting table, furnace and chest nearby. Use for 搭个工作台/摆好工作台熔炉箱子/set up workstations. Do not use this for 建个家/盖房/build a home; every building request must use draft_building and human confirmation. Auto-plans gathering and crafting; do not decompose manually.", objectSchema()
                 .build(), (bot, args) -> {
             boolean started = GoalExecutor.INSTANCE.submit(bot, new Goal.Workstation());
             return started ? ok("goal_assigned: achieve_workstation") : fail("goal_plan_failed");
         });
 
-        register("build_house", "Build a house/shelter. Use for 盖房子/建个家/造房子/盖个小屋/build a house. The goal system auto-gathers ALL missing materials (wood/stone/glass) then builds — call once then STOP. Either pass blueprint (small_hut default, hut_5x5), OR pass width/depth/height/material for a custom house (e.g. 盖个7格宽的石头房 -> width=7, material=stone_like). material: planks (wood, default) / stone_like / glass.", objectSchema()
+        register("build_house", "Legacy building entry point. AI tools may not start construction directly; use draft_building to create a projection that only the human can confirm.", objectSchema()
                 .property("blueprint", stringSchema("preset blueprint name: small_hut (default) or hut_5x5; ignored when width/depth/height given"))
                 .property("width", integerSchema("custom house outer width in blocks (3..16)", 3, 16))
                 .property("depth", integerSchema("custom house outer depth in blocks (3..16)", 3, 16))
                 .property("height", integerSchema("custom house wall height in blocks (2..8)", 2, 8))
                 .property("material", stringSchema("wall material palette: planks (default) / stone_like / glass"))
+                .build(), (bot, args) -> rejectDirectLlmBuild());
+
+        register("draft_building", "Design or revise a detailed modular house and show the owner a server-authoritative world projection before construction. Use for 漂亮建筑/设计房子/带梁柱窗户门廊台阶屋顶/先看看蓝图/design or preview a house. Choose only style, dimensions and seed; the deterministic compiler creates all blocks, state properties, dependencies and phases. Repeating this tool replaces the previous draft. It NEVER starts construction: after calling it, STOP and wait for the human to inspect and confirm the projection.", objectSchema()
+                .property("style", stringSchema("oak_cottage (oak timber) or spruce_lodge (spruce timber)"))
+                .property("width", integerSchema("enclosed width in blocks, default 9", 7, 16))
+                .property("depth", integerSchema("enclosed depth in blocks, default 9", 7, 16))
+                .property("wall_height", integerSchema(
+                        "wall height in blocks, default 5; 4..5 until scaffold cleanup is implemented", 4, 5))
+                .property("seed", integerSchema("deterministic variation seed, default 0"))
                 .build(), (bot, args) -> {
-            // P3 参数化:给了任意尺寸参数就走 custom:WxDxH:material 规格(缺省边长 5/5/3),否则用预设蓝图。
-            boolean custom = args != null && (args.has("width") || args.has("depth") || args.has("height") || args.has("material"));
-            String bp;
-            if (custom) {
-                int w = optionalInt(args, "width", 5);
-                int d = optionalInt(args, "depth", 5);
-                int h = optionalInt(args, "height", 3);
-                String material = optionalString(args, "material", "planks");
-                bp = "custom:" + w + "x" + d + "x" + h + ":" + material;
-            } else {
-                bp = optionalString(args, "blueprint", "small_hut");
+            ServerPlayer owner = onlineOwner(bot);
+            if (owner == null) {
+                return fail("building_preview_requires_online_owner");
             }
-            boolean started = GoalExecutor.INSTANCE.submit(bot, new Goal.Build(bp));
-            return started ? ok("goal_assigned: build " + bp) : fail("goal_plan_failed");
+            String styleName = optionalString(args, "style", "oak_cottage");
+            HouseMaterialStyle style = houseStyle(styleName);
+            int width = optionalInt(args, "width", 9);
+            int depth = optionalInt(args, "depth", 9);
+            int wallHeight = optionalInt(args, "wall_height", 5);
+            if (!HouseDimensions.isExecutableRange(width, depth, wallHeight)) {
+                return fail("building_dimensions_outside_executable_range: width/depth=7..16, wall_height=4..5");
+            }
+            long seed = optionalInt(args, "seed", 0);
+            BuildingPlan plan = new ModularHouseGenerator().generate(new ModularHouseRequest(
+                    "fakeaiplayer:ai_draft/" + owner.getUUID() + "/" + seed,
+                    style.id() + " " + width + "x" + depth,
+                    new HouseDimensions(width, depth, wallHeight),
+                    seed,
+                    style));
+            PlanTransform transform = new PlanTransform(
+                    Mirror.NONE, rotationForBuildingFront(owner.getDirection().getOpposite()));
+            BlockPos anchor = buildingAnchor(owner, plan, transform);
+            BuildingPreviewService.OpenResult result = BuildingPreviewService.INSTANCE.open(
+                    owner, bot, plan, anchor, transform, true);
+            if (!result.success()) {
+                return fail(result.message());
+            }
+            return ok("{\"state\":\"awaiting_player_confirmation\",\"style\":\""
+                    + escape(style.id()) + "\",\"size\":\"" + width + "x" + depth + "x" + wallHeight
+                    + "\",\"placements\":" + result.placementCount()
+                    + ",\"plan_hash\":\"" + result.planHash().substring(0, 12)
+                    + "\",\"instruction\":\"玩家检查投影后使用 building confirm 或确认按键\"}");
+        });
+
+        register("building_preview_status", "Read the current modular-building draft shown to the bot owner. This is observation only and never confirms construction.", objectSchema()
+                .build(), (bot, args) -> {
+            ServerPlayer owner = onlineOwner(bot);
+            if (owner == null) {
+                return fail("building_preview_requires_online_owner");
+            }
+            Optional<BuildingPreviewService.SessionView> session = BuildingPreviewService.INSTANCE.session(owner);
+            if (session.isEmpty() || !session.get().botId().equals(bot.getUUID())) {
+                return ok("{\"state\":\"no_preview\"}");
+            }
+            BuildingPreviewService.SessionView value = session.get();
+            return ok("{\"state\":\"awaiting_player_confirmation\",\"plan\":\""
+                    + escape(value.planName()) + "\",\"placements\":" + value.placementCount()
+                    + ",\"anchor\":\"" + value.anchor().toShortString() + "\"}");
+        });
+
+        register("cancel_building_preview", "Cancel the current unconfirmed modular-building draft. Use only when the human explicitly asks to discard/cancel the proposed building.", objectSchema()
+                .build(), (bot, args) -> {
+            ServerPlayer owner = onlineOwner(bot);
+            if (owner == null) {
+                return fail("building_preview_requires_online_owner");
+            }
+            Optional<BuildingPreviewService.SessionView> session = BuildingPreviewService.INSTANCE.session(owner);
+            if (session.isEmpty() || !session.get().botId().equals(bot.getUUID())) {
+                return ok("no_building_preview");
+            }
+            BuildingPreviewService.INSTANCE.cancelLatest(owner, "cancelled_by_ai_at_owner_request");
+            return ok("building_preview_cancelled");
         });
 
         register("stockpile", "Obtain N of an item then store everything into a nearby chest. Use for 囤货/囤点/存起来/stockpile N cobblestone. Auto-plans obtaining and depositing; do not decompose manually.", objectSchema()
@@ -609,17 +677,21 @@ public final class ToolRegistry {
         });
 
         register("post_job", "Post a shared job to the multi-bot task board. Idle bots whose role matches the job role can claim and execute it.", objectSchema()
-                .property("kind", stringSchema("job kind, for example mine, build, craft, smelt, move, eat, or light_area"))
+                .property("kind", stringSchema("job kind, for example mine, craft, smelt, move, eat, or light_area; AI building jobs require draft_building instead"))
                 .property("role", stringSchema("bot role that should claim it, for example miner or builder; blank means any role"))
                 .property("params", objectSchema().build())
                 .required("kind")
                 .required("params")
                 .build(), ToolDefinition.Group.COORDINATION, (bot, args) -> {
+            String kind = requiredString(args, "kind");
+            if (isBuildKind(kind)) {
+                return rejectDirectLlmBuild();
+            }
             Optional<UUID> ownerUuid = AIPlayerManager.INSTANCE.ownerOf(bot);
             if (ownerUuid.isEmpty()) {
                 return fail("coordination_requires_owned_bot");
             }
-            UUID id = TaskBoard.INSTANCE.postForOwner(ownerUuid.get(), requiredString(args, "kind"),
+            UUID id = TaskBoard.INSTANCE.postForOwner(ownerUuid.get(), kind,
                     paramsObject(args, "params"), optionalString(args, "role", ""));
             io.github.greytaiwolf.fakeaiplayer.persist.BotPersistence.INSTANCE.markDirty(bot.getServer());
             return ok("job_posted: " + id);
@@ -801,13 +873,16 @@ public final class ToolRegistry {
         register("goal_status", "Get the current persistent long-term goal status", objectSchema().build(), ToolDefinition.Group.MEMORY, (bot, args) ->
                 ok(BotMemoryStore.INSTANCE.of(bot.getUUID()).goalStatus("")));
 
-        register("assign_task", "Start a high-level deterministic task for the bot. Prefer this for movement, gathering, foraging, mining, combat, building, sleep, lighting, farming, fishing, trading, breeding, and container work. Use dedicated craft, eat, and smelt tools for those actions. For exposed surface blocks use task_type=mine. To obtain ores (iron/coal/copper/gold/diamond, *_ore, or raw_*), use the dedicated mine_ore tool which auto-locates the nearest ore and mines it directly — do NOT use strip_mine for getting ore. Supersedes any current task. Build params: blueprint plus optional anchor_x/anchor_y/anchor_z, auto_site, and flatten. x/y/z aliases are accepted; omit anchor when auto_site=true.", objectSchema()
-                .property("task_type", stringSchema("move, gather, forage, irrigate, milk_cow, raid_crops, attack, mine, strip_mine, mine_vein, build, sleep, light_area, farm, harvest, fish, trade, breed, follow, hold, guard, deposit, stockpile, or withdraw"))
+        register("assign_task", "Start a high-level deterministic non-building task for the bot. Building must use draft_building and explicit human confirmation. Prefer this for movement, gathering, foraging, mining, combat, sleep, lighting, farming, fishing, trading, breeding, and container work. Use dedicated craft, eat, and smelt tools for those actions. For exposed surface blocks use task_type=mine. To obtain ores (iron/coal/copper/gold/diamond, *_ore, or raw_*), use the dedicated mine_ore tool which auto-locates the nearest ore and mines it directly — do NOT use strip_mine for getting ore. Supersedes any current task.", objectSchema()
+                .property("task_type", stringSchema("move, gather, forage, irrigate, milk_cow, raid_crops, attack, mine, strip_mine, mine_vein, sleep, light_area, farm, harvest, fish, trade, breed, follow, hold, guard, deposit, stockpile, or withdraw; use draft_building for build"))
                 .property("params", objectSchema().build())
                 .required("task_type")
                 .required("params")
                 .build(), (bot, args) -> {
             String taskType = requiredString(args, "task_type");
+            if (isBuildKind(taskType)) {
+                return rejectDirectLlmBuild();
+            }
             JsonObject params = args.getAsJsonObject("params");
             if ("mine_ore".equals(taskType)) {
                 if (!AIBotConfig.get().goal().autoToolFillEnabled()) {
@@ -946,25 +1021,6 @@ public final class ToolRegistry {
                         optionalBlockPos(params, "chest_x", "chest_y", "chest_z"),
                         requiredItem(params, "item"),
                         optionalInt(params, "count", 1));
-            case "build": {
-                try {
-                    boolean autoSite = optionalBoolean(params, "auto_site", false);
-                    boolean flatten = optionalBoolean(params, "flatten", false);
-                    BlockPos anchor = autoSite && !hasBlockPos(params, "anchor_x", "anchor_y", "anchor_z") && !hasBlockPos(params, "x", "y", "z")
-                            ? null
-                            : new BlockPos(
-                                    intWithAlias(params, "anchor_x", "x"),
-                                    intWithAlias(params, "anchor_y", "y"),
-                                    intWithAlias(params, "anchor_z", "z"));
-                    return new BuildTask(
-                            BlueprintLoader.load(requiredString(params, "blueprint")),
-                            anchor,
-                            autoSite,
-                            flatten);
-                } catch (java.io.IOException exception) {
-                    throw new IllegalArgumentException(exception.getMessage(), exception);
-                }
-            }
             default:
                 throw new IllegalArgumentException("unknown_task_type: " + taskType);
         }
@@ -1039,8 +1095,53 @@ public final class ToolRegistry {
         return new ToolDefinition.ToolResult(false, message);
     }
 
+    private static ToolDefinition.ToolResult rejectDirectLlmBuild() {
+        return fail(BUILDING_PREVIEW_REQUIRED);
+    }
+
+    private static boolean isBuildKind(String value) {
+        return value != null && "build".equals(value.trim().toLowerCase(java.util.Locale.ROOT));
+    }
+
     private static void assignLlm(AIPlayerEntity bot, Task task) {
         TaskManager.INSTANCE.assign(bot, task, TaskOrigin.of(TaskOrigin.Kind.LLM_TOOL, "llm_tool"));
+    }
+
+    private static ServerPlayer onlineOwner(AIPlayerEntity bot) {
+        UUID ownerId = AIPlayerManager.INSTANCE.ownerOf(bot).orElse(null);
+        return ownerId == null ? null : bot.getServer().getPlayerList().getPlayer(ownerId);
+    }
+
+    private static HouseMaterialStyle houseStyle(String value) {
+        String normalized = value == null ? "" : value.trim().toLowerCase(java.util.Locale.ROOT);
+        return switch (normalized) {
+            case "oak", "cottage", "oak_cottage" -> VanillaHouseStyles.OAK_COTTAGE;
+            case "spruce", "lodge", "spruce_lodge" -> VanillaHouseStyles.SPRUCE_LODGE;
+            default -> throw new IllegalArgumentException("unknown_house_style: " + value);
+        };
+    }
+
+    private static BlockPos buildingAnchor(ServerPlayer player,
+                                           BuildingPlan plan,
+                                           PlanTransform transform) {
+        int width = transform.transformedWidth(plan.width(), plan.depth());
+        int depth = transform.transformedDepth(plan.width(), plan.depth());
+        int distance = Math.max(width, depth) / 2 + 5;
+        BlockPos center = player.blockPosition().relative(player.getDirection(), distance);
+        return new BlockPos(
+                center.getX() - width / 2,
+                player.blockPosition().getY(),
+                center.getZ() - depth / 2);
+    }
+
+    private static Rotation rotationForBuildingFront(Direction front) {
+        return switch (front) {
+            case NORTH -> Rotation.NONE;
+            case EAST -> Rotation.CLOCKWISE_90;
+            case SOUTH -> Rotation.CLOCKWISE_180;
+            case WEST -> Rotation.COUNTERCLOCKWISE_90;
+            default -> Rotation.NONE;
+        };
     }
 
     private static BlockPos blockPos(JsonObject args) {

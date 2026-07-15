@@ -3,8 +3,6 @@ package io.github.greytaiwolf.fakeaiplayer.coordination;
 import io.github.greytaiwolf.fakeaiplayer.brain.BrainCoordinator;
 import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.manager.AIPlayerManager;
-import io.github.greytaiwolf.fakeaiplayer.task.BlueprintLoader;
-import io.github.greytaiwolf.fakeaiplayer.task.BuildTask;
 import io.github.greytaiwolf.fakeaiplayer.task.CraftTask;
 import io.github.greytaiwolf.fakeaiplayer.task.EatTask;
 import io.github.greytaiwolf.fakeaiplayer.task.LightAreaTask;
@@ -22,7 +20,6 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.level.block.Block;
-import java.io.IOException;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -139,14 +136,12 @@ public final class IdleCoordinator {
                 case "smelt" -> Optional.of(new SmeltTask(requiredItem(params, "input_item"), requiredItem(params, "output_item"), intParam(params, "count", 1)));
                 case "eat" -> Optional.of(new EatTask());
                 case "light_area" -> Optional.of(new LightAreaTask(intParam(params, "radius", 8), intParam(params, "max_torches", 8)));
-                case "build" -> Optional.of(new BuildTask(
-                        BlueprintLoader.load(required(params, "blueprint")),
-                        booleanParam(params, "auto_site", false) ? null : optionalBlockPos(params).orElseThrow(),
-                        booleanParam(params, "auto_site", false),
-                        booleanParam(params, "flatten", false)));
+                // Persisted legacy AI jobs must not survive the new human-confirmation boundary.
+                // Human command-driven construction remains available through the command graph.
+                case "build" -> Optional.empty();
                 default -> Optional.empty();
             };
-        } catch (IOException | RuntimeException exception) {
+        } catch (RuntimeException exception) {
             return Optional.empty();
         }
     }
@@ -163,13 +158,6 @@ public final class IdleCoordinator {
                 .orElseThrow(() -> new IllegalArgumentException("unknown_item: " + id));
     }
 
-    private static Optional<BlockPos> optionalBlockPos(Map<String, String> params) {
-        if (!params.containsKey("x") || !params.containsKey("y") || !params.containsKey("z")) {
-            return Optional.empty();
-        }
-        return Optional.of(blockPos(params, "x", "y", "z"));
-    }
-
     private static BlockPos blockPos(Map<String, String> params, String x, String y, String z) {
         return new BlockPos(
                 Integer.parseInt(required(params, x)),
@@ -180,11 +168,6 @@ public final class IdleCoordinator {
     private static int intParam(Map<String, String> params, String name, int fallback) {
         String value = params.get(name);
         return value == null || value.isBlank() ? fallback : Math.max(1, Integer.parseInt(value));
-    }
-
-    private static boolean booleanParam(Map<String, String> params, String name, boolean fallback) {
-        String value = params.get(name);
-        return value == null || value.isBlank() ? fallback : Boolean.parseBoolean(value);
     }
 
     private static String required(Map<String, String> params, String name) {

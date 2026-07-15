@@ -62,12 +62,43 @@ public final class ActionDispatcher {
                 break;
             }
             if (result.ok()) {
-                controlEffect = controlEffect.merge(effectOf(call.name()));
+                ControlEffect effect = effectOf(call.name());
+                controlEffect = controlEffect.merge(effect);
             }
             BotLog.action(bot, "tool_result", "tool", call.name(), "ok", result.ok(), "message", result.message());
             results.add(ChatMessage.toolResult(call.id(), result.toToolContent()));
+            // A successful draft hands control to a human who must inspect the world projection.
+            // Do not execute later calls from the same model batch: they were planned before the
+            // player could possibly see, move, rotate, confirm, or cancel this exact revision.
+            // The assistant message is already in conversation history with every tool_call ID,
+            // so publish a non-executed result for each remaining call. OpenAI-compatible APIs
+            // reject a later request when even one of those IDs is left orphaned.
+            if (result.ok() && effectOf(call.name()) == ControlEffect.AWAIT_EXTERNAL_CONFIRMATION) {
+                List<ChatMessage> deferred = deferredToolResults(calls, index + 1);
+                for (int deferredIndex = index + 1; deferredIndex < calls.size(); deferredIndex++) {
+                    BotLog.action(bot, "tool_result_deferred",
+                            "tool", calls.get(deferredIndex).name(),
+                            "reason", "awaiting_human_confirmation");
+                }
+                results.addAll(deferred);
+                break;
+            }
         }
         return new DispatchBatch(List.copyOf(results), controlEffect);
+    }
+
+    static List<ChatMessage> deferredToolResults(List<ChatToolCall> calls, int fromIndex) {
+        if (calls == null || fromIndex >= calls.size()) {
+            return List.of();
+        }
+        int start = Math.max(0, fromIndex);
+        List<ChatMessage> results = new ArrayList<>(calls.size() - start);
+        ToolDefinition.ToolResult deferred = new ToolDefinition.ToolResult(
+                false, "not_executed: awaiting_human_confirmation");
+        for (int index = start; index < calls.size(); index++) {
+            results.add(ChatMessage.toolResult(calls.get(index).id(), deferred.toToolContent()));
+        }
+        return List.copyOf(results);
     }
 
     private ToolDefinition.ToolResult invoke(AIPlayerEntity bot, ChatToolCall call) {
@@ -140,6 +171,7 @@ public final class ActionDispatcher {
         return switch (toolName) {
             case "stop", "abort_task" -> ControlEffect.CANCEL_CURRENT;
             case "cancel_all" -> ControlEffect.CANCEL_ALL;
+            case "draft_building" -> ControlEffect.AWAIT_EXTERNAL_CONFIRMATION;
             default -> ControlEffect.NONE;
         };
     }
@@ -147,7 +179,8 @@ public final class ActionDispatcher {
     public enum ControlEffect {
         NONE,
         CANCEL_CURRENT,
-        CANCEL_ALL;
+        CANCEL_ALL,
+        AWAIT_EXTERNAL_CONFIRMATION;
 
         private ControlEffect merge(ControlEffect other) {
             return ordinal() >= other.ordinal() ? this : other;

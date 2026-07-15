@@ -17,6 +17,16 @@ public final class AIBotKeyBindings {
             InputConstants.Type.KEYSYM,
             GLFW.GLFW_KEY_UNKNOWN,
             "key.categories.fakeaiplayer");
+    private static final KeyMapping CONFIRM_BUILDING_PREVIEW = new KeyMapping(
+            "key.fakeaiplayer.confirm_building_preview",
+            InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_UNKNOWN,
+            "key.categories.fakeaiplayer");
+    private static final KeyMapping CANCEL_BUILDING_PREVIEW = new KeyMapping(
+            "key.fakeaiplayer.cancel_building_preview",
+            InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_UNKNOWN,
+            "key.categories.fakeaiplayer");
     private static boolean altZeroDown;
     private static boolean altNineDown;
 
@@ -29,6 +39,24 @@ public final class AIBotKeyBindings {
 
     public static KeyMapping openActions() {
         return OPEN_ACTIONS;
+    }
+
+    public static KeyMapping confirmBuildingPreview() {
+        return CONFIRM_BUILDING_PREVIEW;
+    }
+
+    public static KeyMapping cancelBuildingPreview() {
+        return CANCEL_BUILDING_PREVIEW;
+    }
+
+    public static PreviewAction pollPreviewAction() {
+        while (CONFIRM_BUILDING_PREVIEW.consumeClick()) {
+            return PreviewAction.CONFIRM;
+        }
+        while (CANCEL_BUILDING_PREVIEW.consumeClick()) {
+            return PreviewAction.CANCEL;
+        }
+        return null;
     }
 
     public static BotPanelScreen.Mode pollToggle(Minecraft client) {
@@ -61,5 +89,10 @@ public final class AIBotKeyBindings {
             return BotPanelScreen.Mode.CHAT_STATUS;
         }
         return null;
+    }
+
+    public enum PreviewAction {
+        CONFIRM,
+        CANCEL
     }
 }

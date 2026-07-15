@@ -27,6 +27,9 @@ public final class PathExecutor {
     private List<Node> path;
     private int index = 1;
     private final BlockPos originalGoal;
+    private final boolean exactGoal;
+    private final boolean allowPillarOnReplan;
+    private final boolean allowDigOnReplan;
     private WalkToController subWalker;
     private MiningController subMiner;
     private boolean digWalking;
@@ -39,8 +42,23 @@ public final class PathExecutor {
     private int nodeRetry;
 
     public PathExecutor(List<Node> path, BlockPos originalGoal) {
+        this(path, originalGoal, false, true, true);
+    }
+
+    public PathExecutor(List<Node> path, BlockPos originalGoal, boolean exactGoal) {
+        this(path, originalGoal, exactGoal, true, true);
+    }
+
+    public PathExecutor(List<Node> path,
+                        BlockPos originalGoal,
+                        boolean exactGoal,
+                        boolean allowPillarOnReplan,
+                        boolean allowDigOnReplan) {
         this.path = List.copyOf(path);
         this.originalGoal = originalGoal.immutable();
+        this.exactGoal = exactGoal;
+        this.allowPillarOnReplan = allowPillarOnReplan;
+        this.allowDigOnReplan = allowDigOnReplan;
     }
 
     public ActionResult tick(ActionPack pack) {
@@ -48,6 +66,11 @@ public final class PathExecutor {
         if (path.isEmpty() || index >= path.size()) {
             cleanup(pack);
             double distSq = pack.player().blockPosition().distSqr(originalGoal);
+            if (exactGoal && !isExactGoal(pack.player().blockPosition(), originalGoal)) {
+                BotLog.warn(LogCategory.PATH, pack.player(), "path_end_not_exact",
+                        "dist_sq", distSq, "goal", LogFields.pos(originalGoal));
+                return ActionResult.failed("ended_before_exact_goal dist_sq=" + (int) distSq);
+            }
             if (distSq > 4.0D) {
                 BotLog.warn(LogCategory.PATH, pack.player(), "path_end_far_from_goal",
                         "dist_sq", distSq, "goal", LogFields.pos(originalGoal));
@@ -91,7 +114,7 @@ public final class PathExecutor {
     }
 
     private ActionResult tickWalk(ActionPack pack, Node next) {
-        if (arrivedAt(pack.player().blockPosition(), next.pos())) {
+        if (hasArrived(pack.player().blockPosition(), next.pos())) {
             advance();
             return ActionResult.IN_PROGRESS;
         }
@@ -105,10 +128,13 @@ public final class PathExecutor {
                         "from", LogFields.pos(next.pos()),
                         "to", LogFields.pos(target.pos()));
             }
-            subWalker = new WalkToController(Vec3.atCenterOf(target.pos()));
+            BlockPos requiredColumn = exactGoal && target.pos().equals(originalGoal)
+                    ? originalGoal
+                    : null;
+            subWalker = new WalkToController(Vec3.atCenterOf(target.pos()), requiredColumn);
         }
         Node target = path.get(activeWalkTargetIndex);
-        if (arrivedAt(pack.player().blockPosition(), target.pos())) {
+        if (hasArrived(pack.player().blockPosition(), target.pos())) {
             advanceTo(activeWalkTargetIndex + 1);
             return ActionResult.IN_PROGRESS;
         }
@@ -304,6 +330,24 @@ public final class PathExecutor {
         return dx * dx + dz * dz <= 1 && Math.abs(current.getY() - target.getY()) <= 1;
     }
 
+    private boolean hasArrived(BlockPos current, BlockPos target) {
+        if (exactGoal && target.equals(originalGoal)) {
+            return isExactGoal(current, target);
+        }
+        return arrivedAt(current, target);
+    }
+
+    /**
+     * Directional placement only needs the reviewed horizontal work cell. A player standing on a
+     * stair or slab can report a feet Y one block below the path node, so vertical equality would
+     * reject an otherwise exact and stable placement column.
+     */
+    private static boolean isExactGoal(BlockPos current, BlockPos target) {
+        return current.getX() == target.getX()
+                && current.getZ() == target.getZ()
+                && Math.abs(current.getY() - target.getY()) <= 1;
+    }
+
     private ActionResult handleWalkFailure(ActionPack pack, String reason) {
         if (reason.contains("stuck_blocked") && nodeRetry < AIBotConfig.get().nav().nodeRetry()) {
             nodeRetry++;
@@ -338,8 +382,13 @@ public final class PathExecutor {
                 cleanup(pack);
                 return ActionResult.failed(reason + "; replan_failed: NO_START");
             }
-            boolean canPillar = hasPlaceableBlock(pack.player());
-            AStarPathfinder finder = new AStarPathfinder(pack.player().serverLevel(), pack.player().blockPosition(), originalGoal, canPillar);
+            boolean canPillar = allowPillarOnReplan && hasPlaceableBlock(pack.player());
+            AStarPathfinder finder = new AStarPathfinder(
+                    pack.player().serverLevel(),
+                    pack.player().blockPosition(),
+                    originalGoal,
+                    canPillar,
+                    allowDigOnReplan);
             PathfindingResult fresh = finder.findPath();
             if (fresh.success()) {
                 BotLog.path(pack.player(), "path_replan", "at_node", reason, "new_path_size", fresh.path().size());

@@ -56,6 +56,26 @@ class PrivilegedBoundarySourceTest {
         int emergencyGate = actionPack.indexOf("CapabilityRuntime.decide", currentStandable);
         assertTrue(snapMethod >= 0 && currentStandable > snapMethod && emergencyGate > currentStandable,
                 "ordinary pathfinding from a valid start must run before the emergency-teleport gate");
+        assertTrue(actionPack.contains("return startPathTo(goal, false, false, true);"),
+                "construction-safe navigation must disable both pillar placement and dig fallback");
+
+        String pathExecutor = read("pathfinding/PathExecutor.java");
+        assertTrue(pathExecutor.contains("allowPillarOnReplan && hasPlaceableBlock"));
+        assertTrue(pathExecutor.contains("canPillar,\n                    allowDigOnReplan"),
+                "construction-safe replans must preserve the non-mutating policy");
+
+        String moveTask = read("task/MoveTask.java");
+        assertTrue(moveTask.contains("public static MoveTask nonMutating"));
+        assertTrue(moveTask.contains("startNonMutatingPathTo(target)"));
+        assertTrue(moveTask.indexOf("if (!worldMutationAllowed)")
+                        < moveTask.indexOf("digging = true;"),
+                "initial, relay and idle fallbacks must fail before entering DigNav");
+        String goalPlanner = read("goal/GoalPlanner.java");
+        assertTrue(goalPlanner.contains("GoalStep.moveNonMutating(buildStagingPoint"));
+        String goalExecutor = read("goal/GoalExecutor.java");
+        assertTrue(goalExecutor.contains(
+                        "case MOVE_NON_MUTATING -> Optional.of(MoveTask.nonMutating"),
+                "confirmed staging must retain its non-mutating policy at task dispatch");
     }
 
     @Test
@@ -114,10 +134,41 @@ class PrivilegedBoundarySourceTest {
         assertTrue(buildTask.contains("StructureVerifier.verify"));
         assertTrue(buildTask.contains("structure_incomplete"),
                 "a best-effort blueprint must not report completion without exact verification");
-        assertEquals(2, occurrences(buildTask, "isObservableStandable(bot, candidate)"),
-                "both work-pose scans must cross the observable-world boundary");
+        assertEquals(3, occurrences(buildTask, "isObservableStandable(bot, candidate)"),
+                "general, directional and exterior work-pose scans must use one reviewed boundary");
         assertEquals(1, occurrences(buildTask, "Standability.isStandable"),
                 "raw standability must stay inside the observable work-pose adapter");
+        assertTrue(buildTask.contains("hasCompletedPlanSupport(candidate.below())"),
+                "an occluded work deck exception must be tied to a completed immutable plan cell");
+        assertTrue(buildTask.contains("hasUsablePlacementRayFrom"));
+        assertTrue(buildTask.contains("ClipContext.Block.OUTLINE"));
+        assertTrue(buildTask.contains("hit.getDirection() == face"),
+                "work-pose planning must prove the same clicked face used by BuildAction");
+        assertTrue(buildTask.contains("expectedPlacementAxis"),
+                "pillar/log work poses must preserve the reviewed axis state");
+        assertTrue(buildTask.contains("startNonMutatingPathTo"),
+                "reviewed construction routes must not add pillars or dig unrelated cells");
+        assertTrue(buildTask.contains("prerequisite_not_satisfied"),
+                "reviewed dependencies must remain exact runtime preconditions");
+        assertTrue(buildTask.contains("reviewed_placement_failed"),
+                "reviewed plans must fail closed instead of building unsupported child cells");
+        assertTrue(buildTask.contains("foundation_support_not_inspectable"));
+        assertTrue(buildTask.contains("support.isFaceSturdy(world, supportPos, Direction.UP)"),
+                "confirmed foundations must recheck dry sturdy support at execution time");
+        String previewService = read("building/preview/BuildingPreviewService.java");
+        assertTrue(previewService.contains("support.isFaceSturdy(world, supportPos, Direction.UP)"),
+                "confirmation must reject foundation cells over cliffs or fluids");
+        String actionPack = read("action/ActionPack.java");
+        assertTrue(actionPack.contains(
+                        "result.path(), resolvedGoal, exactGoal, canPillar, allowDigFallback"),
+                "construction path policy must be preserved by the executor");
+        String pathExecutor = read("pathfinding/PathExecutor.java");
+        assertTrue(pathExecutor.contains("allowPillarOnReplan && hasPlaceableBlock"));
+        assertTrue(pathExecutor.contains("allowDigOnReplan"),
+                "a non-mutating construction path must remain non-mutating after replan");
+        String walker = read("action/WalkToController.java");
+        assertTrue(walker.contains("hasReachedRequiredColumn(player.blockPosition())"),
+                "exact construction paths must not finish from an adjacent horizontal cell");
         assertFalse(StructureVerifier.matches(
                         null,
                         BlockPos.ZERO,

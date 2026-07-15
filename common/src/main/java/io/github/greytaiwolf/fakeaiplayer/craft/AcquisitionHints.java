@@ -16,6 +16,7 @@ public final class AcquisitionHints {
             Items.COAL_ORE,
             Items.COPPER_ORE,
             Items.GOLD_ORE,
+            Items.SAND,
             Items.OBSIDIAN);
 
     private static final Set<Item> SMELT_ITEMS = Set.of(

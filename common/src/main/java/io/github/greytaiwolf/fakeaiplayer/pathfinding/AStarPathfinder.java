@@ -54,6 +54,14 @@ public final class AStarPathfinder {
         this(world, start, goal, DEFAULT_MAX_NODES, DEFAULT_MAX_MILLIS, canPillar);
     }
 
+    public AStarPathfinder(ServerLevel world,
+                           BlockPos start,
+                           BlockPos goal,
+                           boolean canPillar,
+                           boolean allowDig) {
+        this(world, start, goal, DEFAULT_MAX_NODES, DEFAULT_MAX_MILLIS, canPillar, allowDig);
+    }
+
     public AStarPathfinder(ServerLevel world, BlockPos start, BlockPos goal, int maxNodes, long maxMillis, boolean canPillar) {
         this(world, start, goal, maxNodes, maxMillis, canPillar, true);
     }

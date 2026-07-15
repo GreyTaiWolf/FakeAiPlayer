@@ -1,6 +1,9 @@
 package io.github.greytaiwolf.fakeaiplayer.goal;
 
+import java.util.Locale;
 import java.util.Set;
+import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.level.block.Block;
 
@@ -54,7 +57,57 @@ public sealed interface Goal permits Goal.HaveItem, Goal.HavePickaxeTier, Goal.M
         }
     }
 
-    /** 盖房目标:按蓝图建造("盖房子"一句话全链:自动备料→建造),蓝图名如 small_hut/hut_5x5。 */
-    record Build(String blueprint) implements Goal {
+    /**
+     * 盖房目标:按蓝图建造("盖房子"一句话全链:自动备料→建造)。
+     *
+     * <p>{@code anchor} 与 {@code dimension} 固化用户确认过的世界位置，
+     * {@code blueprintDigest} 则把任务绑定到确认时审核过的规范化蓝图内容。执行器要求三个
+     * 字段全部存在；升级前的自动选址任务和任何不完整存档都会失败关闭，绝不在没有当前玩家
+     * 投影确认的情况下继续施工。</p>
+     */
+    record Build(String blueprint,
+                 BlockPos anchor,
+                 String dimension,
+                 String blueprintDigest) implements Goal {
+        public Build {
+            anchor = anchor == null ? null : anchor.immutable();
+            if (dimension == null || dimension.isBlank()) {
+                dimension = null;
+            } else {
+                ResourceLocation parsed = ResourceLocation.tryParse(dimension);
+                if (parsed == null) {
+                    throw new IllegalArgumentException("invalid_build_dimension: " + dimension);
+                }
+                dimension = parsed.toString();
+            }
+            if (blueprintDigest == null || blueprintDigest.isBlank()) {
+                blueprintDigest = null;
+            } else {
+                blueprintDigest = blueprintDigest.toLowerCase(Locale.ROOT);
+                if (!blueprintDigest.matches("[0-9a-f]{64}")) {
+                    throw new IllegalArgumentException("invalid_blueprint_digest");
+                }
+            }
+        }
+
+        public Build(String blueprint, BlockPos anchor, String dimension) {
+            this(blueprint, anchor, dimension, null);
+        }
+
+        public Build(String blueprint, BlockPos anchor) {
+            this(blueprint, anchor, null, null);
+        }
+
+        public Build(String blueprint) {
+            this(blueprint, null, null, null);
+        }
+
+        public boolean isGeneratedReference() {
+            return blueprint != null && blueprint.startsWith("generated_");
+        }
+
+        public boolean hasCompleteConfirmedBinding() {
+            return anchor != null && dimension != null && blueprintDigest != null;
+        }
     }
 }

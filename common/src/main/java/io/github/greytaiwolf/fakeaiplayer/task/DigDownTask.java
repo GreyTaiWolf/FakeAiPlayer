@@ -60,16 +60,24 @@ public final class DigDownTask extends AbstractTask {
     private int returnStartTick;
 
     public DigDownTask(Block targetBlock, int targetCount) {
+        this(targetBlock, targetCount, false);
+    }
+
+    public DigDownTask(Block targetBlock, int targetCount, boolean exactDrops) {
         this.targetBlock = targetBlock;
         this.targetCount = Math.max(1, targetCount);
+        this.targetDrops = targetDropsFor(targetBlock, exactDrops);
+    }
+
+    static Set<Item> targetDropsFor(Block targetBlock, boolean exactDrops) {
         Set<Item> drops = new HashSet<>(HarvestCore.expectedDropsFor(Set.of(targetBlock)));
-        if (targetBlock == Blocks.STONE) {
+        if (targetBlock == Blocks.STONE && !exactDrops) {
             // 深层(Y<0)全是深板岩(挖了掉 cobbled_deepslate)、远古遗迹是黑石——都算"石料",
             // 否则深层永远凑不够 cobblestone、做不了熔炉(实测 Y=-59 死循环根因)。
             drops.add(Items.COBBLED_DEEPSLATE);
             drops.add(Items.BLACKSTONE);
         }
-        this.targetDrops = drops;
+        return Set.copyOf(drops);
     }
 
     @Override

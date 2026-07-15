@@ -9,8 +9,16 @@ neoForge {
         minecraftVersion = parchment_minecraft
         mappingsVersion = parchment_version
     }
+    mods {
+        register(mod_id) {
+            sourceSet sourceSets.main
+        }
+    }
     unitTest {
         enable()
+        // The NeoForge JUnit launcher must discover a tested mod before Minecraft's
+        // bootstrap runs; otherwise NeoForge's registry hooks have no LoadingModList.
+        testedMod = mods.getByName(mod_id)
     }
 }
 
