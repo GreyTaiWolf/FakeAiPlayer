@@ -408,10 +408,9 @@ public final class GoalExecutor {
                 decodePos(encoded).ifPresent(containers::add);
             }
         }
-        // A confirmation-time anchor carried by Goal.Build is authoritative. The checkpoint
-        // anchor remains the recovery path for legacy auto-site builds that discovered their
-        // location only after BuildTask started.
-        BlockPos buildAnchor = goal instanceof Goal.Build build && build.anchor() != null
+        // A Build goal may resume only at its confirmation-bound anchor. Never promote an old
+        // auto-site checkpoint into a trusted binding during migration.
+        BlockPos buildAnchor = goal instanceof Goal.Build build
                 ? build.anchor()
                 : decodePos(checkpoint.get("build_anchor")).orElse(fallback.buildAnchor());
         BlueprintSchema blueprint = null;
@@ -725,12 +724,14 @@ public final class GoalExecutor {
             // DIGDOWN(实测#8):MINE 步改用 DigDownTask——站着就近垂直下挖,不定位/不寻路,
             // 永不"够不到/走不过去"空转。取代旧的 OreSeekTask.digBlocks(它会锁定垂直够不到的石头 stuck)。
             case MINE -> Optional.of(new DigDownTask(step.block(), step.count()));
+            case MINE_EXACT -> Optional.of(new DigDownTask(step.block(), step.count(), true));
             // OREDIG(实测#10):MINE_ORE 步改用 OreDigTask(BlockMiner 控制式直挖隧道),
             // 取代 OreSeekTask——后者"A*接近被埋矿"在 #6/#8/#10 连续 stuck。
             case MINE_ORE -> Optional.of(new OreDigTask(step.ores(), step.count()));
             case CRAFT -> Optional.of(new CraftTask(step.item(), step.count()));
             case SMELT -> Optional.of(new SmeltTask(step.input(), step.output(), step.count()));
             case MOVE -> Optional.of(new MoveTask(bot, step.pos()));
+            case MOVE_NON_MUTATING -> Optional.of(MoveTask.nonMutating(bot, step.pos()));
             // P3:FARM 步 → 数量受限的 FarmTask(就地开垦/播种/等熟/收割,收够 count 个产出即完成)。
             case FARM -> Optional.of(new FarmTask(bot.blockPosition(), 4, step.input(), step.block(),
                     true, false, step.item(), step.count()));
@@ -820,13 +821,16 @@ public final class GoalExecutor {
     private static BlueprintSchema validateAndLoadBuildGoal(AIPlayerEntity bot,
                                                             Goal.Build build) throws IOException {
         boolean generated = build.isGeneratedReference();
-        if (generated && !BlueprintLoader.isGeneratedName(build.blueprint())) {
-            throw new IOException("generated_blueprint_name_invalid");
-        }
-        if (generated && !build.hasCompleteConfirmedBinding()) {
-            // Old mission JSON still decodes so the rest of the snapshot remains compatible, but
-            // its generated file is not trusted without the confirmation-time content binding.
-            throw new IOException("generated_blueprint_binding_incomplete");
+        if (!hasTrustedBuildBinding(build)) {
+            if (!generated || !BlueprintLoader.isGeneratedName(build.blueprint())) {
+                // Goal.Build is the resumable AI/mission path and accepts only immutable
+                // blueprints emitted by the projection-confirmation service. Explicit player
+                // task commands use BuildTask directly and do not reopen this legacy preset path.
+                throw new IOException("build_goal_requires_confirmed_generated_blueprint");
+            }
+            // Old mission JSON still decodes so unrelated snapshot data remains compatible, but
+            // no Goal.Build may execute without the confirmation-time location/content binding.
+            throw new IOException("build_blueprint_binding_incomplete");
         }
         if (build.dimension() != null
                 && !build.dimension().equals(bot.serverLevel().dimension().location().toString())) {
@@ -836,10 +840,15 @@ public final class GoalExecutor {
         return loadBuildBlueprint(build);
     }
 
+    static boolean hasTrustedBuildBinding(Goal.Build build) {
+        return build != null
+                && build.isGeneratedReference()
+                && BlueprintLoader.isGeneratedName(build.blueprint())
+                && build.hasCompleteConfirmedBinding();
+    }
+
     private static BlueprintSchema loadBuildBlueprint(Goal.Build build) throws IOException {
-        return build.blueprintDigest() == null
-                ? BlueprintLoader.load(build.blueprint())
-                : BlueprintLoader.loadVerified(build.blueprint(), build.blueprintDigest());
+        return BlueprintLoader.loadVerified(build.blueprint(), build.blueprintDigest());
     }
 
     private void finishActive(AIPlayerEntity bot,

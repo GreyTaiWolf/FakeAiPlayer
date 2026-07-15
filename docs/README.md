@@ -30,7 +30,7 @@
   → 既有备料与建造任务
 ```
 
-AI 只有 draft/status/cancel 能成功推进建筑，不开放确认；兼容注册的旧 `build_house`、`assign_task build`、`post_job build` 和重启恢复的旧 AI build Job 都不能绕过这条边界。确认后任务绑定 canonical blueprint digest、锚点和维度；V2 依赖在执行前逐项复核，地基下方的干燥、稳固、可检查支撑也会在确认时和实际落块前重复核验。NeoForge 的确认/取消按键默认未绑定。当前 renderer 是有距离与视锥裁剪的即时彩色线框，不是 Create/MineColonies/Litematica 等模组的代码移植，也不是已经完成的 VBO 或真实方块模型投影。
+AI 只有 draft/status/cancel 能成功推进建筑，不开放确认；兼容注册的旧 `build_house`、`assign_task build`、`post_job build`，以及重启恢复的旧 AI build Job 和缺少摘要/锚点/维度绑定的旧 build Mission，都不能绕过这条边界。确认后任务绑定 canonical blueprint digest、锚点和维度；V2 依赖在执行前逐项复核，地基下方的干燥、稳固、可检查支撑也会在确认时和实际落块前重复核验。NeoForge 的确认/取消按键默认未绑定。当前 renderer 是有距离与视锥裁剪的即时彩色线框，不是 Create/MineColonies/Litematica 等模组的代码移植，也不是已经完成的 VBO 或真实方块模型投影。
 
 ## 能力矩阵的来源
 

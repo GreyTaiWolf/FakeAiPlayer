@@ -28,6 +28,7 @@ public final class MoveTask extends AbstractTask {
 
     private final BlockPos goal;
     private final double startDistance;
+    private final boolean worldMutationAllowed;
     private BlockPos resolvedGoal;
     private boolean digging;                               // 纯寻路走不通 → 降级为挖掘式直行
     private final BlockMiner miner = new BlockMiner();
@@ -36,12 +37,22 @@ public final class MoveTask extends AbstractTask {
     private int waypointHops;                              // 已采用中继点次数(上限 WAYPOINT_MAX_HOPS)
 
     public MoveTask(BlockPos start, BlockPos goal) {
+        this(start, goal, true);
+    }
+
+    private MoveTask(BlockPos start, BlockPos goal, boolean worldMutationAllowed) {
         this.goal = goal.immutable();
         this.startDistance = Math.sqrt(start.distSqr(goal));
+        this.worldMutationAllowed = worldMutationAllowed;
     }
 
     public MoveTask(AIPlayerEntity bot, BlockPos goal) {
         this(bot.blockPosition(), goal);
+    }
+
+    /** Movement used after a player confirms an immutable construction site. */
+    public static MoveTask nonMutating(AIPlayerEntity bot, BlockPos goal) {
+        return new MoveTask(bot.blockPosition(), goal, false);
     }
 
     @Override
@@ -89,7 +100,7 @@ public final class MoveTask extends AbstractTask {
     }
 
     private void startWalkOrDig(AIPlayerEntity bot) {
-        ActionResult result = bot.getActionPack().startPathTo(goal);
+        ActionResult result = startPath(bot, goal);
         if (result.isFailed()) {
             // 中继优先于挖掘降级:挖掘式直行是"最后手段"——它无视地形朝坐标硬挖,目标隔水时
             // 必然一路挖进湖里触发溺水熔断、任务必败。寻路失败先试分段中继(走得通就不动土),
@@ -129,6 +140,9 @@ public final class MoveTask extends AbstractTask {
         }
         // 纯寻路模式:寻路执行器空闲(到不了)→ 降级挖掘式直行,而不是直接 did_not_reach 卡死。
         if (bot.getActionPack().isPathExecutorIdle() && elapsed > 5) {
+            if (tryWaypointRelay(bot, "path_idle")) {
+                return;
+            }
             beginDigging(bot, "path_idle");
             return;
         }
@@ -138,6 +152,11 @@ public final class MoveTask extends AbstractTask {
     }
 
     private void beginDigging(AIPlayerEntity bot, String reason) {
+        if (!worldMutationAllowed) {
+            bot.getActionPack().stopAll();
+            fail("non_mutating_path_failed: " + reason);
+            return;
+        }
         digging = true;
         waypoint = null; // 互斥:进挖掘模式即放弃经停
         digLastProgressTick = elapsed;
@@ -203,7 +222,7 @@ public final class MoveTask extends AbstractTask {
         }
         // 经停到达(或这一段提前断了也就地换乘):重新直奔最终 goal——离湖更近、视角变了,直达可能已经可解。
         waypoint = null;
-        ActionResult result = bot.getActionPack().startPathTo(goal);
+        ActionResult result = startPath(bot, goal);
         if (!result.isFailed()) {
             resolvedGoal = bot.getActionPack().activePathGoal();
             return;
@@ -243,7 +262,7 @@ public final class MoveTask extends AbstractTask {
      * 中继点选择:以 bot→goal 方位角 θ 为基准,偏角 {0°,±30°,±60°,±90°}(外层)×
      * 前出距离 {goal距离一半钳到≤40, 24, 12}(内层)生成候选;每个候选取地表落脚 y,
      * 必须同时满足:可站立 + 干列(湖面/浅滩水点全排除)+ 不比当前更远离 goal 超 10%(防背向倒退)。
-     * 第一个几何合格且 startPathTo 不失败的候选即采用(寻路成功即顺带启动了去程)。
+     * 第一个几何合格且当前策略的 path 请求不失败的候选即采用(寻路成功即顺带启动了去程)。
      * 距离钳 ≤40:保证每一段都落在 A* 步行预算(10k 节点)稳定可解的范围内——分段正是为此。
      */
     private BlockPos pickWaypoint(AIPlayerEntity bot, BlockPos target) {
@@ -283,12 +302,18 @@ public final class MoveTask extends AbstractTask {
                     return null; // 同步 A* 单次 ~50ms 级,封顶实跑次数防单 tick 长卡
                 }
                 pathAttempts++;
-                if (!bot.getActionPack().startPathTo(candidate).isFailed()) {
+                if (!startPath(bot, candidate).isFailed()) {
                     return candidate;
                 }
             }
         }
         return null;
+    }
+
+    private ActionResult startPath(AIPlayerEntity bot, BlockPos target) {
+        return worldMutationAllowed
+                ? bot.getActionPack().startPathTo(target)
+                : bot.getActionPack().startNonMutatingPathTo(target);
     }
 
     /**

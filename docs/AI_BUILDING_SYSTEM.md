@@ -12,7 +12,7 @@
 - `IN SOURCE`：命令入口和 AI 工具 `draft_building`、`building_preview_status`、`cancel_building_preview`。AI 只能起草、查询和取消；确认施工仍必须由已授权的在线玩家完成。
 - `IN SOURCE`：旧 AI `build_house`、`assign_task build` 和 `post_job build` 均失败关闭并返回“使用 `draft_building`”；空闲协调器也不再执行持久化的旧 build Job。人工直接输入的确定性建造命令仍属于另一条显式授权入口，不等于给模型确认权。
 - `IN SOURCE`：V2 placement 依赖会在 adapter 中转换为稳定的前置 sequence。Loader 拒绝缺失、非先行或无 sequence 的依赖；`BuildTask` 在依赖格改变世界前重新精确比较每个前置格的 BlockState，reviewed V2 格一旦失败便失败关闭，而不是跳过支撑继续施工。
-- `PARTIAL`：确认会重新检查 owner、Bot、维度、距离、hash、transform revision、边界、区块、BlockState、替换策略、流体、方块实体和原子组；位于局部 `dy=0` 的 `FOUNDATION/PLACE` 格还要求下方可检查、无流体且上表面稳固，并在执行落块前再次检查，关闭备料期间支撑被挖除或注水的竞态，然后才把确定方案交给既有备料/建造链。材料规划用保留账本防止门、楼梯、工作台、熔炉和工具前置吞掉最终地板/梁材。此路径已在 Temurin Java 21.0.11 下完成源码语法解析、纯生成器编译/12,800 方案烟雾与静态门禁；完整 Gradle 因当前环境 JVM 无法访问外部 Maven、在 `fabric-loom` 解析时于项目编译前中止，仍待 GitHub Actions。NeoForge 真实客户端、真实生存材料链和复杂地形 GameTest 也尚未完成，因此不能称为“建筑已可靠完成”。
+- `PARTIAL`：确认会重新检查 owner、Bot、维度、距离、hash、transform revision、边界、区块、BlockState、替换策略、流体、方块实体和原子组；位于局部 `dy=0` 的 `FOUNDATION/PLACE` 格还要求下方可检查、无流体且上表面稳固，并在执行落块前再次检查，然后才把确定方案交给既有备料/建造链。材料规划用保留账本防止门、楼梯、工作台、熔炉和工具前置吞掉最终地板/梁材，沙子按缺口增量采集，literal 圆石与宽松 stone-like 工具链也已拆开。此路径已在 Temurin Java 21.0.11 下完成源码语法解析、纯生成器编译/12,800 方案烟雾与静态门禁；完整 Gradle 因当前环境 JVM 无法访问外部 Maven、在 `fabric-loom` 解析时于项目编译前中止，仍待 GitHub Actions。确认后的自动备料目前仍没有 mission-scoped 场地保护和分阶段工具/背包物流：采集可能选中投影支撑或已完成构件，大批原木/圆石还缺少可靠的工具耐久预算。因此 NeoForge 真实客户端、真实生存材料链和复杂地形 GameTest 均尚未完成，不能称为“建筑已可靠完成”，此分支必须保持 Draft。
 - `PARTIAL`：普通原版 `BlockItem` 会用 `BlockPlaceContext` 做保守预测；草、花、雪层走真实的“点击可替换目标格”交互，门下半格使用双格放置语义。带流体目标会在确认期拒绝，reviewed plan 不使用 `setBlock` 修正或兜底。当前公开住宅以永久阁楼通路避免临时脚手架；通用高层/复杂屋顶脚手架、错误状态事务回滚和模组方块适配仍未完成。
 - `TODO`：Fabric 投影注册与渲染、VBO/分区缓存、场地调查、A/B/C 方案、类型化局部修改、楼层/阶段过滤、完整 BOM UI、完整二层房间/阳台/栏杆，以及真实 GameTest 和双加载器发布证据。
 
@@ -288,7 +288,7 @@ BuildingPreviewCancelC2S / BuildingPreviewClearS2C
 - 材料闭包预检先直接使用同一份内存 blueprint；只有预检成功才写文件，因此不存在“文件尚未生成导致预检必失败”，也不会因预检拒绝留下孤儿文件；
 - 写入前执行 expansion、BlockState、operation/policy、sequence 和 4 MiB 文件上限校验；
 - 生成文件使用耐久临时文件替换，不跟随 symlink；同名同内容重试幂等，同名不同内容失败，并在写入后通过普通有界 loader 回读及 canonical SHA-256 核验；
-- `Goal.Build`/`MissionSpec` 保存 blueprint 名、`anchor_x/y/z`、维度与 `blueprint_digest`。旧的非 generated 蓝图仍兼容自动选址；旧的 generated 任务若没有完整摘要/锚点/维度则可读取但不可信执行；
+- `Goal.Build`/`MissionSpec` 保存 blueprint 名、`anchor_x/y/z`、维度与 `blueprint_digest`。执行器只接受投影确认服务写出的 `generated_*` 名称及完整绑定；升级前的 preset/custom/generated 记录仍可读取以隔离旧存档，但一律不可信执行；
 - Goal checkpoint 保存锚点和已观测进度。恢复、执行前重新读取持久化 blueprint 并比较摘要；`BuildTask` 每 tick 在导航或世界变更前比较不可变执行蓝图摘要和目标维度。备料期间跨维度会立即终止整条确认任务，而不会在另一个世界的同坐标继续施工。
 - adapter 把每个 `PlanPlacement.dependencies` 映射为最终稳定 sequence 的 `prerequisites`；持久化摘要包含这些依赖，Loader 要求它们引用已出现的更小 sequence，执行器也要求每个前置格在依赖格施工前仍精确符合已审核状态。
 

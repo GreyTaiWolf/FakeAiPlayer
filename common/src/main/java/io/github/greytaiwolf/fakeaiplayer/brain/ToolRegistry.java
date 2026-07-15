@@ -419,8 +419,7 @@ public final class ToolRegistry {
             int width = optionalInt(args, "width", 9);
             int depth = optionalInt(args, "depth", 9);
             int wallHeight = optionalInt(args, "wall_height", 5);
-            if (width < 7 || width > 16 || depth < 7 || depth > 16
-                    || wallHeight < 4 || wallHeight > 5) {
+            if (!HouseDimensions.isExecutableRange(width, depth, wallHeight)) {
                 return fail("building_dimensions_outside_executable_range: width/depth=7..16, wall_height=4..5");
             }
             long seed = optionalInt(args, "seed", 0);

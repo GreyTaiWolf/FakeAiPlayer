@@ -61,9 +61,9 @@ public sealed interface Goal permits Goal.HaveItem, Goal.HavePickaxeTier, Goal.M
      * 盖房目标:按蓝图建造("盖房子"一句话全链:自动备料→建造)。
      *
      * <p>{@code anchor} 与 {@code dimension} 固化用户确认过的世界位置，
-     * {@code blueprintDigest} 则把任务绑定到确认时审核过的规范化蓝图内容。旧命令和旧的
-     * 非 generated 存档仍可省略这些字段并让 {@code BuildTask} 自动选址；旧的 generated
-     * 任务若没有摘要会由执行器失败关闭，绝不按一个后来被替换的同名文件施工。</p>
+     * {@code blueprintDigest} 则把任务绑定到确认时审核过的规范化蓝图内容。执行器要求三个
+     * 字段全部存在；升级前的自动选址任务和任何不完整存档都会失败关闭，绝不在没有当前玩家
+     * 投影确认的情况下继续施工。</p>
      */
     record Build(String blueprint,
                  BlockPos anchor,
@@ -107,8 +107,7 @@ public sealed interface Goal permits Goal.HaveItem, Goal.HavePickaxeTier, Goal.M
         }
 
         public boolean hasCompleteConfirmedBinding() {
-            return !isGeneratedReference()
-                    || anchor != null && dimension != null && blueprintDigest != null;
+            return anchor != null && dimension != null && blueprintDigest != null;
         }
     }
 }

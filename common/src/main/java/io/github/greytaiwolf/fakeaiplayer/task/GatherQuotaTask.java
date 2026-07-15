@@ -112,7 +112,8 @@ public final class GatherQuotaTask extends AbstractTask {
     }
 
     /**
-     * @param exactItem when true, do not widen a requested log to the all-log family
+     * @param exactItem when true, count progress from the task-start inventory baseline and do not
+     *                  widen a requested log to the all-log family
      */
     public GatherQuotaTask(Item targetItem, int targetCount, boolean exactItem) {
         this.targetItem = targetItem;

@@ -128,16 +128,19 @@ public final class GoalPlanner {
     }
 
     static List<GoalStep> mergeGathers(List<GoalStep> steps) {
-        // GATHER/GATHER_EXACT:无前置依赖 → 合并并提到计划最前。精确与家族采集
-        // 是不同语义，即使 item 相同也绝不合并，否则会把建筑的树种约束静默丢掉。
-        // S9:同物 MINE(如圆石)合并数量到**首次出现位置**——不提最前,因 MINE 依赖镐,提前会无镐空挖。
+        // GATHER/GATHER_EXACT:无前置依赖 → 合并并提到计划最前。缺口增量/精确物种
+        // 与旧式绝对库存/家族采集是不同语义，即使 item 相同也绝不合并，否则会把
+        // 建筑的树种约束或缺口数量静默丢掉。
+        // S9:同物 MINE/MINE_EXACT 合并数量到**各自首次出现位置**——不提最前,因它们依赖镐,
+        // 提前会无镐空挖；宽石料与精确掉落也不能互相合并。
         Map<GatherKey, Integer> gatherTotals = new LinkedHashMap<>();
-        Map<Block, Integer> mineTotals = new LinkedHashMap<>();
+        Map<MineKey, Integer> mineTotals = new LinkedHashMap<>();
         for (GoalStep step : steps) {
             if (step.kind() == GoalStep.Kind.GATHER || step.kind() == GoalStep.Kind.GATHER_EXACT) {
                 gatherTotals.merge(new GatherKey(step.kind(), step.item()), step.count(), Integer::sum);
-            } else if (step.kind() == GoalStep.Kind.MINE) {
-                mineTotals.merge(step.block(), step.count(), Integer::sum);
+            } else if (step.kind() == GoalStep.Kind.MINE
+                    || step.kind() == GoalStep.Kind.MINE_EXACT) {
+                mineTotals.merge(new MineKey(step.kind(), step.block()), step.count(), Integer::sum);
             }
         }
         if (gatherTotals.isEmpty() && mineTotals.isEmpty()) {
@@ -150,16 +153,21 @@ public final class GoalPlanner {
                     ? GoalStep.gatherExact(key.item(), entry.getValue())
                     : GoalStep.gather(key.item(), entry.getValue()));
         }
-        HashSet<Block> emittedMine = new HashSet<>();
+        HashSet<MineKey> emittedMine = new HashSet<>();
         for (GoalStep step : steps) {
             if (step.kind() == GoalStep.Kind.GATHER || step.kind() == GoalStep.Kind.GATHER_EXACT) {
                 continue; // 已提到最前
             }
-            if (step.kind() == GoalStep.Kind.MINE) {
-                if (emittedMine.add(step.block())) {
-                    result.add(GoalStep.mine(step.block(), mineTotals.get(step.block()))); // 首次出现:并入总量
+            if (step.kind() == GoalStep.Kind.MINE
+                    || step.kind() == GoalStep.Kind.MINE_EXACT) {
+                MineKey key = new MineKey(step.kind(), step.block());
+                if (emittedMine.add(key)) {
+                    int total = mineTotals.get(key);
+                    result.add(key.kind() == GoalStep.Kind.MINE_EXACT
+                            ? GoalStep.mineExact(key.block(), total)
+                            : GoalStep.mine(key.block(), total));
                 }
-                continue; // 后续同物 MINE 已合并,跳过
+                continue; // 后续同语义、同方块的 MINE 已合并,跳过
             }
             result.add(step);
         }
@@ -167,6 +175,9 @@ public final class GoalPlanner {
     }
 
     private record GatherKey(GoalStep.Kind kind, Item item) {
+    }
+
+    private record MineKey(GoalStep.Kind kind, Block block) {
     }
 
     /**
@@ -320,7 +331,11 @@ public final class GoalPlanner {
     }
 
     static GoalStep directGatherStep(Item item, int count, boolean exactBuildingMaterials) {
-        return exactBuildingMaterials && RecipeRegistry.LOGS.contains(item)
+        // Generated plans pass a missing amount, not an absolute inventory target. Use the
+        // baseline-aware step for every directly gathered building material. For logs this also
+        // preserves the reviewed species; for single-species materials such as sand it prevents
+        // partial starting inventory from making the gather stop short of the smelting demand.
+        return exactBuildingMaterials
                 ? GoalStep.gatherExact(item, count)
                 : GoalStep.gather(item, count);
     }
@@ -719,10 +734,10 @@ public final class GoalPlanner {
             }
             // Material gathering/smelting can leave the bot far outside ObservableWorldQuery's
             // strict radius. Return beside the exact player-confirmed footprint before BuildTask
-            // starts selecting observable work poses. Legacy auto-site builds still select their
-            // own site and therefore have no fixed staging point yet.
+            // starts selecting observable work poses. This dedicated step is non-mutating: a
+            // failed return route must never dig through or pillar beside the reviewed site.
             if (g.anchor() != null) {
-                addStep(GoalStep.move(buildStagingPoint(schema, g.anchor())));
+                addStep(GoalStep.moveNonMutating(buildStagingPoint(schema, g.anchor())));
             }
             addStep(GoalStep.build(g.blueprint()));
             return true;
@@ -972,7 +987,7 @@ public final class GoalPlanner {
                 if (!ensurePickaxeTier(ToolTier.WOOD, depth + 1, visiting)) {
                     return false;
                 }
-                addStep(GoalStep.mine(Blocks.STONE, missing));
+                addStep(cobblestoneAcquisitionStep(missing, exactBuildingMaterials));
                 counts.merge(Items.COBBLESTONE, missing, Integer::sum);
                 return true;
             }
@@ -1239,6 +1254,16 @@ public final class GoalPlanner {
         private static String id(Item item) {
             return BuiltInRegistries.ITEM.getKey(item).toString();
         }
+    }
+
+    static GoalStep cobblestoneAcquisitionStep(int count, boolean exactBuildingMaterials) {
+        // DigDownTask deliberately accepts cobbled deepslate/blackstone as generic tool-chain
+        // stone. A reviewed blueprint with palette=null cannot: BuildTask must place literal
+        // cobblestone. MINE_EXACT keeps the pickaxe prerequisite in order and makes DigDownTask
+        // count only the literal stone drop, failing cleanly rather than reporting a substitute.
+        return exactBuildingMaterials
+                ? GoalStep.mineExact(Blocks.STONE, count)
+                : GoalStep.mine(Blocks.STONE, count);
     }
 
     private record SmeltRecipe(Item input, Item output) {

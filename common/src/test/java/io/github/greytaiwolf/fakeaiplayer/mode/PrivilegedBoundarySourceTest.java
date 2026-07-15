@@ -58,6 +58,24 @@ class PrivilegedBoundarySourceTest {
                 "ordinary pathfinding from a valid start must run before the emergency-teleport gate");
         assertTrue(actionPack.contains("return startPathTo(goal, false, false, true);"),
                 "construction-safe navigation must disable both pillar placement and dig fallback");
+
+        String pathExecutor = read("pathfinding/PathExecutor.java");
+        assertTrue(pathExecutor.contains("allowPillarOnReplan && hasPlaceableBlock"));
+        assertTrue(pathExecutor.contains("canPillar,\n                    allowDigOnReplan"),
+                "construction-safe replans must preserve the non-mutating policy");
+
+        String moveTask = read("task/MoveTask.java");
+        assertTrue(moveTask.contains("public static MoveTask nonMutating"));
+        assertTrue(moveTask.contains("startNonMutatingPathTo(target)"));
+        assertTrue(moveTask.indexOf("if (!worldMutationAllowed)")
+                        < moveTask.indexOf("digging = true;"),
+                "initial, relay and idle fallbacks must fail before entering DigNav");
+        String goalPlanner = read("goal/GoalPlanner.java");
+        assertTrue(goalPlanner.contains("GoalStep.moveNonMutating(buildStagingPoint"));
+        String goalExecutor = read("goal/GoalExecutor.java");
+        assertTrue(goalExecutor.contains(
+                        "case MOVE_NON_MUTATING -> Optional.of(MoveTask.nonMutating"),
+                "confirmed staging must retain its non-mutating policy at task dispatch");
     }
 
     @Test

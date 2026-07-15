@@ -78,8 +78,16 @@ class GoalPlannerBuildingMaterialsTest {
                 GoalPlanner.directGatherStep(Items.SPRUCE_LOG, 3, true).kind());
         assertEquals(GoalStep.Kind.GATHER,
                 GoalPlanner.directGatherStep(Items.SPRUCE_LOG, 3, false).kind());
-        assertEquals(GoalStep.Kind.GATHER,
+        assertEquals(GoalStep.Kind.GATHER_EXACT,
                 GoalPlanner.directGatherStep(Items.SAND, 3, true).kind());
+        assertEquals(3, GoalPlanner.directGatherStep(Items.SAND, 3, true).count());
+        GoalStep exactFoundation = GoalPlanner.cobblestoneAcquisitionStep(8, true);
+        assertEquals(GoalStep.Kind.MINE_EXACT, exactFoundation.kind());
+        assertEquals(net.minecraft.world.level.block.Blocks.STONE, exactFoundation.block());
+        assertEquals(8, exactFoundation.count());
+        GoalStep legacyStone = GoalPlanner.cobblestoneAcquisitionStep(8, false);
+        assertEquals(GoalStep.Kind.MINE, legacyStone.kind());
+        assertEquals(net.minecraft.world.level.block.Blocks.STONE, legacyStone.block());
 
         List<GoalStep> merged = GoalPlanner.mergeGathers(List.of(
                 GoalStep.gatherExact(Items.OAK_LOG, 2),
@@ -93,6 +101,24 @@ class GoalPlannerBuildingMaterialsTest {
                 GoalStep.craft(Items.OAK_DOOR, 3)), merged);
         assertFalse(GoalPlanner.usesExactBuildingMaterials("small_hut"));
         assertFalse(GoalPlanner.usesExactBuildingMaterials("custom:9x9x5:planks"));
+    }
+
+    @Test
+    void exactFoundationMiningStaysAfterItsPickaxeCraftAndSeparateFromLegacyStone() {
+        GoalStep craftPickaxe = GoalStep.craft(Items.WOODEN_PICKAXE, 1);
+        List<GoalStep> merged = GoalPlanner.mergeGathers(List.of(
+                GoalStep.gatherExact(Items.OAK_LOG, 3),
+                craftPickaxe,
+                GoalStep.mineExact(net.minecraft.world.level.block.Blocks.STONE, 5),
+                GoalStep.mine(net.minecraft.world.level.block.Blocks.STONE, 2),
+                GoalStep.mineExact(net.minecraft.world.level.block.Blocks.STONE, 4)));
+
+        assertEquals(GoalStep.Kind.GATHER_EXACT, merged.get(0).kind());
+        assertEquals(craftPickaxe, merged.get(1));
+        assertEquals(GoalStep.Kind.MINE_EXACT, merged.get(2).kind());
+        assertEquals(9, merged.get(2).count());
+        assertEquals(GoalStep.Kind.MINE, merged.get(3).kind());
+        assertEquals(2, merged.get(3).count());
     }
 
     @Test
@@ -110,9 +136,9 @@ class GoalPlannerBuildingMaterialsTest {
         List<GoalStep> merged = GoalPlanner.mergeGathers(List.of(
                 GoalStep.craft(Items.OAK_PLANKS, 64),
                 GoalStep.gatherExact(Items.OAK_LOG, 16),
-                GoalStep.move(staging),
+                GoalStep.moveNonMutating(staging),
                 GoalStep.build("generated_house")));
-        assertEquals(GoalStep.Kind.MOVE, merged.get(2).kind());
+        assertEquals(GoalStep.Kind.MOVE_NON_MUTATING, merged.get(2).kind());
         assertEquals(staging, merged.get(2).pos());
         assertEquals(GoalStep.Kind.BUILD, merged.get(3).kind());
     }

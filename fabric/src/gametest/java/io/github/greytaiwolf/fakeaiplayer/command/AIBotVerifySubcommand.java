@@ -248,9 +248,8 @@ public final class AIBotVerifySubcommand {
             "llm_iron",
             "llm_diamond");
 
-    // 对话式助手层套件:/fakeaiplayer verify assistant_suite。验证助手层四块新地基(此前只编译过、零运行验证):
-    // P0 目标队列(连续吩咐自动排队接续)、P1 Goal.Build 自动备料(只给原木自己算料合成)、
-    // P3 参数化蓝图(custom:WxDxH:material)、P2 玩家消息不清进行中目标(打断保留语义)。
+    // 对话式助手层套件:/fakeaiplayer verify assistant_suite。覆盖目标队列、旧建筑入口失败关闭、
+    // 以及玩家消息不清进行中目标。已确认模块住宅的完整生存备料/施工 E2E 尚未在此套件冒充通过。
     // 全部确定性实验室场景,不走 LLM、不烧 API(大脑驱动的全链由 llm_suite 单独覆盖)。
     private static final List<String> ASSISTANT_SUITE = List.of(
             "goal_queue",
@@ -1488,38 +1487,14 @@ public final class AIBotVerifySubcommand {
                         && hasGear(bot, Items.IRON_SWORD)); // 铁套+铁剑:整套四件甲 + 铁剑都到手(Goal.Armor full 本就含剑)
     }
 
-    // 建筑深化·真实地形建房:备足木板(隔离"建造"本体——选址 autoSite + 整地 + 逐格落成),不测备料。
-    // 真实地形(斜坡/起伏/水边)是 lab 平整画布测不到的:autoSite 选址 + flatten 整地能否干净落成一栋房。
-    // 断言:origin±24、木板族方块 ≥80(small_hut 全房 112,留余量)+ 存活 + 零死亡。先暴露真实地形建造短板。
+    // 安全边界回归:旧 real_build 曾直接提交 small_hut 并自动选址/整地，绕过投影确认。
+    // 该入口现在必须失败关闭；真实地形上的已确认模块住宅仍是单独的待补 GameTest。
     private static Result assignRealBuild(AIPlayerEntity bot) {
         prepareRealistic(bot);
-        clearInventory(bot);
-        // 备足多树种木板(蓝图按当地树种自适应,只给 oak 会 need birch/spruce_log)+ 整地填料(dirt/cobble),
-        // 真正隔离"建造"本体(选址+整地+落成),不测备料/采木。
-        for (Item p : io.github.greytaiwolf.fakeaiplayer.craft.RecipeRegistry.PLANKS) {
-            InventoryAction.giveItem(bot, new ItemStack(p, 128));
+        if (GoalExecutor.INSTANCE.submit(bot, new Goal.Build("small_hut"))) {
+            return Result.fail("real_build", "legacy_unconfirmed_build_was_accepted");
         }
-        InventoryAction.giveItem(bot, new ItemStack(Items.DIRT, 256));        // FLATTEN 挖高填低的填料
-        InventoryAction.giveItem(bot, new ItemStack(Items.COBBLESTONE, 128));
-        InventoryAction.giveItem(bot, new ItemStack(Items.CRAFTING_TABLE, 1));
-        ServerLevel world = bot.serverLevel();
-        final int deathBase = deathCount(bot);
-        java.util.Set<Block> plankBlocks = new java.util.HashSet<>();
-        for (Item planks : io.github.greytaiwolf.fakeaiplayer.craft.RecipeRegistry.PLANKS) {
-            Block block = Block.byItem(planks);
-            if (block != Blocks.AIR) {
-                plankBlocks.add(block);
-            }
-        }
-        if (!GoalExecutor.INSTANCE.submit(bot, new Goal.Build("small_hut"))) {
-            return Result.fail("real_build", "goal_submit_failed");
-        }
-        // 计数锚点对准真实建房点:断言在 BuildTask 完成时评估(见 pollActive),此刻 bot 就在建好的 hut 处;
-        // SiteFinder 自动选址可能远离/低于出生点(origin),故绕 bot 当前位对称扫描(±10 水平、上下 -6..8),
-        // 而非以出生点为锚的 "only above"——治"建满 116/116 零死亡却被原点计数漏掉"的断言锚点局限。
-        return Result.runningGoal("real_build", 20000,
-                ignored -> bot.isAlive() && deathCount(bot) == deathBase
-                        && countNearbyBlocks(world, bot.blockPosition(), 10, -6, 8, plankBlocks) >= 80);
+        return Result.pass("real_build", "legacy unconfirmed build rejected");
     }
 
     // snapshot 落地辅助:按相对坐标放一块默认态方块(配 /fakeaiplayer snapshot 导出的 setRel 行)。
@@ -2063,59 +2038,24 @@ public final class AIBotVerifySubcommand {
         bot.getFoodData().setSaturation(5.0F);
     }
 
-    /**
-     * P1 Goal.Build 自动备料端到端:只给 32 原木、零木板——ensureBuild 必须自己按蓝图逐格统计出
-     * 需 114 块木板(small_hut 实测口径,见 assignBuild 注释),倒推出"原木→木板"CRAFT 步并全部合成,
-     * 再由 BUILD 步把房盖起来(纯建造已由 build 场景覆盖,本场景钉的是备料链)。
-     * 断言:origin ±14、y∈[origin.y, origin.y+8] 的木板家族方块 ≥80(全房 112 块,留余量)且零死亡。
-     * above 口径理由见 countNearbyBlocksAbove(木板虽不与石地板同族,两个建房场景统一口径更稳)。
-     */
+    /** Legacy automatic Goal.Build must not bypass the projection-confirmation workflow. */
     private static Result assignGoalBuildAuto(AIPlayerEntity bot) {
         prepareArea(bot);
         clearInventory(bot);
-        InventoryAction.giveItem(bot, new ItemStack(Items.OAK_LOG, 32)); // 只给原木:114 板必须自己算出来并合成
-        ServerLevel world = bot.serverLevel();
-        BlockPos origin = bot.blockPosition();
-        final int deathBase = deathCount(bot);
-        java.util.Set<Block> plankBlocks = new java.util.HashSet<>();
-        for (Item planks : io.github.greytaiwolf.fakeaiplayer.craft.RecipeRegistry.PLANKS) {
-            Block block = Block.byItem(planks);
-            if (block != Blocks.AIR) {
-                plankBlocks.add(block);
-            }
+        if (GoalExecutor.INSTANCE.submit(bot, new Goal.Build("small_hut"))) {
+            return Result.fail("goal_build_auto", "legacy_unconfirmed_build_was_accepted");
         }
-        if (!GoalExecutor.INSTANCE.submit(bot, new Goal.Build("small_hut"))) {
-            return Result.fail("goal_build_auto", "goal_submit_failed");
-        }
-        return Result.runningGoal("goal_build_auto", 9600,
-                ignored -> bot.isAlive()
-                        && countNearbyBlocksAbove(world, origin, 14, plankBlocks) >= 80
-                        && deathCount(bot) == deathBase);
+        return Result.pass("goal_build_auto", "legacy unconfirmed build rejected");
     }
 
-    /**
-     * P3 参数化蓝图端到端:Goal.Build("custom:5x4x3:stone_like") 不读蓝图文件,由
-     * BlueprintSchema.parametricHouse 按规格生成(外径 5×4、墙净高 3:地板20+墙42-门2+顶20=80 格,
-     * palette=stone_like)。给足 128 圆石(备料链判"已满足"零采集,聚焦参数化几何+palette 建造)。
-     * 断言:±14、y∈[origin.y, origin.y+8] 的 stone_like 建材(圆石/石头/石砖)≥40(半房即过,容忍
-     * 个别格缺失)且零死亡。必须 above 口径:实验室平台地板(y-1 圆石、其下 16 层实心石)与建材同族,
-     * 数进去会把"没盖房"误判成 PASS——房子地板层恰落在 origin.y(SiteFinder 锚在可站立脚位),零损失。
-     */
+    /** Legacy custom Goal.Build is readable for migration but never executable without binding. */
     private static Result assignGoalBuildCustom(AIPlayerEntity bot) {
         prepareArea(bot);
         clearInventory(bot);
-        InventoryAction.giveItem(bot, new ItemStack(Items.COBBLESTONE, 128));
-        ServerLevel world = bot.serverLevel();
-        BlockPos origin = bot.blockPosition();
-        final int deathBase = deathCount(bot);
-        java.util.Set<Block> stoneLike = java.util.Set.of(Blocks.COBBLESTONE, Blocks.STONE, Blocks.STONE_BRICKS);
-        if (!GoalExecutor.INSTANCE.submit(bot, new Goal.Build("custom:5x4x3:stone_like"))) {
-            return Result.fail("goal_build_custom", "goal_submit_failed");
+        if (GoalExecutor.INSTANCE.submit(bot, new Goal.Build("custom:5x4x3:stone_like"))) {
+            return Result.fail("goal_build_custom", "legacy_unconfirmed_build_was_accepted");
         }
-        return Result.runningGoal("goal_build_custom", 7200,
-                ignored -> bot.isAlive()
-                        && countNearbyBlocksAbove(world, origin, 14, stoneLike) >= 40
-                        && deathCount(bot) == deathBase);
+        return Result.pass("goal_build_custom", "legacy unconfirmed build rejected");
     }
 
     /**

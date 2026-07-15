@@ -22,6 +22,8 @@ class GatherQuotaTaskExactTest {
     void nonLogMaterialsAreUnchangedInEitherMode() {
         assertEquals(Set.of(Items.SAND), GatherQuotaTask.acceptItemsFor(Items.SAND, false));
         assertEquals(Set.of(Items.SAND), GatherQuotaTask.acceptItemsFor(Items.SAND, true));
+        assertEquals(Set.of(Items.COBBLESTONE),
+                GatherQuotaTask.acceptItemsFor(Items.COBBLESTONE, true));
     }
 
     @Test
@@ -29,5 +31,23 @@ class GatherQuotaTaskExactTest {
         assertEquals(2, GatherQuotaTask.progressFromAbsolute(true, 5, 7));
         assertEquals(0, GatherQuotaTask.progressFromAbsolute(true, 5, 4));
         assertEquals(7, GatherQuotaTask.progressFromAbsolute(false, 5, 7));
+    }
+
+    @Test
+    void generatedBuildingSandDemandCountsTheMissingDeltaFromPartialInventory() {
+        int existingSand = 5;
+        int missingSand = 15;
+
+        assertEquals(0,
+                GatherQuotaTask.progressFromAbsolute(true, existingSand, existingSand));
+        assertEquals(missingSand,
+                GatherQuotaTask.progressFromAbsolute(
+                        true, existingSand, existingSand + missingSand));
+        int legacyAbsoluteInventoryAtCompletion = missingSand;
+        assertEquals(missingSand,
+                GatherQuotaTask.progressFromAbsolute(
+                        false, existingSand, legacyAbsoluteInventoryAtCompletion));
+        assertEquals(10, legacyAbsoluteInventoryAtCompletion - existingSand,
+                "an absolute quota would stop after gathering only ten of the fifteen missing sand");
     }
 }

@@ -346,13 +346,13 @@ class ModularHouseGeneratorTest {
 
         for (HouseMaterialStyle style : styles) {
             for (int width = HouseDimensions.MIN_FOOTPRINT;
-                 width <= HouseDimensions.MAX_FOOTPRINT;
+                 width <= HouseDimensions.MAX_EXECUTABLE_FOOTPRINT;
                  width++) {
                 for (int depth = HouseDimensions.MIN_FOOTPRINT;
-                     depth <= HouseDimensions.MAX_FOOTPRINT;
+                     depth <= HouseDimensions.MAX_EXECUTABLE_FOOTPRINT;
                      depth++) {
                     for (int wallHeight = HouseDimensions.MIN_WALL_HEIGHT;
-                         wallHeight <= HouseDimensions.MAX_WALL_HEIGHT;
+                         wallHeight <= HouseDimensions.MAX_EXECUTABLE_WALL_HEIGHT;
                          wallHeight++) {
                         for (long seed = 0; seed < 32; seed++) {
                             BuildingPlan plan = generator.generate(new ModularHouseRequest(
@@ -377,6 +377,32 @@ class ModularHouseGeneratorTest {
                     }
                 }
             }
+        }
+    }
+
+    @Test
+    void largerPlanModelBoundariesRemainValidWithoutBeingPubliclyExecutable() {
+        List<HouseDimensions> boundaries = List.of(
+                new HouseDimensions(HouseDimensions.MIN_FOOTPRINT,
+                        HouseDimensions.MAX_FOOTPRINT, HouseDimensions.MAX_WALL_HEIGHT),
+                new HouseDimensions(HouseDimensions.MAX_FOOTPRINT,
+                        HouseDimensions.MIN_FOOTPRINT, HouseDimensions.MAX_WALL_HEIGHT),
+                new HouseDimensions(HouseDimensions.MAX_FOOTPRINT,
+                        HouseDimensions.MAX_FOOTPRINT, HouseDimensions.MAX_WALL_HEIGHT));
+
+        for (HouseDimensions dimensions : boundaries) {
+            BuildingPlan plan = generator.generate(new ModularHouseRequest(
+                    "test:model_boundary/" + dimensions.width() + "/" + dimensions.depth(),
+                    "Model boundary house",
+                    dimensions,
+                    31L,
+                    VanillaHouseStyles.OAK_COTTAGE));
+
+            BuildingPlanValidator.ValidationResult result = BuildingPlanValidator.validate(plan);
+            assertTrue(result.valid(), () -> result.problems().toString());
+            assertTrue(plan.placements().size() <= BuildingPlanValidator.MAX_PLACEMENTS);
+            assertTrue(!HouseDimensions.isExecutableRange(
+                    dimensions.width(), dimensions.depth(), dimensions.wallHeight()));
         }
     }
 

@@ -20,8 +20,7 @@ class MissionSpecTest {
                 new Goal.HavePickaxeTier(3),
                 new Goal.Armor(),
                 new Goal.Workstation(),
-                new Goal.Food(5),
-                new Goal.Build("small_hut"));
+                new Goal.Food(5));
 
         for (Goal goal : goals) {
             MissionSpec spec = MissionSpec.fromGoal(goal);
@@ -37,7 +36,7 @@ class MissionSpecTest {
     }
 
     @Test
-    void confirmedBuildAnchorRoundTripsWhileLegacyBuildRemainsCompatible() {
+    void confirmedBuildBindingRoundTripsWhileLegacyBuildsRemainReadableButUntrusted() {
         Goal.Build confirmed = new Goal.Build(
                 "generated_owner_hash",
                 new BlockPos(-12, 70, 345),
@@ -55,11 +54,14 @@ class MissionSpecTest {
                 "anchor_z", "345",
                 "dimension", "minecraft:overworld",
                 "blueprint_digest", BLUEPRINT_DIGEST), persisted.params());
-        assertEquals(new Goal.Build("small_hut"), new MissionSpec(
-                "build", Map.of("blueprint", "small_hut"), List.of()).toGoal().orElseThrow());
-        // Decoder compatibility is intentionally broader than executor trust: an old generated
-        // record is readable so the snapshot is not corrupted, but GoalExecutor rejects it
-        // because the resulting Goal.Build has no confirmation-time digest.
+        Goal.Build oldPreset = (Goal.Build) new MissionSpec(
+                "build", Map.of("blueprint", "small_hut"), List.of()).toGoal().orElseThrow();
+        assertEquals(new Goal.Build("small_hut"), oldPreset);
+        assertFalse(oldPreset.isGeneratedReference());
+        assertFalse(oldPreset.hasCompleteConfirmedBinding());
+        // Decoder compatibility is intentionally broader than executor trust: old records are
+        // readable so unrelated snapshot data is not corrupted, but GoalExecutor rejects every
+        // Build lacking the full confirmation-time binding.
         Goal.Build oldGenerated = (Goal.Build) new MissionSpec("build", Map.of(
                         "blueprint", "generated_old_record",
                         "anchor_x", "1",

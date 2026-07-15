@@ -34,14 +34,6 @@ public final class AIBotBuildingSubcommand {
     private static final int DEFAULT_WIDTH = 9;
     private static final int DEFAULT_DEPTH = 9;
     private static final int DEFAULT_WALL_HEIGHT = 5;
-    // The current material planner stages one complete build in the bot inventory. Keep the
-    // executable player surface below that practical bound; the plan model itself supports
-    // larger designs once phased resupply/chest logistics is implemented.
-    private static final int COMMAND_MAX_FOOTPRINT = 16;
-    // Tall walls need a first-class temporary scaffold + cleanup lifecycle. Until that executor
-    // exists, expose only the wall heights whose ring beam is reachable from the early floor deck.
-    private static final int COMMAND_MAX_WALL_HEIGHT = 5;
-
     private AIBotBuildingSubcommand() {
     }
 
@@ -54,12 +46,14 @@ public final class AIBotBuildingSubcommand {
                                                 context, DEFAULT_WIDTH, DEFAULT_DEPTH,
                                                 DEFAULT_WALL_HEIGHT, 0L))
                                         .then(argument("width", IntegerArgumentType.integer(
-                                                        HouseDimensions.MIN_FOOTPRINT, COMMAND_MAX_FOOTPRINT))
+                                                        HouseDimensions.MIN_FOOTPRINT,
+                                                        HouseDimensions.MAX_EXECUTABLE_FOOTPRINT))
                                                 .then(argument("depth", IntegerArgumentType.integer(
-                                                                HouseDimensions.MIN_FOOTPRINT, COMMAND_MAX_FOOTPRINT))
+                                                                HouseDimensions.MIN_FOOTPRINT,
+                                                                HouseDimensions.MAX_EXECUTABLE_FOOTPRINT))
                                                         .then(argument("wall_height", IntegerArgumentType.integer(
                                                                         HouseDimensions.MIN_WALL_HEIGHT,
-                                                                        COMMAND_MAX_WALL_HEIGHT))
+                                                                        HouseDimensions.MAX_EXECUTABLE_WALL_HEIGHT))
                                                                 .executes(context -> draft(
                                                                         context,
                                                                         IntegerArgumentType.getInteger(context, "width"),

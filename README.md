@@ -191,11 +191,11 @@ flowchart TB
 /fakeaiplayer building cancel
 ```
 
-AI 能够成功推进的建筑工具只有 `draft_building`、`building_preview_status` 和 `cancel_building_preview`；没有 AI 确认工具。旧 `build_house` 以及 `assign_task`/`post_job` 的 `build` 变体仍保留兼容入口，但现在都会失败关闭并要求使用 `draft_building`，重启后也不会让旧 AI build Job 从空闲协调器绕过确认。玩家必须在 NeoForge 客户端检查投影后执行确认命令，或在“控制”设置中自行绑定默认未绑定的确认键。
+AI 能够成功推进的建筑工具只有 `draft_building`、`building_preview_status` 和 `cancel_building_preview`；没有 AI 确认工具。旧 `build_house` 以及 `assign_task`/`post_job` 的 `build` 变体仍保留兼容入口，但现在都会失败关闭并要求使用 `draft_building`；重启后，旧 AI build Job 和缺少确认绑定的旧 build Mission 都不能从恢复路径绕过确认。玩家必须在 NeoForge 客户端检查投影后执行确认命令，或在“控制”设置中自行绑定默认未绑定的确认键。
 
 确认时服务端重新验证 owner/Bot、维度、距离、方案摘要、变换 revision、边界、区块、BlockState、替换策略、方块实体与多格原子组；每个地基格还要求下方是可检查、干燥且上表面稳固的支撑，并在实际落块前再次检查，关闭备料期间地面变化的竞态。确认后的精确蓝图以 canonical SHA-256、锚点和维度绑定到 Goal/持久化任务；恢复与执行会失败关闭地拒绝摘要或维度不匹配。V2 构件依赖也会转换为稳定的蓝图前置序号，执行每个依赖格前必须重新精确匹配其 BlockState，不能在支撑失败后继续搭建上层。
 
-命令和 AI 当前接受 `7..16` 的宽/深与 `4..5` 的墙高；这些公开尺寸会先生成带实体支撑的室内楼梯、阁楼和前后露台，再建高柱。Bot 的施工接近路径禁止计划外挖掘与垫柱；工作站位还会用与玩家 `pick` 相同的方块轮廓射线预检真实 clicked face、朝向和原木轴线，然后从两侧檐口向屋脊逐排攀建。更高墙体仍不会暴露为“可执行”选项；更大 generator API 方案若容不下两端留空的直梯，会标记为 `design_only`。这条高处通路已经进入源码和确定性验证，但仍必须经过真实生存 GameTest 才能称为闭环。每位玩家同时只有一个投影，会话默认五分钟过期；`move` 是绝对世界锚点，确认距离上限为 128 格。投影目前是即时彩色线框，带维度、192 格距离、区块加载和视锥裁剪；不是 VBO、真实方块模型或 Litematica/Create/MineColonies 级别的完整预览。Fabric payload/renderer、场地调查、楼层/阶段过滤、材料 UI、完整二层房间/阳台/栏杆、通用模组方块适配和真实生存 GameTest 均未完成。详见 [AI 建筑系统设计基线](docs/AI_BUILDING_SYSTEM.md)。
+命令和 AI 当前接受 `7..16` 的宽/深与 `4..5` 的墙高；这些公开尺寸会先生成带实体支撑的室内楼梯、阁楼和前后露台，再建高柱。Bot 的施工接近路径禁止计划外挖掘与垫柱；工作站位还会用与玩家 `pick` 相同的方块轮廓射线预检真实 clicked face、朝向和原木轴线，然后从两侧檐口向屋脊逐排攀建。更高墙体仍不会暴露为“可执行”选项；更大 generator API 方案若容不下两端留空的直梯，会标记为 `design_only`。这条高处通路已经进入源码和确定性验证，但仍必须经过真实生存 GameTest 才能称为闭环。尤其是确认后的自动备料尚缺场地保护、工具耐久预算和分阶段背包物流，当前分支保持 Draft，不能宣称空背包可可靠盖完。每位玩家同时只有一个投影，会话默认五分钟过期；`move` 是绝对世界锚点，确认距离上限为 128 格。投影目前是即时彩色线框，带维度、192 格距离、区块加载和视锥裁剪；不是 VBO、真实方块模型或 Litematica/Create/MineColonies 级别的完整预览。Fabric payload/renderer、场地调查、楼层/阶段过滤、材料 UI、完整二层房间/阳台/栏杆、通用模组方块适配和真实生存 GameTest 均未完成。详见 [AI 建筑系统设计基线](docs/AI_BUILDING_SYSTEM.md)。
 
 ### 感知、记忆和多人协作
 

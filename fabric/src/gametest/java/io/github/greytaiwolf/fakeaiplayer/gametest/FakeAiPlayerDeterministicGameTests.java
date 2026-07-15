@@ -51,7 +51,7 @@ public final class FakeAiPlayerDeterministicGameTests implements FabricGameTest 
     }
 
     @GameTest(template = FabricGameTest.EMPTY_STRUCTURE, timeoutTicks = 20)
-    public void missionSpecsRoundTripWithBootstrappedRegistries(GameTestHelper context) {
+    public void missionSpecsRoundTripWhileLegacyBuildRemainsUntrusted(GameTestHelper context) {
         List<Goal> goals = List.of(
                 new Goal.HaveItem(Items.IRON_INGOT, 3),
                 new Goal.HavePickaxeTier(3),
@@ -67,6 +67,9 @@ public final class FakeAiPlayerDeterministicGameTests implements FabricGameTest 
             Goal restored = MissionSpec.fromGoal(goal).toGoal().orElseThrow();
             if (!goal.equals(restored)) {
                 context.fail("MissionSpec round-trip mismatch for " + goal);
+            }
+            if (restored instanceof Goal.Build build && build.hasCompleteConfirmedBinding()) {
+                context.fail("Legacy build unexpectedly acquired a confirmation binding");
             }
         }
         context.succeed();

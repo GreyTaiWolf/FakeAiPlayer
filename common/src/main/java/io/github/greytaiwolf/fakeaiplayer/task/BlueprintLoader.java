@@ -186,7 +186,8 @@ public final class BlueprintLoader {
      * becomes immutable after its first write: identical retries are accepted, while different
      * content fails rather than changing an active mission underneath the executor.</p>
      *
-     * @return the unchanged safe name, ready for {@code new Goal.Build(name, anchor)}
+     * @return the unchanged safe name, ready to be combined with the confirmed anchor, dimension
+     *         and canonical digest in a {@code Goal.Build}
      */
     public static String saveGenerated(String name, BlueprintSchema schema) throws IOException {
         saveGeneratedToDirectory(blueprintDir(), name, schema);
