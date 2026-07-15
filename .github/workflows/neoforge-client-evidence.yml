@@ -391,9 +391,10 @@ jobs:
           as_player 'fakeaiplayer task assign TestBot sleep'
           sleep 5
           capture '15_sleep_task'
+          server_cmd 'time set day'
+          sleep 4
           as_player 'fakeaiplayer task status TestBot'
           as_player 'fakeaiplayer task abort TestBot'
-          server_cmd 'time set day'
           server_cmd 'difficulty peaceful'
           server_cmd 'effect give TestBot minecraft:instant_health 1 10 true'
 
@@ -452,20 +453,26 @@ jobs:
           capture '19_craft_sticks'
           as_player 'fakeaiplayer task abort TestBot'
 
-          # Lower hunger through the vanilla effect, then verify real item use.
+          # Lower hunger decisively through the vanilla effect, then verify real item use.
           server_cmd 'tp TestBot 12 100 20 0 0'
           server_cmd 'tp GreyTaiWolf 12 104 14 0 22'
           server_cmd 'difficulty normal'
-          server_cmd 'effect give TestBot minecraft:hunger 2 40 true'
-          sleep 3
+          server_cmd 'gamerule naturalRegeneration false'
+          server_cmd 'effect give TestBot minecraft:resistance 12 255 true'
+          server_cmd 'effect give TestBot minecraft:hunger 8 255 true'
+          sleep 6
+          server_cmd 'data get entity TestBot foodLevel'
           server_cmd 'effect clear TestBot minecraft:hunger'
           server_cmd 'give TestBot minecraft:bread 2'
           as_player 'fakeaiplayer task assign TestBot eat'
-          sleep 3
+          sleep 4
           capture '20_eat_task'
-          sleep 5
+          sleep 6
           as_player 'fakeaiplayer task status TestBot'
           as_player 'fakeaiplayer task abort TestBot'
+          server_cmd 'effect clear TestBot minecraft:resistance'
+          server_cmd 'effect give TestBot minecraft:instant_health 1 10 true'
+          server_cmd 'gamerule naturalRegeneration true'
           server_cmd 'difficulty peaceful'
 
           # Branch/strip mining through a deterministic stone wall.
@@ -477,7 +484,7 @@ jobs:
           as_player 'fakeaiplayer task assign TestBot strip_mine east 6 2'
           sleep 7
           capture '21_strip_mine_task'
-          sleep 12
+          sleep 30
           as_player 'fakeaiplayer task status TestBot'
           as_player 'fakeaiplayer task abort TestBot'
 
@@ -527,13 +534,14 @@ jobs:
           # Re-test explicit container transfer plus automatic stockpiling on the stable arena.
           server_cmd 'tp TestBot 0 100 24 0 0'
           server_cmd 'tp GreyTaiWolf 0 105 17 0 25'
-          server_cmd 'setblock 0 100 28 minecraft:chest[facing=south]'
+          server_cmd 'setblock 0 100 26 minecraft:chest[facing=south]'
+          as_player 'fakeaiplayer memory TestBot set_base'
           server_cmd 'give TestBot minecraft:cobblestone 24'
           server_cmd 'give TestBot minecraft:dirt 16'
-          as_player 'fakeaiplayer task assign TestBot deposit at 0 100 28 item minecraft:cobblestone 16'
+          as_player 'fakeaiplayer task assign TestBot deposit at 0 100 26 item minecraft:cobblestone 16'
           sleep 10
           as_player 'fakeaiplayer task status TestBot'
-          as_player 'fakeaiplayer task assign TestBot withdraw at 0 100 28 minecraft:cobblestone 8'
+          as_player 'fakeaiplayer task assign TestBot withdraw at 0 100 26 minecraft:cobblestone 8'
           sleep 10
           as_player 'fakeaiplayer task status TestBot'
           as_player 'fakeaiplayer task assign TestBot stockpile'
@@ -557,14 +565,14 @@ jobs:
           as_player 'fakeaiplayer task abort TestBot'
 
           # Legacy deterministic BuildTask remains a separate explicit-command path.
-          server_cmd 'tp TestBot -24 100 -24 135 0'
+          server_cmd 'tp TestBot -29 100 -31 0 0'
           server_cmd 'tp GreyTaiWolf -18 110 -18 135 32'
           server_cmd 'fill -30 100 -30 -26 105 -26 minecraft:air'
-          server_cmd 'give TestBot minecraft:cobblestone 64'
-          as_player 'fakeaiplayer task assign TestBot build custom:3x3x2:stone -30 100 -30'
+          server_cmd 'give TestBot minecraft:oak_planks 192'
+          as_player 'fakeaiplayer task assign TestBot build hut_5x5 -30 100 -30'
           sleep 9
-          capture '27_deterministic_custom_build'
-          sleep 20
+          capture '27_deterministic_hut_build'
+          sleep 30
           as_player 'fakeaiplayer task status TestBot'
           as_player 'fakeaiplayer task abort TestBot'
 
@@ -599,19 +607,16 @@ jobs:
           as_player 'fakeaiplayer job clear'
           capture '29_multi_bot_jobs_and_coordination'
 
-          # Brain controls and both command/chat model entry points (missing-key is expected here).
+          # Brain controls and the command model entry point (missing-key is expected here).
+          # Raw X11 typing is deliberately avoided: a dropped chat-open key can turn letters in
+          # the message into gameplay hotkeys and obscure later evidence with an inventory screen.
           as_player 'fakeaiplayer brain status TestBot'
           as_player 'fakeaiplayer brain manual TestBot on'
           as_player 'fakeaiplayer brain manual TestBot off'
           as_player 'fakeaiplayer brain reset TestBot'
           as_player 'fakeaiplayer brain say TestBot visual model route check'
-          sleep 3
-          xdotool windowactivate --sync "$window"
-          xdotool key t
-          xdotool type --delay 20 '@TestBot visual chat route check'
-          xdotool key Return
           sleep 4
-          capture '30_brain_command_and_chat_routes'
+          capture '30_brain_command_route'
 
           # Persistence, observability and administrator diagnostics.
           as_player 'fakeaiplayer persist save'
@@ -645,12 +650,8 @@ jobs:
 
           # Confirm requires a complete client Ready acknowledgement and revalidates the world.
           as_player 'fakeaiplayer building confirm'
-          sleep 5
-          press_combo alt 0
-          xdotool mousemove 1260 46 click 1
-          sleep 3
+          sleep 8
           capture '33_confirmed_build_goal'
-          close_screen
           as_player 'fakeaiplayer task abort TestBot'
 
           # A second style proves cancel and replacement/clear payloads.
