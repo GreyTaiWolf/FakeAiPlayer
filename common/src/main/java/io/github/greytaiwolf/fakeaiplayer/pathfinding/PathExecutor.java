@@ -12,17 +12,23 @@ import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.log.LogCategory;
 import io.github.greytaiwolf.fakeaiplayer.log.LogFields;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 public final class PathExecutor {
     private static final int STUCK_TICKS_LIMIT = 60;
     private static final int REPLAN_COOLDOWN_TICKS = 40;
+    private static final int ROUTE_REVALIDATE_LOOKAHEAD = 3;
+    private static final int MAX_TRANSIENT_EXCLUSIONS = 8;
 
     private List<Node> path;
     private int index = 1;
@@ -30,6 +36,9 @@ public final class PathExecutor {
     private final boolean exactGoal;
     private final boolean allowPillarOnReplan;
     private final boolean allowDigOnReplan;
+    private final TraversalPolicy traversalPolicy;
+    private final TraversalBounds bounds;
+    private final Set<BlockPos> transientExclusions = new LinkedHashSet<>();
     private WalkToController subWalker;
     private MiningController subMiner;
     private boolean digWalking;
@@ -42,11 +51,11 @@ public final class PathExecutor {
     private int nodeRetry;
 
     public PathExecutor(List<Node> path, BlockPos originalGoal) {
-        this(path, originalGoal, false, true, true);
+        this(path, originalGoal, false, true, true, TraversalPolicy.TASK_MUTATING_DRY);
     }
 
     public PathExecutor(List<Node> path, BlockPos originalGoal, boolean exactGoal) {
-        this(path, originalGoal, exactGoal, true, true);
+        this(path, originalGoal, exactGoal, true, true, TraversalPolicy.TASK_MUTATING_DRY);
     }
 
     public PathExecutor(List<Node> path,
@@ -54,15 +63,42 @@ public final class PathExecutor {
                         boolean exactGoal,
                         boolean allowPillarOnReplan,
                         boolean allowDigOnReplan) {
+        this(path, originalGoal, exactGoal, allowPillarOnReplan, allowDigOnReplan,
+                TraversalPolicy.TASK_WALK_DRY);
+    }
+
+    public PathExecutor(List<Node> path,
+                        BlockPos originalGoal,
+                        boolean exactGoal,
+                        boolean allowPillarOnReplan,
+                        boolean allowDigOnReplan,
+                        TraversalPolicy traversalPolicy) {
+        this(path, originalGoal, exactGoal, allowPillarOnReplan, allowDigOnReplan,
+                traversalPolicy, TraversalBounds.unbounded());
+    }
+
+    public PathExecutor(List<Node> path,
+                        BlockPos originalGoal,
+                        boolean exactGoal,
+                        boolean allowPillarOnReplan,
+                        boolean allowDigOnReplan,
+                        TraversalPolicy traversalPolicy,
+                        TraversalBounds bounds) {
         this.path = List.copyOf(path);
         this.originalGoal = originalGoal.immutable();
         this.exactGoal = exactGoal;
         this.allowPillarOnReplan = allowPillarOnReplan;
         this.allowDigOnReplan = allowDigOnReplan;
+        this.traversalPolicy = traversalPolicy;
+        this.bounds = bounds == null ? TraversalBounds.unbounded() : bounds;
     }
 
     public ActionResult tick(ActionPack pack) {
         totalTicks++;
+        if (!bounds.contains(pack.player().blockPosition())) {
+            cleanup(pack);
+            return ActionResult.failed("path_bounds_exceeded");
+        }
         if (path.isEmpty() || index >= path.size()) {
             cleanup(pack);
             double distSq = pack.player().blockPosition().distSqr(originalGoal);
@@ -80,11 +116,14 @@ public final class PathExecutor {
         }
 
         Node next = path.get(index);
-        String danger = DangerCheck.scan(pack.player().serverLevel(), next.pos());
-        if (danger != null) {
-            BotLog.warn(LogCategory.PATH, pack.player(), "path_danger", "at_node", LogFields.pos(next.pos()), "reason", danger);
-            cleanup(pack);
-            return ActionResult.failed("danger_at_node: " + danger);
+        RouteProblem routeProblem = validateUpcomingRoute(pack);
+        if (routeProblem != null) {
+            rememberExclusion(routeProblem.node());
+            BotLog.warn(LogCategory.PATH, pack.player(), "path_route_invalidated",
+                    "at_node", LogFields.pos(routeProblem.node()),
+                    "reason", routeProblem.reason(),
+                    "policy", traversalPolicy.name());
+            return handleStuck(pack, "route_invalidated:" + routeProblem.reason(), true);
         }
 
         ActionResult result = switch (next.moveType()) {
@@ -107,6 +146,10 @@ public final class PathExecutor {
 
     public int totalTicks() {
         return totalTicks;
+    }
+
+    public TraversalPolicy traversalPolicy() {
+        return traversalPolicy;
     }
 
     public static boolean hasPlaceableBlock(AIPlayerEntity player) {
@@ -290,10 +333,18 @@ public final class PathExecutor {
         if (dy < -1 || dy > 1) {
             return false;
         }
-        return lineClearForStringPull(pack.player().serverLevel(), from, target);
+        return lineClearForStringPull(pack.player(), from, target, traversalPolicy);
     }
 
-    private static boolean lineClearForStringPull(net.minecraft.server.level.ServerLevel world, BlockPos from, BlockPos target) {
+    private static boolean lineClearForStringPull(AIPlayerEntity player,
+                                                  BlockPos from,
+                                                  BlockPos target,
+                                                  TraversalPolicy policy) {
+        var world = player.serverLevel();
+        AABB swept = playerBox(from).minmax(playerBox(target)).deflate(1.0E-4D);
+        if (!world.noCollision(player, swept)) {
+            return false;
+        }
         int dx = target.getX() - from.getX();
         int dy = target.getY() - from.getY();
         int dz = target.getZ() - from.getZ();
@@ -304,24 +355,83 @@ public final class PathExecutor {
                     from.getX() + 0.5D + dx * t,
                     from.getY() + dy * t,
                     from.getZ() + 0.5D + dz * t);
-            if (!passableColumn(world, sample)) {
+            if (!passableColumn(world, sample, policy)) {
                 return false;
             }
             if (!hasSupport(world, sample) && !sample.equals(from)) {
                 return false;
             }
         }
-        return Standability.isStandable(world, target);
+        return Standability.isStandable(world, target, policy);
     }
 
-    private static boolean passableColumn(net.minecraft.server.level.ServerLevel world, BlockPos feet) {
-        return world.getBlockState(feet).getCollisionShape(world, feet).isEmpty()
-                && world.getBlockState(feet.above()).getCollisionShape(world, feet.above()).isEmpty();
+    private static boolean passableColumn(net.minecraft.server.level.ServerLevel world,
+                                          BlockPos feet,
+                                          TraversalPolicy policy) {
+        if (!world.getBlockState(feet).getCollisionShape(world, feet).isEmpty()
+                || !world.getBlockState(feet.above()).getCollisionShape(world, feet.above()).isEmpty()) {
+            return false;
+        }
+        return !policy.requiresDryPath()
+                || (world.getFluidState(feet).isEmpty()
+                && world.getFluidState(feet.above()).isEmpty());
     }
 
     private static boolean hasSupport(net.minecraft.server.level.ServerLevel world, BlockPos feet) {
         BlockPos below = feet.below();
         return !world.getBlockState(below).getCollisionShape(world, below).isEmpty();
+    }
+
+    private RouteProblem validateUpcomingRoute(ActionPack pack) {
+        var world = pack.player().serverLevel();
+        // Other players and world ticks are not routed through our invalidation hooks.
+        Standability.clearCache();
+        NeighborEnumerator validator = new NeighborEnumerator(
+                allowPillarOnReplan, allowDigOnReplan, traversalPolicy);
+        validator.setPathGoal(originalGoal);
+        int last = Math.min(path.size() - 1, index + ROUTE_REVALIDATE_LOOKAHEAD - 1);
+        for (int candidateIndex = index; candidateIndex <= last; candidateIndex++) {
+            Node candidate = path.get(candidateIndex);
+            if (!bounds.contains(candidate.pos())) {
+                return new RouteProblem(candidate.pos(), "outside_path_bounds");
+            }
+            String danger = DangerCheck.scan(world, candidate.pos(), traversalPolicy);
+            if (danger != null) {
+                return new RouteProblem(candidate.pos(), danger);
+            }
+            Node previous = path.get(candidateIndex - 1);
+            boolean transitionValid = validator.getNeighbors(previous.pos(), world).stream()
+                    .anyMatch(neighbor -> neighbor.pos().equals(candidate.pos())
+                            && neighbor.moveType() == candidate.moveType());
+            if (!transitionValid
+                    && (candidate.moveType() == MoveType.DIG_THROUGH
+                    || candidate.moveType() == MoveType.PILLAR_UP)) {
+                // A world-edit step that has already finished naturally becomes a normal dry
+                // stand position. Treat that as progress rather than invalidating the route.
+                transitionValid = Standability.isStandable(world, candidate.pos(), traversalPolicy);
+            }
+            if (!transitionValid) {
+                return new RouteProblem(candidate.pos(), "transition_blocked");
+            }
+        }
+        return null;
+    }
+
+    private void rememberExclusion(BlockPos position) {
+        transientExclusions.add(position.immutable());
+        while (transientExclusions.size() > MAX_TRANSIENT_EXCLUSIONS) {
+            Iterator<BlockPos> iterator = transientExclusions.iterator();
+            iterator.next();
+            iterator.remove();
+        }
+    }
+
+    private static AABB playerBox(BlockPos feet) {
+        double centerX = feet.getX() + 0.5D;
+        double centerZ = feet.getZ() + 0.5D;
+        return new AABB(
+                centerX - 0.3D, feet.getY(), centerZ - 0.3D,
+                centerX + 0.3D, feet.getY() + 1.8D, centerZ + 0.3D);
     }
 
     private static boolean arrivedAt(BlockPos current, BlockPos target) {
@@ -369,6 +479,10 @@ public final class PathExecutor {
     }
 
     private ActionResult handleStuck(ActionPack pack, String reason) {
+        return handleStuck(pack, reason, false);
+    }
+
+    private ActionResult handleStuck(ActionPack pack, String reason, boolean forceFresh) {
         if (!replanTried) {
             int now = pack.player().getServer().getTickCount();
             if (now - lastReplanTick < REPLAN_COOLDOWN_TICKS) {
@@ -378,18 +492,30 @@ public final class PathExecutor {
             lastReplanTick = now;
             replanTried = true;
             BotLog.path(pack.player(), "path_stuck", "at_node", reason, "stuck_ticks", stuckTicks);
-            if (!pack.snapPlayerToNearestStandable("path_replan_start_invalid")) {
-                cleanup(pack);
-                return ActionResult.failed(reason + "; replan_failed: NO_START");
+            if (!Standability.isStandable(
+                    pack.player().serverLevel(), pack.player().blockPosition(), traversalPolicy)) {
+                if (traversalPolicy == TraversalPolicy.AMBIENT_DRY_OPEN
+                        || !pack.snapPlayerToNearestStandable(
+                        "path_replan_start_invalid", traversalPolicy)
+                        || !bounds.contains(pack.player().blockPosition())) {
+                    cleanup(pack);
+                    return ActionResult.failed(reason + "; replan_failed: NO_START");
+                }
             }
             boolean canPillar = allowPillarOnReplan && hasPlaceableBlock(pack.player());
             AStarPathfinder finder = new AStarPathfinder(
                     pack.player().serverLevel(),
                     pack.player().blockPosition(),
                     originalGoal,
+                    10_000,
+                    50L,
                     canPillar,
-                    allowDigOnReplan);
-            PathfindingResult fresh = finder.findPath();
+                    allowDigOnReplan,
+                    traversalPolicy,
+                    1.0D,
+                    transientExclusions,
+                    bounds);
+            PathfindingResult fresh = finder.findPath(forceFresh);
             if (fresh.success()) {
                 BotLog.path(pack.player(), "path_replan", "at_node", reason, "new_path_size", fresh.path().size());
                 path = fresh.path();
@@ -433,5 +559,11 @@ public final class PathExecutor {
 
     private static String compact(BlockPos pos) {
         return pos.getX() + "," + pos.getY() + "," + pos.getZ();
+    }
+
+    private record RouteProblem(BlockPos node, String reason) {
+        private RouteProblem {
+            node = node.immutable();
+        }
     }
 }

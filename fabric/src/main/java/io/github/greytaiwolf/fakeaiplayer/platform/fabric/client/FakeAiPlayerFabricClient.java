@@ -5,6 +5,9 @@ import io.github.greytaiwolf.fakeaiplayer.client.AIBotKeyBindings;
 import io.github.greytaiwolf.fakeaiplayer.client.BotChatCapture;
 import io.github.greytaiwolf.fakeaiplayer.client.ClientNetworkServices;
 import io.github.greytaiwolf.fakeaiplayer.client.FakeAiPlayerClient;
+import io.github.greytaiwolf.fakeaiplayer.client.screen.BotInventoryScreen;
+import io.github.greytaiwolf.fakeaiplayer.inventory.BotMenuTypes;
+import net.minecraft.client.gui.screens.MenuScreens;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotChatS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotSnapshotS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BuildingPreviewBeginS2C;
@@ -20,6 +23,7 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 public final class FakeAiPlayerFabricClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
+        MenuScreens.register(BotMenuTypes.inventory(), BotInventoryScreen::new);
         ClientNetworkServices.initialize(new FabricClientNetworkTransport());
         KeyBindingHelper.registerKeyBinding(AIBotKeyBindings.openPanel());
         KeyBindingHelper.registerKeyBinding(AIBotKeyBindings.openActions());

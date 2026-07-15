@@ -23,7 +23,7 @@ public final class CombatCore {
     }
 
     public static void equipMelee(AIPlayerEntity bot) {
-        EquipAction.equipBestArmor(bot);
+        EquipAction.equipBestArmor(bot, "combat_start");
         EquipAction.equipBestWeapon(bot);
     }
 

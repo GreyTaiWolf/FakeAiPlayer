@@ -9,6 +9,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
 
 public final class NeighborEnumerator {
     private static final Direction[] HORIZONTAL = {
@@ -20,15 +21,16 @@ public final class NeighborEnumerator {
 
     private final boolean canPillar;
     private final boolean allowDig;
+    private final TraversalPolicy policy;
     private BlockPos pathGoal; // 终点格:岩浆预检豁免用(终点贴岩浆由任务层封堵处理,不该让唯一入口无解)
 
     public NeighborEnumerator() {
-        this(false, true);
+        this(false, true, TraversalPolicy.TASK_MUTATING_DRY);
     }
 
     // NAV-9:canPillar=true 时允许"垫方块上升"邻接(仅当 bot 背包有可放置方块时由 A* 传入)。
     public NeighborEnumerator(boolean canPillar) {
-        this(canPillar, true);
+        this(canPillar, true, TraversalPolicy.TASK_MUTATING_DRY);
     }
 
     // NAV-OPT:allowDig=false 时**禁用 DIG_THROUGH 邻居**——只在空气格上做"纯步行"搜索。
@@ -36,8 +38,22 @@ public final class NeighborEnumerator {
     // 而启用挖穿会把每个相邻实心方块都当邻居,使搜索退化成"3D 体积扩散",被困/地下时极易撑爆到
     // SEARCH_LIMIT(实测 5 格距离的 move 都 SEARCH_LIMIT 的机制根因)。纯步行无解再开第二阶段挖穿。
     public NeighborEnumerator(boolean canPillar, boolean allowDig) {
+        this(canPillar, allowDig,
+                canPillar || allowDig
+                        ? TraversalPolicy.TASK_MUTATING_DRY
+                        : TraversalPolicy.TASK_WALK_DRY);
+    }
+
+    public NeighborEnumerator(TraversalPolicy policy) {
+        this(policy.allowsPillaring(), policy.allowsDigging(), policy);
+    }
+
+    public NeighborEnumerator(boolean canPillar,
+                              boolean allowDig,
+                              TraversalPolicy policy) {
         this.canPillar = canPillar;
         this.allowDig = allowDig;
+        this.policy = policy;
     }
 
     public void setPathGoal(BlockPos goal) {
@@ -48,13 +64,15 @@ public final class NeighborEnumerator {
         List<NeighborCandidate> result = new ArrayList<>(HORIZONTAL.length);
         for (Direction direction : HORIZONTAL) {
             BlockPos target = current.relative(direction);
-            if (Standability.isStandable(world, target)) {
+            if (Standability.isStandable(world, target, policy)
+                    && walkTransitionClear(world, current, target)) {
                 result.add(new NeighborCandidate(target, MoveType.WALK, 0));
                 continue;
             }
 
             BlockPos jumpTarget = target.above();
-            if (canJumpOnto(world, current, target) && Standability.isStandable(world, jumpTarget)) {
+            if (canJumpOnto(world, current, target)
+                    && Standability.isStandable(world, jumpTarget, policy)) {
                 result.add(new NeighborCandidate(jumpTarget, MoveType.JUMP_UP, 0));
                 continue;
             }
@@ -89,8 +107,18 @@ public final class NeighborEnumerator {
         return result;
     }
 
+    /** Package-safe transition probe for executors outside the pathfinding package. */
+    public boolean hasTransition(BlockPos current,
+                                 BlockPos expected,
+                                 MoveType expectedMove,
+                                 ServerLevel world) {
+        return getNeighbors(current, world).stream()
+                .anyMatch(candidate -> candidate.pos().equals(expected)
+                        && candidate.moveType() == expectedMove);
+    }
+
     // NAV-3:同高对角移动。仅当目标格可站、且两个正交相邻格都"可穿过"(不切墙角)时才允许。
-    private static void addDiagonals(BlockPos current, ServerLevel world, List<NeighborCandidate> result) {
+    private void addDiagonals(BlockPos current, ServerLevel world, List<NeighborCandidate> result) {
         Direction[][] pairs = {
                 {Direction.NORTH, Direction.EAST},
                 {Direction.NORTH, Direction.WEST},
@@ -99,13 +127,16 @@ public final class NeighborEnumerator {
         };
         for (Direction[] pair : pairs) {
             BlockPos diag = current.relative(pair[0]).relative(pair[1]);
-            if (!Standability.isStandable(world, diag)) {
+            if (!Standability.isStandable(world, diag, policy)) {
                 continue;
             }
             if (!passableColumn(world, diag)) {
                 continue;
             }
             if (!passableColumn(world, current.relative(pair[0])) || !passableColumn(world, current.relative(pair[1]))) {
+                continue;
+            }
+            if (!walkTransitionClear(world, current, diag)) {
                 continue;
             }
             result.add(new NeighborCandidate(diag, MoveType.DIAGONAL, 0));
@@ -129,8 +160,13 @@ public final class NeighborEnumerator {
         return world.getBlockState(pos).getCollisionShape(world, pos).isEmpty();
     }
 
-    private static boolean passableColumn(ServerLevel world, BlockPos feet) {
-        return collisionEmpty(world, feet) && collisionEmpty(world, feet.above());
+    private boolean passableColumn(ServerLevel world, BlockPos feet) {
+        if (!collisionEmpty(world, feet) || !collisionEmpty(world, feet.above())) {
+            return false;
+        }
+        return !policy.requiresDryPath()
+                || (world.getFluidState(feet).isEmpty()
+                && world.getFluidState(feet.above()).isEmpty());
     }
 
     private static boolean canJumpFrom(ServerLevel world, BlockPos current) {
@@ -151,7 +187,7 @@ public final class NeighborEnumerator {
         return collisionEmpty(world, front.above()) && collisionEmpty(world, front.above(2));
     }
 
-    private static NeighborCandidate findDrop(ServerLevel world, BlockPos target) {
+    private NeighborCandidate findDrop(ServerLevel world, BlockPos target) {
         if (!collisionEmpty(world, target)) {
             return null;
         }
@@ -161,7 +197,7 @@ public final class NeighborEnumerator {
         int maxFall = AIBotConfig.get().nav().maxSafeFall();
         for (int fall = 1; fall <= maxFall; fall++) {
             BlockPos landing = target.below(fall);
-            if (Standability.isStandable(world, landing)) {
+            if (Standability.isStandable(world, landing, policy)) {
                 return new NeighborCandidate(landing, MoveType.DROP_DOWN, fall);
             }
             if (!collisionEmpty(world, landing)) {
@@ -218,6 +254,20 @@ public final class NeighborEnumerator {
         // 这正是 geo_slope/wall/pocket 全卡 no_progress 的根因(挖掘寻路只能贴地刨坑、不能穿山)。
         BlockPos head = target.above();
         return collisionEmpty(world, head) || isMineable(world, head);
+    }
+
+    private static boolean walkTransitionClear(ServerLevel world, BlockPos from, BlockPos to) {
+        AABB fromBox = playerBox(from);
+        AABB toBox = playerBox(to);
+        return world.noCollision(fromBox.minmax(toBox).deflate(1.0E-4D));
+    }
+
+    private static AABB playerBox(BlockPos feet) {
+        double centerX = feet.getX() + 0.5D;
+        double centerZ = feet.getZ() + 0.5D;
+        return new AABB(
+                centerX - 0.3D, feet.getY(), centerZ - 0.3D,
+                centerX + 0.3D, feet.getY() + 1.8D, centerZ + 0.3D);
     }
 
     private static boolean isMineable(ServerLevel world, BlockPos pos) {

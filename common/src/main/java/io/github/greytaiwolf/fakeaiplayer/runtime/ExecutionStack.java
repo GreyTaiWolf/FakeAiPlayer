@@ -12,7 +12,11 @@ public final class ExecutionStack<T> {
     private final Deque<Frame<T>> frames = new ArrayDeque<>();
 
     public Frame<T> push(T work, TaskOrigin origin) {
-        Frame<T> frame = new Frame<>(UUID.randomUUID(), work, origin);
+        return push(work, origin, PauseOwner.SYSTEM);
+    }
+
+    public Frame<T> push(T work, TaskOrigin origin, PauseOwner pauseOwner) {
+        Frame<T> frame = new Frame<>(UUID.randomUUID(), work, origin, pauseOwner);
         frames.addLast(frame);
         return frame;
     }
@@ -27,6 +31,10 @@ public final class ExecutionStack<T> {
             return Optional.empty();
         }
         return Optional.of(frames.removeLast());
+    }
+
+    public Optional<Frame<T>> pop() {
+        return Optional.ofNullable(frames.pollLast());
     }
 
     public List<Frame<T>> drain() {
@@ -46,6 +54,6 @@ public final class ExecutionStack<T> {
         return frames.isEmpty();
     }
 
-    public record Frame<T>(UUID frameId, T work, TaskOrigin origin) {
+    public record Frame<T>(UUID frameId, T work, TaskOrigin origin, PauseOwner pauseOwner) {
     }
 }

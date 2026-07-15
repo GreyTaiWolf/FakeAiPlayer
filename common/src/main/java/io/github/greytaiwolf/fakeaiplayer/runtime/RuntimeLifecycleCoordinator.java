@@ -9,6 +9,7 @@ import io.github.greytaiwolf.fakeaiplayer.coordination.TaskBoard;
 import io.github.greytaiwolf.fakeaiplayer.craft.RuntimeRecipeIndex;
 import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.goal.GoalExecutor;
+import io.github.greytaiwolf.fakeaiplayer.inventory.BotInventorySessionManager;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLogWriter;
 import io.github.greytaiwolf.fakeaiplayer.log.DiagnosticLogger;
@@ -73,6 +74,7 @@ public final class RuntimeLifecycleCoordinator {
     }
 
     public void onBotDeath(AIPlayerEntity bot) {
+        BotInventorySessionManager.INSTANCE.closeForSafety(bot, "bot_death");
         BrainCoordinator.INSTANCE.invalidateDecision(bot, "bot_death");
         BrainCoordinator.INSTANCE.clearIntentWakeSources(bot);
         GoalExecutor.INSTANCE.failCurrent(bot, "bot_died");
@@ -88,6 +90,7 @@ public final class RuntimeLifecycleCoordinator {
 
     /** Explicit despawn is deletion: publish cancellation first, then forget every cached projection. */
     public void deleteBot(AIPlayerEntity bot) {
+        BotInventorySessionManager.INSTANCE.onBotRemoved(bot);
         IntentController.INSTANCE.cancelAll(bot, IntentController.ControlOrigin.SYSTEM, "bot_despawn");
         BrainCoordinator.INSTANCE.reset(bot);
         IdleCoordinator.INSTANCE.onBotRemoved(bot);
@@ -98,6 +101,7 @@ public final class RuntimeLifecycleCoordinator {
 
     /** Server stop is unload, not deletion; the already-captured Mission must not receive CANCELLED. */
     public void unloadBot(AIPlayerEntity bot) {
+        BotInventorySessionManager.INSTANCE.onBotRemoved(bot);
         BrainCoordinator.INSTANCE.invalidateDecision(bot, "server_unload");
         BrainCoordinator.INSTANCE.reset(bot);
         GoalExecutor.INSTANCE.unload(bot);

@@ -4,16 +4,17 @@ import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.mode.ObservableWorldQuery;
 import io.github.greytaiwolf.fakeaiplayer.observe.TpsGuard;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.AStarPathfinder;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.LocalOpenness;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.Node;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.PathfindingResult;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.Standability;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.TraversalPolicy;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.monster.Creeper;
 import net.minecraft.world.entity.monster.Monster;
@@ -30,9 +31,6 @@ import net.minecraft.world.phys.Vec3;
  */
 final class EscapePlanner {
     private static final double SEARCH_RANGE = 22.0D;
-    private static final Direction[] HORIZONTAL = {
-            Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST
-    };
     private static final double[] ANGLES_DEGREES = {0.0D, 35.0D, -35.0D, 70.0D, -70.0D, 110.0D, -110.0D, 180.0D};
     private static final double[] DISTANCES = {20.0D, 19.0D, 19.0D, 17.0D, 17.0D, 15.0D, 15.0D, 12.0D};
     private static final int CANDIDATE_RADIUS = 4;
@@ -62,6 +60,7 @@ final class EscapePlanner {
 
         Plan bestSafe = null;
         Plan bestImproving = null;
+        Plan bestClosedImproving = null;
         Set<BlockPos> seenGoals = new HashSet<>();
         for (int i = 0; i < ANGLES_DEGREES.length; i++) {
             if (System.nanoTime() >= deadline) {
@@ -69,8 +68,15 @@ final class EscapePlanner {
             }
             Vec3 direction = rotate(preferredAway, ANGLES_DEGREES[i]);
             BlockPos requested = BlockPos.containing(bot.position().add(direction.scale(DISTANCES[i])));
-            Optional<BlockPos> standable = Standability.findNearestStandable(
-                    bot.serverLevel(), requested, CANDIDATE_RADIUS, 4, 4);
+            Optional<BlockPos> openStandable = Standability.findNearestStandable(
+                    bot.serverLevel(), requested, CANDIDATE_RADIUS, 4, 4,
+                    TraversalPolicy.ESCAPE_DRY_OPEN,
+                    candidate -> LocalOpenness.isOpen(
+                            bot.serverLevel(), candidate, TraversalPolicy.ESCAPE_DRY_OPEN));
+            boolean openGoal = openStandable.isPresent();
+            Optional<BlockPos> standable = openGoal ? openStandable : Standability.findNearestStandable(
+                    bot.serverLevel(), requested, CANDIDATE_RADIUS, 4, 4,
+                    TraversalPolicy.TASK_WALK_DRY);
             if (standable.isEmpty()) {
                 continue;
             }
@@ -85,10 +91,12 @@ final class EscapePlanner {
             }
             long remainingMillis = Math.max(1L, (remainingNanos + 999_999L) / 1_000_000L);
             long searchMillis = Math.min(perCandidateMillis, remainingMillis);
+            TraversalPolicy routePolicy = openGoal
+                    ? TraversalPolicy.ESCAPE_DRY_OPEN : TraversalPolicy.TASK_WALK_DRY;
             PathfindingResult result = new AStarPathfinder(
                     bot.serverLevel(), start, goal,
                     maxSearchNodes, searchMillis,
-                    false, false, 1.35D).findPath();
+                    routePolicy, 1.35D).findPath();
             if (!result.success() || result.path().size() < 2) {
                 continue;
             }
@@ -102,24 +110,31 @@ final class EscapePlanner {
                     result.path().size(),
                     metrics.alignment(),
                     metrics.dangerSteps());
-            boolean terminalSafe = hazards.isEmpty() || ThreatResponsePolicy.materiallySafer(
+            boolean terminalSafe = openGoal && (hazards.isEmpty() || ThreatResponsePolicy.materiallySafer(
                     startDistance,
                     metrics.endDistance(),
                     metrics.midRouteDistance(),
                     metrics.dangerSteps(),
-                    result.path().size());
-            Plan candidate = new Plan(goal, result.path(), score, terminalSafe,
+                    result.path().size()));
+            BlockPos resolvedGoal = result.path().get(result.path().size() - 1).pos();
+            Plan candidate = new Plan(resolvedGoal, result.path(), score, terminalSafe, openGoal,
                     startDistance, metrics.endDistance());
             if (terminalSafe && (bestSafe == null || candidate.score() > bestSafe.score())) {
                 bestSafe = candidate;
-            } else if (!terminalSafe
+            } else if (openGoal && !terminalSafe
                     && ThreatResponsePolicy.meaningfullyImproves(
                     startDistance, metrics.endDistance(), metrics.midRouteDistance())
                     && (bestImproving == null || candidate.score() > bestImproving.score())) {
                 bestImproving = candidate;
+            } else if (!openGoal
+                    && ThreatResponsePolicy.meaningfullyImproves(
+                    startDistance, metrics.endDistance(), metrics.midRouteDistance())
+                    && (bestClosedImproving == null || candidate.score() > bestClosedImproving.score())) {
+                bestClosedImproving = candidate;
             }
         }
-        return Optional.ofNullable(bestSafe != null ? bestSafe : bestImproving);
+        return Optional.ofNullable(bestSafe != null ? bestSafe
+                : bestImproving != null ? bestImproving : bestClosedImproving);
     }
 
     private static List<Hazard> collectHazards(AIPlayerEntity bot, Threat primaryThreat) {
@@ -211,15 +226,9 @@ final class EscapePlanner {
     }
 
     private static int countExits(AIPlayerEntity bot, BlockPos goal) {
-        int exits = 0;
-        for (Direction direction : HORIZONTAL) {
-            BlockPos adjacent = goal.relative(direction);
-            if (Standability.isStandable(bot.serverLevel(), adjacent)
-                    || Standability.isStandable(bot.serverLevel(), adjacent.above())) {
-                exits++;
-            }
-        }
-        return exits;
+        return LocalOpenness.analyze(
+                bot.serverLevel(), goal, TraversalPolicy.ESCAPE_DRY_OPEN,
+                LocalOpenness.DEFAULT_RADIUS).exitDirections().size();
     }
 
     private static double nearestHazardDistance(BlockPos pos, List<Hazard> hazards) {
@@ -268,6 +277,7 @@ final class EscapePlanner {
                 List<Node> path,
                 double score,
                 boolean terminalSafe,
+                boolean openGoal,
                 double startDistance,
                 double endDistance) {
         Plan {

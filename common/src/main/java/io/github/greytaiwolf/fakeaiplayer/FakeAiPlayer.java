@@ -7,6 +7,7 @@ import io.github.greytaiwolf.fakeaiplayer.command.AIBotCommand;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLogWriter;
 import io.github.greytaiwolf.fakeaiplayer.mode.CapabilityPolicy;
+import io.github.greytaiwolf.fakeaiplayer.inventory.BotInventorySessionManager;
 import io.github.greytaiwolf.fakeaiplayer.mode.PrivilegedCapability;
 import io.github.greytaiwolf.fakeaiplayer.network.AIBotServerNetworking;
 import io.github.greytaiwolf.fakeaiplayer.network.ServerNetworkTransport;
@@ -84,6 +85,7 @@ public final class FakeAiPlayer {
 
     public static void onServerStopping(MinecraftServer server) {
         if (initialized) {
+            BotInventorySessionManager.INSTANCE.clear(server);
             BuildingPreviewService.INSTANCE.clear(server);
             RuntimeLifecycleCoordinator.INSTANCE.onServerStopping(server);
         }
@@ -97,6 +99,7 @@ public final class FakeAiPlayer {
         FocusTracker.INSTANCE.tick(server);
         AIBotServerNetworking.INSTANCE.tick(server);
         BuildingPreviewService.INSTANCE.tick(server);
+        BotInventorySessionManager.INSTANCE.tick(server);
         io.github.greytaiwolf.fakeaiplayer.log.DiagnosticLogger.INSTANCE.tick(server);
         if (server.getTickCount() > 0 && server.getTickCount() % 6000 == 0) {
             BotPersistence.INSTANCE.saveAllAsync(server);

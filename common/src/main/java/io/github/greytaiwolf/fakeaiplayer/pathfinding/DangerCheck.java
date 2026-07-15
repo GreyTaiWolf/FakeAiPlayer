@@ -11,14 +11,38 @@ public final class DangerCheck {
     }
 
     public static String scan(ServerLevel world, BlockPos node) {
+        return scan(world, node, TraversalPolicy.TASK_WALK_DRY);
+    }
+
+    public static String scan(ServerLevel world, BlockPos node, TraversalPolicy policy) {
         if (node.getY() < world.getMinY() + 1) {
             return "void";
         }
         BlockState at = world.getBlockState(node);
+        BlockState head = world.getBlockState(node.above());
+        BlockState below = world.getBlockState(node.below());
+        if (policy.requiresDryPath()) {
+            if (at.getFluidState().is(FluidTags.WATER)) {
+                return "water_at";
+            }
+            if (head.getFluidState().is(FluidTags.WATER)) {
+                return "water_head";
+            }
+            if (below.getFluidState().is(FluidTags.WATER)) {
+                return "water_below";
+            }
+            if (!at.getFluidState().isEmpty()
+                    || !head.getFluidState().isEmpty()
+                    || !below.getFluidState().isEmpty()) {
+                return "fluid_in_column";
+            }
+        }
         if (at.getFluidState().is(FluidTags.LAVA)) {
             return "lava_at";
         }
-        BlockState below = world.getBlockState(node.below());
+        if (head.getFluidState().is(FluidTags.LAVA)) {
+            return "lava_head";
+        }
         if (below.getFluidState().is(FluidTags.LAVA)) {
             return "lava_below";
         }

@@ -1,8 +1,10 @@
 package io.github.greytaiwolf.fakeaiplayer.task;
 
 import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
+import io.github.greytaiwolf.fakeaiplayer.inventory.BotInventorySessionManager;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.Standability;
+import io.github.greytaiwolf.fakeaiplayer.runtime.PauseOwner;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.MinecraftServer;
@@ -12,6 +14,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -35,6 +38,7 @@ public final class NavSafetyNet {
     private static final int RESCUE_RADIUS_V = 16;
     private static final int SUFFOCATION_CLIMB_UP = 24;   // 窒息脱困优先垂直向上钻出的最大格数(地表方向)
     private final Map<UUID, Integer> nextLogTick = new ConcurrentHashMap<>();
+    private final Set<UUID> taskPauseLeases = ConcurrentHashMap.newKeySet();
     // SAFE-DROWN2:水危机接管标志。旧逻辑只在 submerged&&air<阈值 的 tick 接管(jump 一口气),
     // bot 露头 air 回升就放手 → 任务的移动输入又把它怼回水里 → 反复半淹、hp 被溺水伤害磨光
     //(实测 hunt roam 路过湖:30s 内 navsafe 触发 12 次仍 drowned)。改:一旦触发即置危机态,
@@ -50,15 +54,18 @@ public final class NavSafetyNet {
 
     public void clear(AIPlayerEntity bot) {
         UUID id = bot.getUUID();
+        bot.getActionPack().resumeControllers(PauseOwner.SAFETY);
         nextLogTick.remove(id);
         waterRescueShore.remove(id);
         waterRescueSince.remove(id);
+        taskPauseLeases.remove(id);
     }
 
     public void clearAll() {
         nextLogTick.clear();
         waterRescueShore.clear();
         waterRescueSince.clear();
+        taskPauseLeases.clear();
     }
 
     public boolean tickBot(MinecraftServer server, AIPlayerEntity bot) {
@@ -69,13 +76,17 @@ public final class NavSafetyNet {
         BlockPos feet = bot.blockPosition();
 
         // 0) 窒息/卡方块:脚位或头位有实体碰撞体时,优先**向上**钻出地表(修"越救越深")。
-        if (blockedColumn(world, feet) && escapeSuffocation(bot, world, feet)) {
-            throttledLog(server, bot, "navsafe_suffocation_snap", feet);
-            return true;
+        if (blockedColumn(world, feet)) {
+            acquireTaskPauseLease(bot, "suffocation_escape");
+            if (escapeSuffocation(bot, world, feet)) {
+                throttledLog(server, bot, "navsafe_suffocation_snap", feet);
+                return true;
+            }
         }
 
         // 1) 岩浆:站在岩浆里 / 脚下是岩浆 → 立即逃离(最高优先级)
         if (inLava(world, feet) || inLava(world, feet.below())) {
+            acquireTaskPauseLease(bot, "lava_escape");
             escapeLava(bot, world, feet);
             throttledLog(server, bot, "navsafe_lava_escape", feet);
             return true;
@@ -83,14 +94,21 @@ public final class NavSafetyNet {
 
         // 2) 溺水/水危机:触发后持续接管到上岸(见 waterRescueShore 注释)。
         boolean inCrisis = waterRescueShore.containsKey(bot.getUUID());
-        if (!inCrisis && bot.isUnderWater() && bot.getAirSupply() < AIR_SURFACE_THRESHOLD) {
+        boolean lowAir = bot.isUnderWater() && bot.getAirSupply() < AIR_SURFACE_THRESHOLD;
+        boolean accidentalWaterEntry = bot.isInWater() && !bot.getActionPack().hasWaterCapablePath();
+        if (!inCrisis && (accidentalWaterEntry || lowAir)) {
             inCrisis = true; // 新触发
         }
         if (inCrisis) {
+            acquireTaskPauseLease(bot, "water_rescue");
+            // Cancel only navigation. The owning task remains available to recover after the bot
+            // reaches dry ground, and repeated unsafe submissions are cancelled on later ticks.
+            bot.getActionPack().cancelActivePathForSafety("water_rescue");
             // 释放条件:脚踩实地且不在水里 → 危机解除,交还控制。
             if (!bot.isInWater() && bot.onGround()) {
                 waterRescueShore.remove(bot.getUUID());
                 waterRescueSince.remove(bot.getUUID());
+                releaseTaskPauseLease(bot);
                 return false;
             }
             int now = server.getTickCount();
@@ -102,6 +120,7 @@ public final class NavSafetyNet {
                 if (emergencyTeleportToAir(bot, world, feet)) {
                     waterRescueShore.remove(bot.getUUID());
                     waterRescueSince.remove(bot.getUUID());
+                    releaseTaskPauseLease(bot);
                     throttledLog(server, bot, "navsafe_drown_teleport", feet);
                     return true;
                 }
@@ -129,6 +148,11 @@ public final class NavSafetyNet {
             return true;
         }
 
+        if (!blockedColumn(world, bot.blockPosition())
+                && !inLava(world, bot.blockPosition())
+                && !inLava(world, bot.blockPosition().below())) {
+            releaseTaskPauseLease(bot);
+        }
         return false;
     }
 
@@ -261,6 +285,33 @@ public final class NavSafetyNet {
 
     private static boolean hasCollision(ServerLevel world, BlockPos pos) {
         return !world.getBlockState(pos).getCollisionShape(world, pos).isEmpty();
+    }
+
+    private void acquireTaskPauseLease(AIPlayerEntity bot, String reason) {
+        BotInventorySessionManager.INSTANCE.closeForSafety(bot, reason);
+        bot.getActionPack().freezeControllers(PauseOwner.SAFETY);
+        UUID id = bot.getUUID();
+        Optional<Task> active = TaskManager.INSTANCE.getActive(bot);
+        if (taskPauseLeases.contains(id)
+                || active.isEmpty()
+                || ("lava_escape".equals(reason) && active.get() instanceof LavaEscapeTask)) {
+            return;
+        }
+        if (TaskManager.INSTANCE.pauseFor(bot, PauseOwner.SAFETY, "nav_safety:" + reason)) {
+            taskPauseLeases.add(id);
+        }
+    }
+
+    private void releaseTaskPauseLease(AIPlayerEntity bot) {
+        UUID id = bot.getUUID();
+        bot.getActionPack().resumeControllers(PauseOwner.SAFETY);
+        if (!taskPauseLeases.contains(id)) {
+            return;
+        }
+        TaskManager.INSTANCE.resumeSafetyPause(bot);
+        // A USER/INVENTORY lock may intentionally keep the frame on the stack. This lease still
+        // ends here; releasing that persistent owner later performs the permitted resume.
+        taskPauseLeases.remove(id);
     }
 
     private void throttledLog(MinecraftServer server, AIPlayerEntity bot, String event, BlockPos pos) {

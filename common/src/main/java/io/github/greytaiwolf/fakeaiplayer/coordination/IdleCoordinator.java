@@ -41,22 +41,31 @@ public final class IdleCoordinator {
     }
 
     public boolean tickBot(AIPlayerEntity bot) {
-        if (TaskManager.INSTANCE.isUserPaused(bot)) {
-            return false;
-        }
-        if (TaskManager.INSTANCE.getActive(bot).isPresent()) {
-            return false;
-        }
-        if (TaskManager.INSTANCE.hasPaused(bot)) {
+        return tickBot(bot, true);
+    }
+
+    /** Runs ambient state every tick while expensive job sampling remains background-throttled. */
+    public boolean tickBot(AIPlayerEntity bot, boolean allowJobClaim) {
+        if (TaskManager.INSTANCE.hasPersistentPause(bot)
+                || TaskManager.INSTANCE.getActive(bot).isPresent()
+                || TaskManager.INSTANCE.hasPaused(bot)) {
+            IdleBehaviorController.INSTANCE.cancel(bot, "task_or_pause");
             return false;
         }
         // GOALFIX-GF1 P0-A:bot 有活跃目标计划时,空闲分配让位给 GoalExecutor(防步骤间隙抢任务板作业)。
         if (io.github.greytaiwolf.fakeaiplayer.goal.GoalExecutor.INSTANCE.hasActivePlan(bot)) {
+            IdleBehaviorController.INSTANCE.cancel(bot, "goal_active");
             return false;
         }
         // Low-level action-only work (for example move_to) has no Task object but still owns the
         // bot until ActionPack settles. Do not wake Brain, resume paused work, or claim a Job over it.
-        if (bot.getActionPack().hasActiveActions()) {
+        if (bot.getActionPack().isSuspended()) {
+            IdleBehaviorController.INSTANCE.cancel(bot, "action_suspended");
+            return false;
+        }
+        if (bot.getActionPack().hasActiveActions()
+                && !IdleBehaviorController.INSTANCE.ownsActiveAction(bot)) {
+            IdleBehaviorController.INSTANCE.cancel(bot, "foreign_action");
             return false;
         }
         UUID currentJob = claimedJobs.remove(bot.getUUID());
@@ -64,17 +73,23 @@ public final class IdleCoordinator {
             finishClaimedJob(bot, currentJob);
         }
         if (BrainCoordinator.INSTANCE.status(bot).busy()) {
+            IdleBehaviorController.INSTANCE.cancel(bot, "brain_busy");
             return false;
         }
-        Optional<Job> job = TaskBoard.INSTANCE.claimNext(bot, AIPlayerManager.INSTANCE.roles(bot));
+        Optional<Job> job = allowJobClaim
+                ? TaskBoard.INSTANCE.claimNext(bot, AIPlayerManager.INSTANCE.roles(bot))
+                : Optional.empty();
         job.ifPresent(next -> assignJob(bot, next));
         if (job.isPresent()) {
+            IdleBehaviorController.INSTANCE.cancel(bot, "job_claimed");
             markDirty(bot);
+            return true;
         }
-        return job.isPresent();
+        return IdleBehaviorController.INSTANCE.tick(bot);
     }
 
     public void onBotRemoved(AIPlayerEntity bot) {
+        IdleBehaviorController.INSTANCE.clear(bot);
         UUID jobId = claimedJobs.remove(bot.getUUID());
         if (jobId != null) {
             TaskBoard.INSTANCE.markFailed(jobId, "bot_removed");
@@ -84,11 +99,21 @@ public final class IdleCoordinator {
 
     /** Server unload keeps the persisted lease; the next runtime session will reopen it as stale. */
     public void onBotUnloaded(AIPlayerEntity bot) {
+        IdleBehaviorController.INSTANCE.clear(bot);
         claimedJobs.remove(bot.getUUID());
     }
 
     public void clearAllRuntime() {
         claimedJobs.clear();
+        IdleBehaviorController.INSTANCE.clearAll();
+    }
+
+    public boolean cancelAmbient(AIPlayerEntity bot, String reason) {
+        return IdleBehaviorController.INSTANCE.cancel(bot, reason);
+    }
+
+    public boolean ownsAmbientAction(AIPlayerEntity bot) {
+        return IdleBehaviorController.INSTANCE.ownsActiveAction(bot);
     }
 
     public boolean cancelClaimedJob(AIPlayerEntity bot, String reason) {

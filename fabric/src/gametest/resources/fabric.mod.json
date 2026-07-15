@@ -11,7 +11,11 @@
     ],
     "fabric-gametest": [
       "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerDeterministicGameTests",
-      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerFocusGameTests"
+      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerFocusGameTests",
+      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerBehaviorGameTests",
+      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerSafetyControlGameTests",
+      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerNavigationSafetyGameTests",
+      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerConflictGameTests"
     ]
   },
   "depends": {

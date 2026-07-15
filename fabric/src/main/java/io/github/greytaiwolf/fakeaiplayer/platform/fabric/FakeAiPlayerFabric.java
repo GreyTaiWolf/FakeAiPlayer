@@ -3,6 +3,7 @@ package io.github.greytaiwolf.fakeaiplayer.platform.fabric;
 import io.github.greytaiwolf.fakeaiplayer.FakeAiPlayer;
 import io.github.greytaiwolf.fakeaiplayer.brain.ChatCaptureListener;
 import io.github.greytaiwolf.fakeaiplayer.building.preview.BuildingPreviewService;
+import io.github.greytaiwolf.fakeaiplayer.inventory.BotInventorySessionManager;
 import io.github.greytaiwolf.fakeaiplayer.network.AIBotServerNetworking;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -14,6 +15,7 @@ import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 public final class FakeAiPlayerFabric implements ModInitializer {
     @Override
     public void onInitialize() {
+        FabricMenuRegistry.register();
         FakeAiPlayer.initialize(new FabricEnvironment(), new FabricServerNetworkTransport());
         FabricPayloads.register();
 
@@ -27,6 +29,7 @@ public final class FakeAiPlayerFabric implements ModInitializer {
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             AIBotServerNetworking.INSTANCE.onDisconnect(handler.player);
             BuildingPreviewService.INSTANCE.onDisconnect(handler.player);
+            BotInventorySessionManager.INSTANCE.onViewerDisconnect(handler.player);
         });
     }
 }

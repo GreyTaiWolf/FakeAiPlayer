@@ -98,7 +98,11 @@ public abstract class AbstractTask implements Task {
     protected abstract void onTick(AIPlayerEntity bot);
 
     protected void onPause(AIPlayerEntity bot) {
-        bot.getActionPack().stopAll();
+        // Inventory owns a non-destructive ActionPack suspension before pausing the task. Keep the
+        // executor objects in that case so closing the menu continues the same task step.
+        if (!bot.getActionPack().isSuspended()) {
+            bot.getActionPack().stopAll();
+        }
     }
 
     protected void onResume(AIPlayerEntity bot) {

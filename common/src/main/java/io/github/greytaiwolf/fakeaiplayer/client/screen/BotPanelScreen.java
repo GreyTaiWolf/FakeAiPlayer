@@ -3,7 +3,6 @@ package io.github.greytaiwolf.fakeaiplayer.client.screen;
 import io.github.greytaiwolf.fakeaiplayer.client.BotClientState;
 import io.github.greytaiwolf.fakeaiplayer.client.BotCommandBridge;
 import io.github.greytaiwolf.fakeaiplayer.client.screen.ui.ChatView;
-import io.github.greytaiwolf.fakeaiplayer.client.screen.ui.InventoryView;
 import io.github.greytaiwolf.fakeaiplayer.client.screen.ui.PanelComponent;
 import io.github.greytaiwolf.fakeaiplayer.client.screen.ui.Theme;
 import io.github.greytaiwolf.fakeaiplayer.client.screen.ui.cards.GoalView;
@@ -27,7 +26,6 @@ public final class BotPanelScreen extends Screen {
         CHAT_STATUS,
         ACTIONS,
         SETTINGS,
-        INVENTORY,
         GOAL
     }
 
@@ -54,7 +52,6 @@ public final class BotPanelScreen extends Screen {
         super(mode == Mode.GOAL ? Component.literal("目标与执行链")
                 : Component.translatable(mode == Mode.ACTIONS ? "screen.fakeaiplayer.actions_panel"
                 : mode == Mode.SETTINGS ? "screen.fakeaiplayer.settings_panel"
-                : mode == Mode.INVENTORY ? "screen.fakeaiplayer.inventory_panel"
                 : "screen.fakeaiplayer.panel"));
         this.mode = mode;
     }
@@ -89,9 +86,11 @@ public final class BotPanelScreen extends Screen {
                 })
                 .bounds(px + pw - 178, py + 4, 40, 14)
                 .build();
-        inventoryButton = Button.builder(Component.translatable(mode == Mode.INVENTORY ? "btn.fakeaiplayer.chat" : "btn.fakeaiplayer.inventory"), button -> {
+        inventoryButton = Button.builder(Component.translatable("btn.fakeaiplayer.inventory"), button -> {
                     if (minecraft != null) {
-                        minecraft.setScreen(new BotPanelScreen(mode == Mode.INVENTORY ? Mode.CHAT_STATUS : Mode.INVENTORY));
+                        BotCommandBridge.subscribe(target, false);
+                        BotCommandBridge.openInventory(target);
+                        minecraft.setScreen(null);
                     }
                 })
                 .bounds(px + pw - 134, py + 4, 40, 14)
@@ -198,10 +197,6 @@ public final class BotPanelScreen extends Screen {
         } else if (mode == Mode.SETTINGS) {
             pw = docked ? Math.min(300, Math.max(260, (int) (width * 0.28F))) : Math.max(240, width - 20);
             ph = Math.max(150, Math.min(height - 24, 190));
-        } else if (mode == Mode.INVENTORY) {
-            // 需容下 9 列 × 18px 网格(162)+ 左右内边距;高度容装备行 + AI 4 行 + 玩家 4 行
-            pw = docked ? Math.min(240, Math.max(200, (int) (width * 0.24F))) : Math.max(200, width - 20);
-            ph = Math.max(220, Math.min(height - 24, 272));
         } else if (mode == Mode.GOAL) {
             // 目标与执行链:单栏,容下完整步骤链
             pw = docked ? Math.min(300, Math.max(240, (int) (width * 0.26F))) : Math.max(240, width - 20);
@@ -213,7 +208,7 @@ public final class BotPanelScreen extends Screen {
         }
         px = docked ? width - pw - 12 : (width - pw) / 2;
         py = 12;
-        leftW = mode == Mode.ACTIONS || mode == Mode.SETTINGS || mode == Mode.INVENTORY || mode == Mode.GOAL ? pw : Math.max(160, Math.round(pw * 0.42F));
+        leftW = mode == Mode.ACTIONS || mode == Mode.SETTINGS || mode == Mode.GOAL ? pw : Math.max(160, Math.round(pw * 0.42F));
         rightW = pw - leftW - Theme.GUTTER;
     }
 
@@ -226,11 +221,6 @@ public final class BotPanelScreen extends Screen {
         }
         if (mode == Mode.SETTINGS) {
             leftCards.add(new SettingsCard(target));
-            chat = null;
-            return;
-        }
-        if (mode == Mode.INVENTORY) {
-            leftCards.add(new InventoryView(target));
             chat = null;
             return;
         }
@@ -276,7 +266,6 @@ public final class BotPanelScreen extends Screen {
         } else {
             String titleKey = mode == Mode.ACTIONS ? "screen.fakeaiplayer.actions_title"
                     : mode == Mode.SETTINGS ? "screen.fakeaiplayer.settings_title"
-                    : mode == Mode.INVENTORY ? "screen.fakeaiplayer.inventory_title"
                     : "screen.fakeaiplayer.title";
             context.drawString(font, Theme.tr(titleKey, name), px + Theme.PAD, py + 6, Theme.TEXT_STRONG);
         }

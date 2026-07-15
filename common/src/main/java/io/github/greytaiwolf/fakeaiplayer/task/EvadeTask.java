@@ -287,7 +287,7 @@ public final class EvadeTask extends AbstractTask {
         EscapePlanner.Plan selected = plan.get();
         escapeGoal = selected.goal();
         terminalRoute = selected.terminalSafe();
-        routeExecutor = new EscapeRouteExecutor(selected.path());
+        routeExecutor = new EscapeRouteExecutor(selected.path(), selected.openGoal());
         phase = Phase.ESCAPE;
         phaseTicks = 0;
         combatTarget = null;

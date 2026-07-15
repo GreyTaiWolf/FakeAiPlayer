@@ -3,6 +3,7 @@ package io.github.greytaiwolf.fakeaiplayer.runtime;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
+import java.util.EnumSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -39,5 +40,34 @@ class ExecutionStackTest {
         stack.push("lava", TaskOrigin.safety("lava"));
         assertEquals(java.util.List.of("lava", "combat", "mission"),
                 stack.drain().stream().map(ExecutionStack.Frame::work).toList());
+    }
+
+    @Test
+    void pauseOwnerIsRetainedOnEachFrame() {
+        ExecutionStack<String> stack = new ExecutionStack<>();
+        stack.push("mission", TaskOrigin.mission(UUID.randomUUID(), "mine"), PauseOwner.INVENTORY);
+        stack.push("combat", TaskOrigin.safety("combat"), PauseOwner.SAFETY);
+
+        assertEquals(PauseOwner.SAFETY, stack.pop().orElseThrow().pauseOwner());
+        assertEquals(PauseOwner.INVENTORY, stack.peek().orElseThrow().pauseOwner());
+    }
+
+    @Test
+    void finalPersistentLockReleaseResumesRegardlessOfAcquisitionOrder() {
+        EnumSet<PauseOwner> inventoryThenUser = EnumSet.of(PauseOwner.INVENTORY, PauseOwner.USER);
+        inventoryThenUser.remove(PauseOwner.INVENTORY);
+        assertTrue(!PauseOwner.resumeAllowedAfterPersistentRelease(
+                PauseOwner.INVENTORY, inventoryThenUser));
+        inventoryThenUser.remove(PauseOwner.USER);
+        assertTrue(PauseOwner.resumeAllowedAfterPersistentRelease(
+                PauseOwner.INVENTORY, inventoryThenUser));
+
+        EnumSet<PauseOwner> userThenInventory = EnumSet.of(PauseOwner.USER, PauseOwner.INVENTORY);
+        userThenInventory.remove(PauseOwner.USER);
+        assertTrue(!PauseOwner.resumeAllowedAfterPersistentRelease(
+                PauseOwner.USER, userThenInventory));
+        userThenInventory.remove(PauseOwner.INVENTORY);
+        assertTrue(PauseOwner.resumeAllowedAfterPersistentRelease(
+                PauseOwner.USER, userThenInventory));
     }
 }
