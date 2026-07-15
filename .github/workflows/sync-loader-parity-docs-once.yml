@@ -1,0 +1,110 @@
+name: Sync loader parity docs once
+
+on:
+  push:
+    branches:
+      - agent/sync-fabric-building-preview
+
+permissions:
+  contents: write
+
+jobs:
+  patch-docs:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out parity branch
+        uses: actions/checkout@v6
+        with:
+          ref: agent/sync-fabric-building-preview
+          fetch-depth: 0
+
+      - name: Align loader-specific documentation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              Path("README.md"): [
+                  (
+                      "| 模块住宅与投影 | NeoForge-first，未验证 | 确定性住宅含地基、地板、梁柱、门窗、门廊、入口台阶、永久室内楼梯、可步行阁楼和人字顶；NeoForge 已接入服务端权威分块投影、彩色线框与人工确认。Fabric 投影和真实生存施工证据尚缺。 |",
+                      "| 模块住宅与投影 | 双加载器接线，未验证 | 确定性住宅含地基、地板、梁柱、门窗、门廊、入口台阶、永久室内楼梯、可步行阁楼和人字顶；Fabric 与 NeoForge 均已接入服务端权威分块投影、彩色线框与人工确认。双加载器客户端实机和真实生存施工证据尚缺。 |",
+                  ),
+                  (
+                      "### 模块住宅与人工确认投影（当前仅 NeoForge）",
+                      "### 模块住宅与人工确认投影（Fabric / NeoForge）",
+                  ),
+                  (
+                      "玩家必须在 NeoForge 客户端检查投影后执行确认命令，或在“控制”设置中自行绑定默认未绑定的确认键。",
+                      "玩家必须在对应加载器客户端检查投影后执行确认命令，或在“控制”设置中自行绑定默认未绑定的确认键。",
+                  ),
+                  (
+                      "Fabric payload/renderer、场地调查、楼层/阶段过滤、材料 UI、完整二层房间/阳台/栏杆、通用模组方块适配和真实生存 GameTest 均未完成。",
+                      "双加载器客户端实机验证、场地调查、楼层/阶段过滤、材料 UI、完整二层房间/阳台/栏杆、通用模组方块适配和真实生存 GameTest 均未完成。",
+                  ),
+              ],
+              Path("docs/AI_BUILDING_SYSTEM.md"): [
+                  (
+                      "当前工作树已经进入 NeoForge-first 的 P1/P2 实现切片，但仍是 `UNVERIFIED` 开发状态：",
+                      "当前工作树已经进入 Fabric/NeoForge 双加载器的 P1/P2 实现切片，但仍是 `UNVERIFIED` 开发状态：",
+                  ),
+                  (
+                      "- `IN SOURCE / NEOFORGE ONLY`：服务端 `PreviewSession`、Begin/Chunk/Commit/Clear 分块协议、客户端 staging 后原子发布、Ready 回执、彩色世界线框、移动/90°旋转、显式确认/取消和断线/超时清理。",
+                      "- `IN SOURCE / FABRIC + NEOFORGE`：服务端 `PreviewSession`、Begin/Chunk/Commit/Clear 分块协议、客户端 staging 后原子发布、Ready 回执、彩色世界线框、移动/90°旋转、显式确认/取消和断线/超时清理。",
+                  ),
+                  (
+                      "因此 NeoForge 真实客户端、真实生存材料链和复杂地形 GameTest 均尚未完成，不能称为“建筑已可靠完成”，此分支必须保持 Draft。",
+                      "因此 Fabric/NeoForge 真实客户端、真实生存材料链和复杂地形 GameTest 均尚未完成，不能称为“建筑已可靠完成”，此分支必须保持 Draft。",
+                  ),
+                  (
+                      "- `TODO`：Fabric 投影注册与渲染、VBO/分区缓存、场地调查、A/B/C 方案、类型化局部修改、楼层/阶段过滤、完整 BOM UI、完整二层房间/阳台/栏杆，以及真实 GameTest 和双加载器发布证据。",
+                      "- `TODO`：双加载器客户端实机验证、VBO/分区缓存、场地调查、A/B/C 方案、类型化局部修改、楼层/阶段过滤、完整 BOM UI、完整二层房间/阳台/栏杆，以及真实 GameTest 和双加载器发布证据。",
+                  ),
+                  (
+                      "### 当前 NeoForge 命令",
+                      "### 当前建筑命令",
+                  ),
+                  (
+                      "当前完整网络注册和世界渲染只在 NeoForge 端接线，Fabric 客户端不能使用这套投影流程。",
+                      "当前完整网络注册和世界渲染已在 Fabric 与 NeoForge 两端接线；两端客户端仍需分别完成真实联机与渲染验收。",
+                  ),
+              ],
+              Path("docs/README.md"): [
+                  (
+                      "- 当前模块住宅/建筑投影属于 NeoForge-first 的未发布工作树：服务端方案、分块传输、客户端线框和人工确认已进入源码，但 Fabric 投影、NeoForge 真实客户端与生存施工 GameTest 尚未完成。准确边界、命令和限制见 [AI 建筑系统设计基线](AI_BUILDING_SYSTEM.md)。",
+                      "- 当前模块住宅/建筑投影属于双加载器接线的未发布工作树：服务端方案、分块传输、Fabric/NeoForge 客户端线框和人工确认已进入源码，但双加载器真实客户端与生存施工 GameTest 尚未完成。准确边界、命令和限制见 [AI 建筑系统设计基线](AI_BUILDING_SYSTEM.md)。",
+                  ),
+                  (
+                      "NeoForge 的确认/取消按键默认未绑定。",
+                      "Fabric 与 NeoForge 的确认/取消按键默认未绑定。",
+                  ),
+              ],
+              Path("docs/TESTING_AND_EVIDENCE.md"): [
+                  (
+                      "只有干净提交上的 CI/本地完整 Gradle、真实 NeoForge 客户端与世界施工测试完成后，才能升级结论。",
+                      "只有干净提交上的 CI/本地完整 Gradle、真实 Fabric/NeoForge 客户端与世界施工测试完成后，才能升级结论。",
+                  ),
+              ],
+          }
+
+          for path, pairs in replacements.items():
+              text = path.read_text(encoding="utf-8")
+              for old, new in pairs:
+                  count = text.count(old)
+                  if count != 1:
+                      raise SystemExit(f"{path}: expected exactly one occurrence, found {count}: {old}")
+                  text = text.replace(old, new)
+              path.write_text(text, encoding="utf-8")
+
+          Path(".github/workflows/sync-loader-parity-docs-once.yml").unlink()
+          PY
+          git diff --check
+
+      - name: Commit synchronized documentation
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md docs/AI_BUILDING_SYSTEM.md docs/README.md docs/TESTING_AND_EVIDENCE.md .github/workflows/sync-loader-parity-docs-once.yml
+          git commit -m 'Align loader parity documentation'
+          git push origin HEAD:agent/sync-fabric-building-preview
