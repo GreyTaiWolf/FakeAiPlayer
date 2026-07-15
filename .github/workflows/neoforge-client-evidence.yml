@@ -120,6 +120,7 @@ jobs:
           export LIBGL_ALWAYS_SOFTWARE=1
           export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
           export __GLX_VENDOR_LIBRARY_NAME=mesa
+          export ALSOFT_DRIVERS=null
           Xvfb :99 -screen 0 1600x900x24 -ac +extension GLX +render -noreset >"$logs/xvfb.log" 2>&1 &
           xvfb_pid=$!
           for _ in $(seq 1 50); do
@@ -158,7 +159,7 @@ jobs:
           path = Path('neoforge/build.gradle')
           source = path.read_text()
           marker = "            programArguments.addAll '--username', 'GreyTaiWolf'\n"
-          addition = marker + (
+          addition = "            gameDirectory = file('run/client')\n" + marker + (
               "            programArguments.addAll '--quickPlayMultiplayer', "
               "'127.0.0.1:25566', '--width', '1600', '--height', '900'\n"
           )
