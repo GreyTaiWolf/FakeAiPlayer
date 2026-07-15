@@ -4,17 +4,17 @@
 
 ## 当前实现状态
 
-当前工作树已经进入 NeoForge-first 的 P1/P2 实现切片，但仍是 `UNVERIFIED` 开发状态：
+当前工作树已经进入 Fabric/NeoForge 双加载器的 P1/P2 实现切片，但仍是 `UNVERIFIED` 开发状态：
 
 - `IN SOURCE`：V2 不可变 plan、结构/registry 两阶段校验、确定性指纹、vanilla 坐标与 BlockState 变换，以及保留 operation、replace policy、atomic group 和稳定 sequence 的旧执行器适配层。
 - `IN SOURCE`：`modular-house-3` 确定性模块住宅生成器，现有 `oak_cottage`、`spruce_lodge` 两套 vanilla 材料风格；方案包含地基、地板、梁柱、墙体、窗户、双格门、门廊、自然地面两级入口台阶、前后永久露台、永久支撑直梯、可步行阁楼、无方向檐口、人字屋顶和屋脊。楼梯、阁楼和露台在高柱前完成；门和西侧门框延后到屋顶完成后，门轴由门框依赖顺序强制；Bot 通过露台、楼梯、阁楼、圈梁和檐口从两侧逐排攀建坡面。施工接近寻路禁止计划外挖墙或垫柱，并用方块轮廓 raycast 预先证明真实 clicked face、方向方块朝向和柱/梁轴线。
-- `IN SOURCE / NEOFORGE ONLY`：服务端 `PreviewSession`、Begin/Chunk/Commit/Clear 分块协议、客户端 staging 后原子发布、Ready 回执、彩色世界线框、移动/90°旋转、显式确认/取消和断线/超时清理。
+- `IN SOURCE / FABRIC + NEOFORGE`：服务端 `PreviewSession`、Begin/Chunk/Commit/Clear 分块协议、客户端 staging 后原子发布、Ready 回执、彩色世界线框、移动/90°旋转、显式确认/取消和断线/超时清理。
 - `IN SOURCE`：命令入口和 AI 工具 `draft_building`、`building_preview_status`、`cancel_building_preview`。AI 只能起草、查询和取消；确认施工仍必须由已授权的在线玩家完成。
 - `IN SOURCE`：旧 AI `build_house`、`assign_task build` 和 `post_job build` 均失败关闭并返回“使用 `draft_building`”；空闲协调器也不再执行持久化的旧 build Job。人工直接输入的确定性建造命令仍属于另一条显式授权入口，不等于给模型确认权。
 - `IN SOURCE`：V2 placement 依赖会在 adapter 中转换为稳定的前置 sequence。Loader 拒绝缺失、非先行或无 sequence 的依赖；`BuildTask` 在依赖格改变世界前重新精确比较每个前置格的 BlockState，reviewed V2 格一旦失败便失败关闭，而不是跳过支撑继续施工。
-- `PARTIAL`：确认会重新检查 owner、Bot、维度、距离、hash、transform revision、边界、区块、BlockState、替换策略、流体、方块实体和原子组；位于局部 `dy=0` 的 `FOUNDATION/PLACE` 格还要求下方可检查、无流体且上表面稳固，并在执行落块前再次检查，然后才把确定方案交给既有备料/建造链。材料规划用保留账本防止门、楼梯、工作台、熔炉和工具前置吞掉最终地板/梁材，沙子按缺口增量采集，literal 圆石与宽松 stone-like 工具链也已拆开。此路径已在 Temurin Java 21.0.11 下完成源码语法解析、纯生成器编译/12,800 方案烟雾与静态门禁；完整 Gradle 因当前环境 JVM 无法访问外部 Maven、在 `fabric-loom` 解析时于项目编译前中止，仍待 GitHub Actions。确认后的自动备料目前仍没有 mission-scoped 场地保护和分阶段工具/背包物流：采集可能选中投影支撑或已完成构件，大批原木/圆石还缺少可靠的工具耐久预算。因此 NeoForge 真实客户端、真实生存材料链和复杂地形 GameTest 均尚未完成，不能称为“建筑已可靠完成”，此分支必须保持 Draft。
+- `PARTIAL`：确认会重新检查 owner、Bot、维度、距离、hash、transform revision、边界、区块、BlockState、替换策略、流体、方块实体和原子组；位于局部 `dy=0` 的 `FOUNDATION/PLACE` 格还要求下方可检查、无流体且上表面稳固，并在执行落块前再次检查，然后才把确定方案交给既有备料/建造链。材料规划用保留账本防止门、楼梯、工作台、熔炉和工具前置吞掉最终地板/梁材，沙子按缺口增量采集，literal 圆石与宽松 stone-like 工具链也已拆开。此路径已在 Temurin Java 21.0.11 下完成源码语法解析、纯生成器编译/12,800 方案烟雾与静态门禁；完整 Gradle 因当前环境 JVM 无法访问外部 Maven、在 `fabric-loom` 解析时于项目编译前中止，仍待 GitHub Actions。确认后的自动备料目前仍没有 mission-scoped 场地保护和分阶段工具/背包物流：采集可能选中投影支撑或已完成构件，大批原木/圆石还缺少可靠的工具耐久预算。因此 Fabric/NeoForge 真实客户端、真实生存材料链和复杂地形 GameTest 均尚未完成，不能称为“建筑已可靠完成”，此分支必须保持 Draft。
 - `PARTIAL`：普通原版 `BlockItem` 会用 `BlockPlaceContext` 做保守预测；草、花、雪层走真实的“点击可替换目标格”交互，门下半格使用双格放置语义。带流体目标会在确认期拒绝，reviewed plan 不使用 `setBlock` 修正或兜底。当前公开住宅以永久阁楼通路避免临时脚手架；通用高层/复杂屋顶脚手架、错误状态事务回滚和模组方块适配仍未完成。
-- `TODO`：Fabric 投影注册与渲染、VBO/分区缓存、场地调查、A/B/C 方案、类型化局部修改、楼层/阶段过滤、完整 BOM UI、完整二层房间/阳台/栏杆，以及真实 GameTest 和双加载器发布证据。
+- `TODO`：双加载器客户端实机验证、VBO/分区缓存、场地调查、A/B/C 方案、类型化局部修改、楼层/阶段过滤、完整 BOM UI、完整二层房间/阳台/栏杆，以及真实 GameTest 和双加载器发布证据。
 
 因此，下文同时包含“当前实际协议”和长期设计。只有标为 `IN SOURCE` 的部分已经接线；它也只表示源码存在，不表示已在游戏中验收。
 
@@ -97,7 +97,7 @@ AI 等待状态绑定到具体 `sessionId`，而不是只记录一个 Bot 布尔
 
 旧 `build_house` 虽保留工具名以兼容旧 prompt/调用，但已经不再启动任务，只返回必须使用 `draft_building` 的失败结果。`assign_task` 与 `post_job` 同样在任何 Bot/Job 副作用前拒绝 `build`；重启读到的旧 build Job 也不会被空闲 Bot 认领执行。
 
-### 当前 NeoForge 命令
+### 当前建筑命令
 
 ```text
 /fakeaiplayer building draft <bot> <oak_cottage|spruce_lodge>
@@ -109,7 +109,7 @@ AI 等待状态绑定到具体 `sessionId`，而不是只记录一个 Bot 布尔
 /fakeaiplayer building cancel
 ```
 
-命令与 AI 工具当前把宽/深限制在 `7..16`，墙高限制在 `4..5`；公开尺寸均带永久直梯和阁楼屋顶通路。更大的 generator API 范围只是设计能力：仅当 `wall_height < depth`、能给直梯保留两端 landing 时加入该通路，否则 metadata 标记 `roof_access=design_only`，不会由当前命令承诺施工。`move` 接受的是投影锚点的绝对世界坐标。每位玩家同时只保留一个投影，新 draft 会替换旧 draft；会话默认五分钟过期，确认者必须与投影同维度且距锚点不超过 128 格。确认/取消按键会注册到控制设置但默认不绑定，玩家需要自行绑定。当前完整网络注册和世界渲染只在 NeoForge 端接线，Fabric 客户端不能使用这套投影流程。
+命令与 AI 工具当前把宽/深限制在 `7..16`，墙高限制在 `4..5`；公开尺寸均带永久直梯和阁楼屋顶通路。更大的 generator API 范围只是设计能力：仅当 `wall_height < depth`、能给直梯保留两端 landing 时加入该通路，否则 metadata 标记 `roof_access=design_only`，不会由当前命令承诺施工。`move` 接受的是投影锚点的绝对世界坐标。每位玩家同时只保留一个投影，新 draft 会替换旧 draft；会话默认五分钟过期，确认者必须与投影同维度且距锚点不超过 128 格。确认/取消按键会注册到控制设置但默认不绑定，玩家需要自行绑定。当前完整网络注册和世界渲染已在 Fabric 与 NeoForge 两端接线；两端客户端仍需分别完成真实联机与渲染验收。
 
 ## BuildingPlan V2
 
