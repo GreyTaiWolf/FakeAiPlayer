@@ -245,6 +245,8 @@ jobs:
           }
 
           # Stable, daylight test arena with a dry foundation for the projection validator.
+          # Force-load the arena before placing blocks: commands against an unloaded (0, 0)
+          # chunk are rejected, which would make both players fall into the ocean below.
           server_cmd 'op GreyTaiWolf'
           server_cmd 'gamerule doDaylightCycle false'
           server_cmd 'gamerule doWeatherCycle false'
@@ -252,11 +254,12 @@ jobs:
           server_cmd 'time set day'
           server_cmd 'weather clear'
           server_cmd 'difficulty easy'
-          server_cmd 'fill -24 90 -24 24 102 24 minecraft:air'
-          server_cmd 'fill -24 99 -24 24 99 24 minecraft:grass_block'
-          server_cmd 'tp GreyTaiWolf 0 100 -10 0 8'
-          server_cmd 'gamemode survival GreyTaiWolf'
-          sleep 3
+          server_cmd 'gamemode spectator GreyTaiWolf'
+          server_cmd 'forceload add -48 -48 48 48'
+          sleep 6
+          server_cmd 'fill -32 99 -32 32 99 32 minecraft:smooth_stone'
+          server_cmd 'tp GreyTaiWolf 0 104 -12 0 25'
+          sleep 4
           capture '01_neoforge_world_loaded'
 
           # Lifecycle, owner binding, role, and player-list integration.
@@ -264,7 +267,7 @@ jobs:
           wait_for_log 'Spawned TestBot|Fake player TestBot|TestBot.*joined' 60 || true
           as_player 'fakeaiplayer list'
           server_cmd 'tp TestBot 0 100 2 180 0'
-          server_cmd 'tp GreyTaiWolf 0 100 -8 0 5'
+          server_cmd 'tp GreyTaiWolf 0 104 -8 0 25'
           sleep 3
           capture '02_bot_spawn_and_lifecycle'
 
