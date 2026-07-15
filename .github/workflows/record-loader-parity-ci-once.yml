@@ -1,0 +1,126 @@
+name: Record loader parity CI once
+
+on:
+  push:
+    branches:
+      - agent/record-loader-parity-ci
+
+permissions:
+  contents: write
+
+jobs:
+  patch-docs:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out documentation branch
+        uses: actions/checkout@v6
+        with:
+          ref: agent/record-loader-parity-ci
+          fetch-depth: 0
+
+      - name: Record completed parity validation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              Path("README.md"): [
+                  (
+                      "> 当前版本仍是 Alpha 开发版，不是生产兼容性认证版。仓库中已有的双加载器、单元测试、Fabric GameTest 与 NeoForge 专服记录属于各自固定基线。当前模块住宅工作树已在 Temurin Java 21.0.11 下完成 Java 21 源码语法解析、纯生成器编译/12,800 组方案烟雾与静态门禁；完整 Gradle 验证因当前环境中的 JVM 无法访问外部 Maven，在解析 `fabric-loom` 时、项目源码编译前终止，仍须以 GitHub Actions 结果为准。因此该功能继续标记为 `UNVERIFIED`；客户端投影、真实模型调用、完整生存备料、复杂地形和长时间施工也仍需验证。",
+                      "> 当前版本仍是 Alpha 开发版，不是生产兼容性认证版。仓库中已有的双加载器、单元测试、Fabric GameTest 与 NeoForge 专服记录属于各自固定基线。模块住宅实现先在 Temurin Java 21.0.11 下完成 Java 21 源码语法解析、纯生成器编译/12,800 组方案烟雾与静态门禁；随后同步提交 `dfb0ab8` 的 GitHub Actions 全矩阵通过 `:common:test`、10 项 Fabric GameTest、Fabric/NeoForge 生产构建、产物检查、两 JVM 持久化与 strict-survival runtime/evidence。该功能仍标记为 `UNVERIFIED`，因为双加载器客户端投影、真实模型调用、完整生存备料、复杂地形和长时间施工尚未完成实机验收。",
+                  ),
+                  (
+                      "FakeAiPlayer is an experimental Minecraft 1.21.3 mod that combines a real server-side player entity, an OpenAI-compatible planner, and deterministic task state machines. This fork uses `common` code with Fabric and NeoForge adapters. Existing build and test claims are baseline-specific. The modular-building worktree has received Java 21 syntax, pure-generator matrix, and static diagnostics, but its full Gradle run stopped during external Maven plugin resolution before project compilation; it remains unverified pending GitHub Actions, client tests, GameTests, and survival-play evidence.",
+                      "FakeAiPlayer is an experimental Minecraft 1.21.3 mod that combines a real server-side player entity, an OpenAI-compatible planner, and deterministic task state machines. This fork uses `common` code with Fabric and NeoForge adapters. Existing release claims remain baseline-specific. The modular-building implementation passed the full GitHub Actions matrix on synchronization commit `dfb0ab8`, including common tests, all 10 Fabric GameTests, both production builds, artifact checks, persistence, and runtime evidence. It remains unverified for real Fabric/NeoForge client rendering, full survival construction, complex terrain, and long-running play evidence.",
+                  ),
+                  (
+                      "| Fabric 接入 | 历史基线已构建并通过服务端 GameTest | 包含初始化、生命周期、命令、聊天、断线、payload 和客户端事件接入；生产 JAR 与 9/9 无头 GameTest 是历史基线，当前 10 项套件等待 CI。客户端仍待人工验证。 |",
+                      "| Fabric 接入 | 当前构建与 10/10 GameTest 已通过 CI | 包含初始化、生命周期、命令、聊天、断线、完整 payload 和客户端事件接入；同步提交已通过生产构建与全部 10 项无头 GameTest。客户端仍待人工验证。 |",
+                  ),
+                  (
+                      "| NeoForge 接入 | 已构建并通过专用服烟雾 | 包含 `@Mod` 入口、事件总线、payload、服务端/客户端传输和按键；专用服已完成启动、Bot 生成/列出/移除及正常停止验证。客户端仍待人工验证。 |",
+                      "| NeoForge 接入 | 当前生产构建已通过 CI | 包含 `@Mod` 入口、事件总线、完整 payload、服务端/客户端传输和按键；同步提交已通过生产构建，既有专用服烟雾覆盖启动、Bot 生成/列出/移除及正常停止。客户端仍待人工验证。 |",
+                  ),
+                  (
+                      "| 单元测试 | 历史基线 88/88；当前完整套件待 CI | 当前源码共有 42 个 `*Test.java`、175 个 `@Test`；25 类/88 测试是此前 Java 21 验证基线。当前新增测试已进入源码，但本地没有完成 Gradle/JUnit 执行，不能冒充通过结果。 |",
+                      "| 单元测试 | 当前完整套件已通过 CI | 当前源码共有 42 个 `*Test.java`、175 个 `@Test`；同步提交的 `:common:test` 已通过。历史 25 类/88 测试仍只是旧的固定基线，不应与当前发布证据混为一谈。 |",
+                  ),
+                  (
+                      "| Fabric GameTest | 当前 10 项待 CI | 独立 `gametest` source set 已接线；无头服务端覆盖基础 smoke case、语义注视的方块/实体/遮挡/掉落物/漂移/容器读取，以及模块住宅生成到真实注册表 BlockState、依赖序列和小范围世界支撑合同。测试代码不进入发布 JAR；这不是完整 Bot 施工 E2E。 |",
+                      "| Fabric GameTest | 当前 10/10 已通过 CI | 独立 `gametest` source set 已接线；无头服务端覆盖基础 smoke case、语义注视的方块/实体/遮挡/掉落物/漂移/容器读取，以及模块住宅生成到真实注册表 BlockState、依赖序列和小范围世界支撑合同。测试代码不进入发布 JAR；这仍不是完整 Bot 施工 E2E。 |",
+                  ),
+                  (
+                      "当前分支保持 Draft，不能宣称空背包可可靠盖完。",
+                      "该能力仍保持 `UNVERIFIED`，不能宣称空背包可可靠盖完。",
+                  ),
+              ],
+              Path("docs/AI_BUILDING_SYSTEM.md"): [
+                  (
+                      "当前工作树已经进入 Fabric/NeoForge 双加载器的 P1/P2 实现切片，但仍是 `UNVERIFIED` 开发状态：",
+                      "当前源码已经进入 Fabric/NeoForge 双加载器的 P1/P2 实现切片，但仍是 `UNVERIFIED` 开发状态：",
+                  ),
+                  (
+                      "此路径已在 Temurin Java 21.0.11 下完成源码语法解析、纯生成器编译/12,800 方案烟雾与静态门禁；完整 Gradle 因当前环境 JVM 无法访问外部 Maven、在 `fabric-loom` 解析时于项目编译前中止，仍待 GitHub Actions。",
+                      "此路径已在 Temurin Java 21.0.11 下完成源码语法解析、纯生成器编译/12,800 方案烟雾与静态门禁；本地完整 Gradle 曾因当前环境 JVM 无法访问外部 Maven、在 `fabric-loom` 解析时于项目编译前中止，但随后同步提交 `dfb0ab8` 的 GitHub Actions 全矩阵通过 `:common:test`、10 项 Fabric GameTest、Fabric/NeoForge 生产构建、产物检查、两 JVM 持久化与 strict-survival runtime/evidence。",
+                  ),
+                  (
+                      "此分支必须保持 Draft。",
+                      "该能力仍须保持 `UNVERIFIED`，不能据此宣称已达到发布质量。",
+                  ),
+              ],
+              Path("docs/README.md"): [
+                  (
+                      "- 当前模块住宅/建筑投影属于双加载器接线的未发布工作树：服务端方案、分块传输、Fabric/NeoForge 客户端线框和人工确认已进入源码，但双加载器真实客户端与生存施工 GameTest 尚未完成。准确边界、命令和限制见 [AI 建筑系统设计基线](AI_BUILDING_SYSTEM.md)。",
+                      "- 当前模块住宅/建筑投影属于双加载器接线的未发布能力：服务端方案、分块传输、Fabric/NeoForge 客户端线框和人工确认已进入源码，但双加载器真实客户端与完整生存施工验收尚未完成。准确边界、命令和限制见 [AI 建筑系统设计基线](AI_BUILDING_SYSTEM.md)。",
+                  ),
+                  (
+                      "- 当前本地已用 Temurin Java 21.0.11 完成 Java 21 源码语法解析、纯生成器编译/12,800 组方案烟雾和静态门禁。完整 Gradle 在外部 Maven 的 `fabric-loom` 解析阶段因本环境 JVM 网络受限而中止，尚未进入项目源码编译；只有后续 GitHub Actions 结果才能更新当前通过状态。",
+                      "- 本地已用 Temurin Java 21.0.11 完成 Java 21 源码语法解析、纯生成器编译/12,800 组方案烟雾和静态门禁；本地完整 Gradle 曾因外部 Maven 网络受限而中止。随后同步提交 `dfb0ab8` 的 GitHub Actions 全矩阵已通过 common 测试、10 项 Fabric GameTest、Fabric/NeoForge 构建、产物检查、两 JVM 持久化与 strict-survival runtime/evidence。",
+                  ),
+              ],
+              Path("docs/TESTING_AND_EVIDENCE.md"): [
+                  (
+                      "| JUnit | `./gradlew :common:test` | 当前源码 42 个测试类、175 个 `@Test`；已验证历史基线 25/88 | 验证纯 Java 策略、权限、Goal predicate/result、语义注视、序列化和原子存储边界。当前完整套件仍待 GitHub Actions。 |",
+                      "| JUnit | `./gradlew :common:test` | 当前源码 42 个测试类、175 个 `@Test`；同步提交已通过完整套件 | 验证纯 Java 策略、权限、Goal predicate/result、语义注视、序列化和原子存储边界。历史 25/88 仍只是旧的固定基线。 |",
+                  ),
+                  (
+                      "当前源码清单是 42 个 JUnit 类、175 个 `@Test` 和 10 个 Fabric GameTest。25 类/88 JUnit、9 个 GameTest、strict/operator `7/7 PASS` 以及两 JVM persistence probe 是此前工作树的已验证基线，不能把历史数字外推为当前建筑改动的通过结果。新增的第 10 项是短时世界合同测试，不执行完整 `BuildTask`。任何数字都不替代 clean-commit evidence gate。",
+                      "当前源码清单是 42 个 JUnit 类、175 个 `@Test` 和 10 个 Fabric GameTest。同步提交 `dfb0ab8` 已通过当前完整 JUnit 套件、全部 10 项 GameTest、双加载器生产构建、两 JVM persistence probe 与 strict-survival runtime/evidence。新增的第 10 项仍只是短时世界合同测试，不执行完整 `BuildTask`；一次 CI 成功也不替代真实客户端、完整施工或显式 pin 的发布基线。",
+                  ),
+                  (
+                      "### 当前建筑工作树的本地 Java 21 诊断",
+                      "### 当前建筑实现的本地与 CI 诊断",
+                  ),
+                  (
+                      "- 已用 Java 21 + Gradle 8.11 发起 `:common:test :neoforge:build`，但当前受限环境中的 JVM 无法访问外部 Maven，Gradle 在解析 `fabric-loom:1.9.2` 时终止，尚未进入任何项目源码编译或 JUnit 执行。该结果既不是源码编译失败，也不是通过证明；完整结论等待 GitHub Actions。",
+                      "- 本地 Java 21 + Gradle 8.11 曾因受限环境中的 JVM 无法访问外部 Maven，在解析 `fabric-loom:1.9.2` 时于项目源码编译前终止；随后同步提交 `dfb0ab8` 的 GitHub Actions 在可联网环境完成并通过完整构建与测试矩阵。",
+                  ),
+                  (
+                      "因此，当前文档继续把模块住宅、确认投影和新增测试标记为 `UNVERIFIED`。只有干净提交上的 CI/本地完整 Gradle、真实 Fabric/NeoForge 客户端与世界施工测试完成后，才能升级结论。",
+                      "因此，模块住宅与确认投影仍标记为 `UNVERIFIED`，但原因已不再是缺少编译或 CI：剩余缺口是实际 Fabric/NeoForge 客户端渲染、完整生存材料链、复杂地形与长时间世界施工验收，以及可用于发布声明的显式 pin 证据。",
+                  ),
+              ],
+          }
+
+          for path, pairs in replacements.items():
+              text = path.read_text(encoding="utf-8")
+              for old, new in pairs:
+                  count = text.count(old)
+                  if count != 1:
+                      raise SystemExit(f"{path}: expected exactly one occurrence, found {count}: {old}")
+                  text = text.replace(old, new)
+              path.write_text(text, encoding="utf-8")
+
+          Path(".github/workflows/record-loader-parity-ci-once.yml").unlink()
+          PY
+          git diff --check
+
+      - name: Commit completed validation status
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md docs/AI_BUILDING_SYSTEM.md docs/README.md docs/TESTING_AND_EVIDENCE.md .github/workflows/record-loader-parity-ci-once.yml
+          git commit -m 'Record loader parity CI result'
+          git push origin HEAD:agent/record-loader-parity-ci
