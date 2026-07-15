@@ -16,6 +16,7 @@
 - 本地 dirty-worktree run 可以用于诊断，但必须是 `UNVERIFIED`，不能作为发布结论。
 - 新式 `VERIFIED` 能力基线只能由 `reports/baselines/index.tsv` 显式选择，不能按“最好”或“最新”自动挑选。
 - 当前模块住宅/建筑投影属于双加载器接线的未发布工作树：服务端方案、分块传输、Fabric/NeoForge 客户端线框和人工确认已进入源码，但双加载器真实客户端与生存施工 GameTest 尚未完成。准确边界、命令和限制见 [AI 建筑系统设计基线](AI_BUILDING_SYSTEM.md)。
+- CI 静态门禁会同时检查两端的建筑 payload、服务端处理器、按键、断线清理和渲染关键不变量，防止后续更新再次只接入单一加载器。
 - 当前本地已用 Temurin Java 21.0.11 完成 Java 21 源码语法解析、纯生成器编译/12,800 组方案烟雾和静态门禁。完整 Gradle 在外部 Maven 的 `fabric-loom` 解析阶段因本环境 JVM 网络受限而中止，尚未进入项目源码编译；只有后续 GitHub Actions 结果才能更新当前通过状态。
 
 建筑能力当前应读作以下链路，而不是“AI 可以任意造房子”：
