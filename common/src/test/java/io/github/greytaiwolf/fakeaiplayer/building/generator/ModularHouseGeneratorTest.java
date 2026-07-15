@@ -318,6 +318,7 @@ class ModularHouseGeneratorTest {
                 .filter(placement -> placement.dx() == lowerDoor.dx() - 1)
                 .filter(placement -> placement.dz() == lowerDoor.dz())
                 .filter(placement -> placement.dy() >= lowerDoor.dy())
+                .filter(placement -> placement.phase() == BuildPhase.EXTERIOR_FEATURES)
                 .toList();
         assertTrue(delayedWestReveal.size() >= 2);
         delayedWestReveal.forEach(placement -> {
