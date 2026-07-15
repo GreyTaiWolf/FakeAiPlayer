@@ -151,8 +151,22 @@ jobs:
           done
           [[ $ready -eq 1 ]] || { echo 'NeoForge server startup timed out' >&2; exit 1; }
 
+          # NeoForge DevLaunch reserves the first raw JavaExec argument for the actual game main
+          # class. Inject Quick Play into the ModDev run DSL instead of using Gradle --args.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('neoforge/build.gradle')
+          source = path.read_text()
+          marker = "            programArguments.addAll '--username', 'GreyTaiWolf'\n"
+          addition = marker + (
+              "            programArguments.addAll '--quickPlayMultiplayer', "
+              "'127.0.0.1:25566', '--width', '1600', '--height', '900'\n"
+          )
+          if marker not in source:
+              raise SystemExit('NeoForge client programArguments marker not found')
+          path.write_text(source.replace(marker, addition, 1))
+          PY
           ./gradlew --no-daemon --console=plain :neoforge:runClient \
-            --args='--username GreyTaiWolf --quickPlayMultiplayer 127.0.0.1:25566 --width 1600 --height 900' \
             >"$logs/client-console.log" 2>&1 &
           client_pid=$!
 
