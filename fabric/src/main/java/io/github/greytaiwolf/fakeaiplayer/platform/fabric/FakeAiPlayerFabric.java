@@ -2,6 +2,7 @@ package io.github.greytaiwolf.fakeaiplayer.platform.fabric;
 
 import io.github.greytaiwolf.fakeaiplayer.FakeAiPlayer;
 import io.github.greytaiwolf.fakeaiplayer.brain.ChatCaptureListener;
+import io.github.greytaiwolf.fakeaiplayer.building.preview.BuildingPreviewService;
 import io.github.greytaiwolf.fakeaiplayer.network.AIBotServerNetworking;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -23,7 +24,9 @@ public final class FakeAiPlayerFabric implements ModInitializer {
                 FakeAiPlayer.registerCommands(dispatcher, registryAccess));
         ServerMessageEvents.CHAT_MESSAGE.register((message, sender, params) ->
                 ChatCaptureListener.handle(sender, message.decoratedContent().getString()));
-        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
-                AIBotServerNetworking.INSTANCE.onDisconnect(handler.player));
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
+            AIBotServerNetworking.INSTANCE.onDisconnect(handler.player);
+            BuildingPreviewService.INSTANCE.onDisconnect(handler.player);
+        });
     }
 }
