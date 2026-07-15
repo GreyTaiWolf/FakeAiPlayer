@@ -14,6 +14,14 @@ required_files=(
   common/build.gradle
   fabric/build.gradle
   neoforge/build.gradle
+  fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FabricPayloads.java
+  fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FakeAiPlayerFabric.java
+  fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/client/FakeAiPlayerFabricClient.java
+  fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/client/FabricBuildingPreviewRenderer.java
+  neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgePayloads.java
+  neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgeGameEvents.java
+  neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/client/NeoForgeClientSetup.java
+  neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/client/NeoForgeBuildingPreviewRenderer.java
   fabric/src/gametest/resources/fabric.mod.json
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerDeterministicGameTests.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerHarnessTestMod.java
@@ -62,6 +70,82 @@ if grep -RqE 'AIBot(Test|Verify)Subcommand|literal\("(test|verify)"\)' \
     common/src/main/java fabric/src/main/java neoforge/src/main/java; then
   fail 'production command graph references a verification harness'
 fi
+
+# The building preview protocol is shared, but every payload and lifecycle edge must be wired on
+# both loaders. Keep this source-level gate explicit so a loader-specific feature cannot silently
+# land on only one side again.
+fabric_payloads=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FabricPayloads.java
+fabric_server=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FakeAiPlayerFabric.java
+fabric_client=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/client/FakeAiPlayerFabricClient.java
+fabric_renderer=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/client/FabricBuildingPreviewRenderer.java
+neoforge_payloads=neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgePayloads.java
+neoforge_events=neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgeGameEvents.java
+neoforge_client=neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/client/NeoForgeClientSetup.java
+neoforge_renderer=neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/client/NeoForgeBuildingPreviewRenderer.java
+
+building_c2s=(
+  BuildingPreviewConfirmC2S
+  BuildingPreviewCancelC2S
+  BuildingPreviewReadyC2S
+)
+building_s2c=(
+  BuildingPreviewBeginS2C
+  BuildingPreviewChunkS2C
+  BuildingPreviewCommitS2C
+  BuildingPreviewClearS2C
+)
+for payload in "${building_c2s[@]}"; do
+  grep -Fq "${payload}.ID" "$fabric_payloads" \
+    || fail "Fabric is missing building C2S payload registration: $payload"
+  grep -Fq "${payload}.ID" "$neoforge_payloads" \
+    || fail "NeoForge is missing building C2S payload registration: $payload"
+done
+for payload in "${building_s2c[@]}"; do
+  grep -Fq "${payload}.ID" "$fabric_payloads" \
+    || fail "Fabric is missing building S2C payload type registration: $payload"
+  grep -Fq "${payload}.ID" "$fabric_client" \
+    || fail "Fabric is missing building S2C client receiver: $payload"
+  grep -Fq "${payload}.ID" "$neoforge_payloads" \
+    || fail "NeoForge is missing building S2C payload registration: $payload"
+done
+for handler in handleConfirm handleCancel handleReady; do
+  grep -Fq "$handler" "$fabric_payloads" \
+    || fail "Fabric is missing building preview server handler: $handler"
+  grep -Fq "$handler" "$neoforge_payloads" \
+    || fail "NeoForge is missing building preview server handler: $handler"
+done
+for key in confirmBuildingPreview cancelBuildingPreview; do
+  grep -Fq "$key" "$fabric_client" \
+    || fail "Fabric is missing building preview key registration: $key"
+  grep -Fq "$key" "$neoforge_client" \
+    || fail "NeoForge is missing building preview key registration: $key"
+done
+grep -Fq 'BuildingPreviewService.INSTANCE.onDisconnect(handler.player)' "$fabric_server" \
+  || fail 'Fabric does not clear authoritative building preview sessions on disconnect'
+grep -Fq 'BuildingPreviewService.INSTANCE.onDisconnect(player)' "$neoforge_events" \
+  || fail 'NeoForge does not clear authoritative building preview sessions on disconnect'
+grep -Fq 'FabricBuildingPreviewRenderer.register()' "$fabric_client" \
+  || fail 'Fabric building preview renderer is not initialized'
+grep -Fq 'WorldRenderEvents.AFTER_ENTITIES.register' "$fabric_renderer" \
+  || fail 'Fabric building preview renderer is not attached to a world render event'
+grep -Fq 'ClientPlayConnectionEvents.DISCONNECT.register' "$fabric_renderer" \
+  || fail 'Fabric building preview client state is not cleared on disconnect'
+grep -Fq 'RenderLevelStageEvent.Stage.AFTER_PARTICLES' "$neoforge_renderer" \
+  || fail 'NeoForge building preview renderer is not attached to the expected render stage'
+grep -Fq 'ClientPlayerNetworkEvent.LoggingOut' "$neoforge_renderer" \
+  || fail 'NeoForge building preview client state is not cleared on logout'
+for renderer in "$fabric_renderer" "$neoforge_renderer"; do
+  for invariant in \
+      MAX_RENDER_DISTANCE_SQUARED \
+      BuildingPreviewClientState.INSTANCE.active \
+      BlockStateResolver.resolve \
+      ShapeRenderer.renderLineBox \
+      CLEAR_CONFLICT \
+      PRESERVE_CONFLICT; do
+    grep -Fq "$invariant" "$renderer" \
+      || fail "$renderer is missing building preview renderer invariant: $invariant"
+  done
+done
 
 for script in scripts/*.sh scripts/lib/*.sh; do
   bash -n "$script" || fail "shell syntax failed: $script"
@@ -132,4 +216,4 @@ fi
 bash scripts/capability_matrix.sh --check docs/CAPABILITY_MATRIX.md \
   || fail 'generated capability matrix is stale or its pinned evidence is invalid'
 
-printf '[ci-static] OK: source-set, workflow, shell and artifact invariants hold\n'
+printf '[ci-static] OK: source-set, loader parity, workflow, shell and artifact invariants hold\n'
