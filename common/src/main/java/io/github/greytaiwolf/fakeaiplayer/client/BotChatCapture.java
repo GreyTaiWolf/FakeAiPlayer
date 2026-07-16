@@ -14,10 +14,13 @@ public final class BotChatCapture {
         String text = message.getString();
         String target = BotClientState.INSTANCE.targetBot();
         String botPrefix = "<" + target + "> ";
+        String aiBotPrefix = "[AI] " + botPrefix;
         if (text.startsWith("[FakeAiPlayer] ")) {
             BotClientState.INSTANCE.addTranscript("system", text.substring("[FakeAiPlayer] ".length()));
         } else if (text.contains(target + " is thinking") || text.contains("brain error:")) {
             BotClientState.INSTANCE.addTranscript("system", text);
+        } else if (text.startsWith(aiBotPrefix)) {
+            BotClientState.INSTANCE.addTranscript("bot", text.substring(aiBotPrefix.length()));
         } else if (text.startsWith(botPrefix)) {
             BotClientState.INSTANCE.addTranscript("bot", text.substring(botPrefix.length()));
         }

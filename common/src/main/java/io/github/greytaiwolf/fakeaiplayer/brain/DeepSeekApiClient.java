@@ -21,17 +21,24 @@ import java.util.List;
 
 public final class DeepSeekApiClient {
     private final AIBotConfig.DeepSeek config;
+    private final String apiKey;
     private final HttpClient httpClient;
 
     public DeepSeekApiClient(AIBotConfig.DeepSeek config) {
+        this(config, config.apiKey());
+    }
+
+    /** Creates a client with server-controlled endpoint/model settings and a bot-specific key. */
+    public DeepSeekApiClient(AIBotConfig.DeepSeek config, String apiKey) {
         this.config = config;
+        this.apiKey = apiKey == null ? "" : apiKey.strip();
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
     }
 
     public ChatResponse chat(List<ChatMessage> history, List<ToolDefinition> tools) throws DeepSeekApiException {
-        if (config.apiKey() == null || config.apiKey().isBlank()) {
+        if (apiKey.isBlank()) {
             throw new DeepSeekApiException("deepseek_api_key_missing");
         }
 
@@ -54,14 +61,14 @@ public final class DeepSeekApiClient {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(normalizedBaseUrl() + "/v1/chat/completions"))
                 .timeout(Duration.ofSeconds(config.timeoutSeconds()))
-                .header("Authorization", "Bearer " + config.apiKey())
+                .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8))
                 .build();
 
         HttpResponse<String> response = sendWithRetry(request);
         if (response.statusCode() != 200) {
-            throw new DeepSeekApiException(classifyStatus(response.statusCode(), response.body()));
+            throw new DeepSeekApiException(classifyStatus(response.statusCode()));
         }
         if (response.body() == null || response.body().isBlank()) {
             throw new DeepSeekApiException("empty_response");
@@ -127,21 +134,20 @@ public final class DeepSeekApiClient {
         return base;
     }
 
-    private static String classifyStatus(int status, String body) {
-        String excerpt = body == null ? "" : body.substring(0, Math.min(200, body.length()));
+    static String classifyStatus(int status) {
         if (status == 429) {
-            return "rate_limited: status=429 body=" + excerpt;
+            return "rate_limited: status=429";
         }
         if (status == 408) {
-            return "api_timeout: status=408 body=" + excerpt;
+            return "api_timeout: status=408";
         }
         if (status >= 500) {
-            return "server_error: status=" + status + " body=" + excerpt;
+            return "server_error: status=" + status;
         }
         if (status == 401 || status == 403) {
-            return "auth_error: status=" + status + " body=" + excerpt;
+            return "auth_error: status=" + status;
         }
-        return "http_error: status=" + status + " body=" + excerpt;
+        return "http_error: status=" + status;
     }
 
     private static JsonArray serializeMessages(List<ChatMessage> history) {
@@ -229,11 +235,14 @@ public final class DeepSeekApiClient {
                     "finish_reason", finishReason);
             return new ChatResponse(content, toolCalls, finishReason, promptTokens, completionTokens, cacheHitTokens);
         } catch (DeepSeekApiException exception) {
-            BotLog.warn(LogCategory.API, null, "api_parse_error", "reason", exception.getMessage(), "body_excerpt", body.substring(0, Math.min(200, body.length())));
+            BotLog.warn(LogCategory.API, null, "api_parse_error", "reason", exception.getMessage());
             throw exception;
         } catch (RuntimeException exception) {
-            BotLog.error("api_parse_error", exception, "body_excerpt", body.substring(0, Math.min(200, body.length())));
-            throw new DeepSeekApiException("bad_response: " + exception.getMessage(), exception);
+            // Provider-controlled JSON must not flow into logs or user-visible exception text.
+            BotLog.warn(LogCategory.API, null, "api_parse_error",
+                    "reason", "bad_response",
+                    "exception_type", exception.getClass().getSimpleName());
+            throw new DeepSeekApiException("bad_response");
         }
     }
 

@@ -4,16 +4,22 @@ import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.observe.BotProfiler;
 
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.UUID;
 import java.util.function.BiConsumer;
 
 public final class AsyncDecisionExecutor {
-    private final DeepSeekApiClient apiClient;
-    private final ExecutorService executor = Executors.newFixedThreadPool(4);
+    private static final int PARALLEL_REQUESTS = 4;
+    private static final int QUEUED_BOTS = 32;
+    private final BotApiCredentialRegistry credentials;
+    private final LatestPerBotExecutor executor;
 
-    public AsyncDecisionExecutor(DeepSeekApiClient apiClient) {
-        this.apiClient = apiClient;
+    public AsyncDecisionExecutor(BotApiCredentialRegistry credentials) {
+        this(credentials, new LatestPerBotExecutor(PARALLEL_REQUESTS, QUEUED_BOTS));
+    }
+
+    AsyncDecisionExecutor(BotApiCredentialRegistry credentials, LatestPerBotExecutor executor) {
+        this.credentials = credentials;
+        this.executor = executor;
     }
 
     public void submit(AIPlayerEntity bot,
@@ -25,7 +31,8 @@ public final class AsyncDecisionExecutor {
         var server = bot.getServer();
         var botId = bot.getUUID();
         String botName = bot.getGameProfile().getName();
-        executor.submit(() -> {
+        DeepSeekApiClient apiClient = credentials.clientFor(botId);
+        LatestPerBotExecutor.Submission submission = executor.submit(botId, () -> {
             long started = System.nanoTime();
             try {
                 ChatResponse response = apiClient.chat(historySnapshot, tools);
@@ -38,9 +45,19 @@ public final class AsyncDecisionExecutor {
                 server.execute(() -> onError.accept(lease, exception));
             }
         });
+        if (submission == LatestPerBotExecutor.Submission.REJECTED) {
+            server.execute(() -> onError.accept(
+                    lease,
+                    new DeepSeekApiException("decision_executor_busy")));
+        }
     }
 
     public void shutdown() {
         executor.shutdownNow();
+    }
+
+    /** Drops a not-yet-started request after its bot credential changes. */
+    public boolean discardPending(UUID botId) {
+        return executor.discardPending(botId);
     }
 }

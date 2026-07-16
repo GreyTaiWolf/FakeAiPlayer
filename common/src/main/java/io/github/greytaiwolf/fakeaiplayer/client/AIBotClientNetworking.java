@@ -8,6 +8,11 @@ import io.github.greytaiwolf.fakeaiplayer.network.payload.BuildingPreviewChunkS2
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BuildingPreviewClearS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BuildingPreviewCommitS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BuildingPreviewReadyC2S;
+import io.github.greytaiwolf.fakeaiplayer.client.credential.ClientCredentialManager;
+import io.github.greytaiwolf.fakeaiplayer.client.screen.BotAiSetupScreen;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.BotAiCredentialStatusS2C;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.OpenBotAiSetupS2C;
+import net.minecraft.client.Minecraft;
 
 public final class AIBotClientNetworking {
     private AIBotClientNetworking() {
@@ -20,6 +25,33 @@ public final class AIBotClientNetworking {
     public static void handle(BotChatS2C payload) {
         if (BotClientState.INSTANCE.matchesTarget(payload.botName())) {
             BotClientState.INSTANCE.addTranscript(payload.role(), payload.text());
+        }
+    }
+
+    public static void handle(OpenBotAiSetupS2C payload) {
+        Minecraft client = Minecraft.getInstance();
+        client.setScreen(new BotAiSetupScreen(payload.botName(), payload.nonce()));
+    }
+
+    public static void handle(BotAiCredentialStatusS2C payload) {
+        Minecraft client = Minecraft.getInstance();
+        ClientCredentialManager.StorageResult forgetResult = ClientCredentialManager.StorageResult.OK;
+        if (payload.forgetLocal()) {
+            String scope = ClientCredentialManager.currentServerScope(client);
+            forgetResult = scope.isBlank()
+                    ? ClientCredentialManager.StorageResult.UNAVAILABLE
+                    : ClientCredentialManager.forget(scope, payload.botName());
+        }
+        if (client.screen instanceof BotAiSetupScreen screen) {
+            screen.applyStatus(payload, forgetResult);
+        } else if (client.player != null
+                && BotAiCredentialStatusS2C.NO_NONCE.equals(payload.nonce())) {
+            client.player.displayClientMessage(
+                    net.minecraft.network.chat.Component.translatable(
+                            "message.fakeaiplayer.ai_credential_status",
+                            payload.botName(),
+                            BotAiSetupScreen.statusMessage(payload.statusKey())),
+                    false);
         }
     }
 
