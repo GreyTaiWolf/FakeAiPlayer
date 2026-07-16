@@ -279,15 +279,18 @@ public final class TaskManager {
         if (active.containsKey(uuid)) {
             return false;
         }
-        if (hasPersistentPause(bot)) {
-            return false;
-        }
         ExecutionStack<Task> stack = executionStacks.get(uuid);
         if (stack == null) {
             return false;
         }
         Optional<ExecutionStack.Frame<Task>> top = stack.peek();
         if (top.isEmpty() || !allowed.test(top.get())) {
+            return false;
+        }
+        // A USER/INVENTORY lock protects ordinary work, but it must not strand an outer safety
+        // task when a nested safety interrupt completes. Only a non-safety frame is blocked by a
+        // persistent lock; safety frames retain their own LIFO continuation.
+        if (hasPersistentPause(bot) && !top.get().origin().safety()) {
             return false;
         }
         ExecutionStack.Frame<Task> frame = stack.pop().orElseThrow();

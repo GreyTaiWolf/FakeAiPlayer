@@ -22,7 +22,9 @@ import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
 final class NeoForgePayloads {
-    private static final String PROTOCOL_VERSION = "2";
+    // Version 3 replaces the direct item-move packet with the server-authoritative inventory
+    // menu protocol. Keep old clients/servers from silently negotiating incompatible channels.
+    private static final String PROTOCOL_VERSION = "3";
 
     private NeoForgePayloads() {
     }

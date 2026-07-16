@@ -11,6 +11,7 @@ import io.github.greytaiwolf.fakeaiplayer.brain.ActionDispatcher;
 import io.github.greytaiwolf.fakeaiplayer.brain.BrainCoordinator;
 import io.github.greytaiwolf.fakeaiplayer.brain.ChatToolCall;
 import io.github.greytaiwolf.fakeaiplayer.brain.ToolRegistry;
+import io.github.greytaiwolf.fakeaiplayer.coordination.IdleCoordinator;
 import io.github.greytaiwolf.fakeaiplayer.coordination.TaskBoard;
 import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.goal.Goal;
@@ -22,6 +23,7 @@ import io.github.greytaiwolf.fakeaiplayer.mode.CapabilityRuntime;
 import io.github.greytaiwolf.fakeaiplayer.mode.PrivilegedCapability;
 import io.github.greytaiwolf.fakeaiplayer.persist.BotPersistence;
 import io.github.greytaiwolf.fakeaiplayer.runtime.IntentController;
+import io.github.greytaiwolf.fakeaiplayer.runtime.PauseOwner;
 import io.github.greytaiwolf.fakeaiplayer.task.BlueprintLoader;
 import io.github.greytaiwolf.fakeaiplayer.task.AbstractTask;
 import io.github.greytaiwolf.fakeaiplayer.task.BuildTask;
@@ -1716,7 +1718,11 @@ public final class AIBotVerifySubcommand {
                         && pausedTask.state() == TaskState.CANCELLED
                         && !BotMemoryStore.INSTANCE.of(bot.getUUID()).hasActiveGoal()
                         && !BrainCoordinator.INSTANCE.status(bot).busy()
-                        && !bot.getActionPack().hasActiveActions()
+                        // The new ambient controller is legitimate post-cancel work. Reject only
+                        // actions that it does not own, which still catches a resurrected mission,
+                        // stale low-level command, mining action or item-use action.
+                        && (!bot.getActionPack().hasActiveActions()
+                            || IdleCoordinator.INSTANCE.ownsAmbientAction(bot))
                         && !bot.isUsingItem()
                         && InventoryAction.countItem(bot, Items.STICK) == 0
                         && InventoryAction.countItem(bot, Items.CRAFTING_TABLE) == 0
@@ -1995,7 +2001,7 @@ public final class AIBotVerifySubcommand {
 
             TaskManager.INSTANCE.assign(bot, safetyOne,
                     io.github.greytaiwolf.fakeaiplayer.runtime.TaskOrigin.safety("verify_combat"));
-            TaskManager.INSTANCE.pauseFor(bot, "verify_nested_safety");
+            TaskManager.INSTANCE.pauseFor(bot, PauseOwner.SAFETY, "verify_nested_safety");
             TaskManager.INSTANCE.assign(bot, safetyTwo,
                     io.github.greytaiwolf.fakeaiplayer.runtime.TaskOrigin.safety("verify_lava"));
             if (TaskManager.INSTANCE.pausedDepth(bot) != 2) {
@@ -2003,13 +2009,13 @@ public final class AIBotVerifySubcommand {
             }
 
             TaskManager.INSTANCE.abort(bot);
-            TaskManager.INSTANCE.resumeFromPause(bot);
+            TaskManager.INSTANCE.resumeSafetyPause(bot);
             if (TaskManager.INSTANCE.getActive(bot).orElse(null) != safetyOne
                     || TaskManager.INSTANCE.pausedDepth(bot) != 1) {
                 return Result.fail("pause_resume_safety_stack", "safety_lifo_resume_failed");
             }
             TaskManager.INSTANCE.abort(bot);
-            TaskManager.INSTANCE.resumeFromPause(bot);
+            TaskManager.INSTANCE.resumeSafetyPause(bot);
             if (TaskManager.INSTANCE.getActive(bot).isPresent()
                     || TaskManager.INSTANCE.pausedDepth(bot) != 1
                     || mission.state() != TaskState.PAUSED) {

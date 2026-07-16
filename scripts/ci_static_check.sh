@@ -12,13 +12,18 @@ fail() {
 required_files=(
   build.gradle
   common/build.gradle
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/inventory/BotInventoryMenu.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/inventory/BotInventorySessionManager.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/network/payload/OpenBotInventoryC2S.java
   fabric/build.gradle
   neoforge/build.gradle
+  fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FabricMenuRegistry.java
   fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FabricPayloads.java
   fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FakeAiPlayerFabric.java
   fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/client/FakeAiPlayerFabricClient.java
   fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/client/FabricBuildingPreviewRenderer.java
   neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgePayloads.java
+  neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgeMenuRegistry.java
   neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgeGameEvents.java
   neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/client/NeoForgeClientSetup.java
   neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/client/NeoForgeBuildingPreviewRenderer.java
@@ -71,17 +76,77 @@ if grep -RqE 'AIBot(Test|Verify)Subcommand|literal\("(test|verify)"\)' \
   fail 'production command graph references a verification harness'
 fi
 
-# The building preview protocol is shared, but every payload and lifecycle edge must be wired on
-# both loaders. Keep this source-level gate explicit so a loader-specific feature cannot silently
-# land on only one side again.
+# Payload types live in common, but every C2S/S2C edge must be registered by both loaders. Derive
+# the expected catalog from the shared source filenames so a new payload cannot silently land on
+# only one side. Feature-specific checks below additionally verify the handler/lifecycle wiring.
+payload_dir=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/network/payload
 fabric_payloads=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FabricPayloads.java
 fabric_server=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FakeAiPlayerFabric.java
 fabric_client=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/client/FakeAiPlayerFabricClient.java
 fabric_renderer=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/client/FabricBuildingPreviewRenderer.java
+fabric_menu=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FabricMenuRegistry.java
 neoforge_payloads=neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgePayloads.java
+neoforge_entry=neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/FakeAiPlayerNeoForge.java
 neoforge_events=neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgeGameEvents.java
 neoforge_client=neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/client/NeoForgeClientSetup.java
 neoforge_renderer=neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/client/NeoForgeBuildingPreviewRenderer.java
+neoforge_menu=neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgeMenuRegistry.java
+
+mapfile -t c2s_payloads < <(
+  find "$payload_dir" -maxdepth 1 -type f -name '*C2S.java' -printf '%f\n' \
+    | sed 's/\.java$//' | sort
+)
+mapfile -t s2c_payloads < <(
+  find "$payload_dir" -maxdepth 1 -type f -name '*S2C.java' -printf '%f\n' \
+    | sed 's/\.java$//' | sort
+)
+(( ${#c2s_payloads[@]} > 0 )) || fail 'shared C2S payload catalog is empty'
+(( ${#s2c_payloads[@]} > 0 )) || fail 'shared S2C payload catalog is empty'
+
+for payload in "${c2s_payloads[@]}"; do
+  [[ "$(grep -Fc "${payload}.ID" "$fabric_payloads")" -ge 2 ]] \
+    || fail "Fabric is missing C2S type registration or receiver: $payload"
+  grep -Fq "${payload}.ID" "$neoforge_payloads" \
+    || fail "NeoForge is missing C2S registration/handler: $payload"
+done
+for payload in "${s2c_payloads[@]}"; do
+  grep -Fq "${payload}.ID" "$fabric_payloads" \
+    || fail "Fabric is missing S2C type registration: $payload"
+  grep -Fq "${payload}.ID" "$fabric_client" \
+    || fail "Fabric is missing S2C client receiver: $payload"
+  grep -Fq "${payload}.ID" "$neoforge_payloads" \
+    || fail "NeoForge is missing S2C registration/handler: $payload"
+done
+
+# Protocol v3 replaces direct item moves with a server-authoritative vanilla Menu. Check the full
+# loader edge: type/handler, menu registration, client screen and disconnect lease cleanup.
+grep -Fq 'PROTOCOL_VERSION = "3"' "$neoforge_payloads" \
+  || fail 'NeoForge inventory protocol version was not bumped to 3'
+for payloads in "$fabric_payloads" "$neoforge_payloads"; do
+  grep -Fq 'OpenBotInventoryC2S.ID' "$payloads" \
+    || fail "$payloads is missing OpenBotInventoryC2S"
+  grep -Fq 'handleOpenInventory' "$payloads" \
+    || fail "$payloads is missing the server inventory-open handler"
+done
+grep -Fq 'FabricMenuRegistry.register()' "$fabric_server" \
+  || fail 'Fabric bot inventory menu registry is not initialized'
+grep -Fq 'Registry.register(' "$fabric_menu" \
+  || fail 'Fabric bot inventory menu type is not registered'
+grep -Fq 'MenuScreens.register(BotMenuTypes.inventory(), BotInventoryScreen::new)' "$fabric_client" \
+  || fail 'Fabric bot inventory screen is not registered'
+grep -Fq 'NeoForgeMenuRegistry.register(modEventBus)' "$neoforge_entry" \
+  || fail 'NeoForge bot inventory menu registry is not initialized'
+grep -Fq 'MENUS.register(modEventBus)' "$neoforge_menu" \
+  || fail 'NeoForge bot inventory menu type is not registered'
+grep -Fq 'event.register(BotMenuTypes.inventory(), BotInventoryScreen::new)' "$neoforge_client" \
+  || fail 'NeoForge bot inventory screen is not registered'
+grep -Fq 'BotInventorySessionManager.INSTANCE.onViewerDisconnect(handler.player)' "$fabric_server" \
+  || fail 'Fabric does not release bot inventory sessions on disconnect'
+grep -Fq 'BotInventorySessionManager.INSTANCE.onViewerDisconnect(player)' "$neoforge_events" \
+  || fail 'NeoForge does not release bot inventory sessions on disconnect'
+
+# Building preview has additional lifecycle, render and explicit-confirmation invariants beyond
+# the generic payload catalog.
 
 building_c2s=(
   BuildingPreviewConfirmC2S
@@ -211,6 +276,53 @@ if [[ "${CI_STATIC_CHECK_ARTIFACTS:-0}" == 1 ]]; then
   done < <(find common/build/libs fabric/build/libs neoforge/build/libs \
     -maxdepth 1 -type f -name '*.jar' -print0)
   [[ "$inspected" == 1 ]] || fail 'artifact inspection found no jars'
+
+  mapfile -t fabric_production_jars < <(
+    find fabric/build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' | sort
+  )
+  mapfile -t neoforge_production_jars < <(
+    find neoforge/build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' | sort
+  )
+  [[ ${#fabric_production_jars[@]} -eq 1 ]] \
+    || fail "expected exactly one Fabric production jar, found ${#fabric_production_jars[@]}"
+  [[ ${#neoforge_production_jars[@]} -eq 1 ]] \
+    || fail "expected exactly one NeoForge production jar, found ${#neoforge_production_jars[@]}"
+  fabric_jar=${fabric_production_jars[0]}
+  neoforge_jar=${neoforge_production_jars[0]}
+  fabric_listing="$(jar tf "$fabric_jar")"
+  neoforge_listing="$(jar tf "$neoforge_jar")"
+
+  grep -Fxq 'fabric.mod.json' <<< "$fabric_listing" \
+    || fail 'Fabric production jar is missing fabric.mod.json'
+  grep -Fxq 'fakeaiplayer.refmap.json' <<< "$fabric_listing" \
+    || fail 'Fabric production jar is missing its Mixin refmap'
+  if grep -Fxq 'META-INF/neoforge.mods.toml' <<< "$fabric_listing"; then
+    fail 'Fabric production jar contains NeoForge metadata'
+  fi
+  grep -Fxq 'META-INF/neoforge.mods.toml' <<< "$neoforge_listing" \
+    || fail 'NeoForge production jar is missing neoforge.mods.toml'
+  if grep -Fxq 'fabric.mod.json' <<< "$neoforge_listing"; then
+    fail 'NeoForge production jar contains Fabric metadata'
+  fi
+  for listing_name in fabric_listing neoforge_listing; do
+    listing=${!listing_name}
+    grep -Fxq 'fakeaiplayer.mixins.json' <<< "$listing" \
+      || fail "$listing_name is missing the production Mixin config"
+    grep -Fxq 'assets/fakeaiplayer/lang/en_us.json' <<< "$listing" \
+      || fail "$listing_name is missing shared English resources"
+    grep -Fxq 'assets/fakeaiplayer/lang/zh_cn.json' <<< "$listing" \
+      || fail "$listing_name is missing shared Chinese resources"
+  done
+
+  [[ -d common/build/classes/java/main ]] \
+    || fail 'common compiled classes are unavailable for artifact parity inspection'
+  while IFS= read -r -d '' class_file; do
+    relative=${class_file#common/build/classes/java/main/}
+    grep -Fxq "$relative" <<< "$fabric_listing" \
+      || fail "Fabric production jar is missing shared class: $relative"
+    grep -Fxq "$relative" <<< "$neoforge_listing" \
+      || fail "NeoForge production jar is missing shared class: $relative"
+  done < <(find common/build/classes/java/main -type f -name '*.class' -print0)
 fi
 
 bash scripts/capability_matrix.sh --check docs/CAPABILITY_MATRIX.md \
