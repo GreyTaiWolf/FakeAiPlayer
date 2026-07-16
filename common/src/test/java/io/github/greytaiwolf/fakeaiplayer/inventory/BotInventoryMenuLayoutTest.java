@@ -6,6 +6,27 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 final class BotInventoryMenuLayoutTest {
     @Test
+    void slotsAlignWithTheVanillaGenericContainerBackground() {
+        assertEquals(18, BotInventoryMenu.SLOT_SPACING);
+
+        assertEquals(8, BotInventoryMenu.BOT_EQUIPMENT_X);
+        assertEquals(18, BotInventoryMenu.BOT_EQUIPMENT_Y);
+        assertEquals(BotInventoryMenu.BOT_EQUIPMENT_X + 4 * BotInventoryMenu.SLOT_SPACING,
+                BotInventoryMenu.BOT_OFFHAND_X);
+        assertEquals(8, BotInventoryMenu.BOT_MAIN_X);
+        assertEquals(44, BotInventoryMenu.BOT_MAIN_Y);
+        assertEquals(8, BotInventoryMenu.BOT_HOTBAR_X);
+        assertEquals(102, BotInventoryMenu.BOT_HOTBAR_Y);
+
+        assertEquals(8, BotInventoryMenu.VIEWER_MAIN_X);
+        assertEquals(140, BotInventoryMenu.VIEWER_MAIN_Y);
+        assertEquals(8, BotInventoryMenu.VIEWER_HOTBAR_X);
+        assertEquals(198, BotInventoryMenu.VIEWER_HOTBAR_Y);
+        assertEquals(BotInventoryMenu.VIEWER_MAIN_Y + 3 * BotInventoryMenu.SLOT_SPACING + 4,
+                BotInventoryMenu.VIEWER_HOTBAR_Y);
+    }
+
+    @Test
     void botAndViewerRangesAreContiguousAndDoNotOverlap() {
         assertEquals(0, BotInventoryMenu.BOT_ARMOR_START);
         assertEquals(BotInventoryMenu.BOT_ARMOR_END, BotInventoryMenu.BOT_OFFHAND_SLOT);

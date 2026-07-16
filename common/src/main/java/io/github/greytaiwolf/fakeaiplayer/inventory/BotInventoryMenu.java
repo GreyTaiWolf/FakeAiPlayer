@@ -23,6 +23,19 @@ import net.minecraft.world.item.enchantment.EnchantmentHelper;
  * placeholder; vanilla container synchronization supplies all real stacks from the server menu.
  */
 public final class BotInventoryMenu extends AbstractContainerMenu {
+    public static final int SLOT_SPACING = 18;
+    public static final int BOT_EQUIPMENT_X = 8;
+    public static final int BOT_EQUIPMENT_Y = 18;
+    public static final int BOT_OFFHAND_X = 80;
+    public static final int BOT_MAIN_X = 8;
+    public static final int BOT_MAIN_Y = 44;
+    public static final int BOT_HOTBAR_X = 8;
+    public static final int BOT_HOTBAR_Y = 102;
+    public static final int VIEWER_MAIN_X = 8;
+    public static final int VIEWER_MAIN_Y = 140;
+    public static final int VIEWER_HOTBAR_X = 8;
+    public static final int VIEWER_HOTBAR_Y = 198;
+
     public static final int BOT_ARMOR_START = 0;
     public static final int BOT_ARMOR_END = 4;
     public static final int BOT_OFFHAND_SLOT = 4;
@@ -75,14 +88,14 @@ public final class BotInventoryMenu extends AbstractContainerMenu {
         for (int i = 0; i < ARMOR_SLOTS.length; i++) {
             EquipmentSlot equipmentSlot = ARMOR_SLOTS[i];
             addSlot(new BotEquipmentSlot(botInventory, equipmentOwner, equipmentSlot,
-                    39 - i, 8 + i * 18, 18, ARMOR_ICONS[i]));
+                    39 - i, BOT_EQUIPMENT_X + i * SLOT_SPACING, BOT_EQUIPMENT_Y, ARMOR_ICONS[i]));
         }
-        addSlot(new BotOffhandSlot(botInventory, equipmentOwner, 40, 80, 18));
+        addSlot(new BotOffhandSlot(botInventory, equipmentOwner, 40, BOT_OFFHAND_X, BOT_EQUIPMENT_Y));
 
-        addInventoryRows(botInventory, 9, 8, 44);
-        addHotbar(botInventory, 0, 8, 102);
-        addInventoryRows(viewerInventory, 9, 8, 138);
-        addHotbar(viewerInventory, 0, 8, 196);
+        addInventoryRows(botInventory, 9, BOT_MAIN_X, BOT_MAIN_Y);
+        addHotbar(botInventory, 0, BOT_HOTBAR_X, BOT_HOTBAR_Y);
+        addInventoryRows(viewerInventory, 9, VIEWER_MAIN_X, VIEWER_MAIN_Y);
+        addHotbar(viewerInventory, 0, VIEWER_HOTBAR_X, VIEWER_HOTBAR_Y);
 
         if (serverBot == null) {
             this.selectedHotbar = DataSlot.standalone();
@@ -106,14 +119,14 @@ public final class BotInventoryMenu extends AbstractContainerMenu {
         for (int row = 0; row < 3; row++) {
             for (int column = 0; column < 9; column++) {
                 addSlot(new Slot(container, firstIndex + column + row * 9,
-                        x + column * 18, y + row * 18));
+                        x + column * SLOT_SPACING, y + row * SLOT_SPACING));
             }
         }
     }
 
     private void addHotbar(Container container, int firstIndex, int x, int y) {
         for (int column = 0; column < 9; column++) {
-            addSlot(new Slot(container, firstIndex + column, x + column * 18, y));
+            addSlot(new Slot(container, firstIndex + column, x + column * SLOT_SPACING, y));
         }
     }
 
