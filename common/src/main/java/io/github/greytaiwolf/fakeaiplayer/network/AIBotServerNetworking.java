@@ -12,7 +12,8 @@ import io.github.greytaiwolf.fakeaiplayer.memory.BotMemory;
 import io.github.greytaiwolf.fakeaiplayer.memory.BotMemoryStore;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotChatS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotCommandC2S;
-import io.github.greytaiwolf.fakeaiplayer.network.payload.BotItemMoveC2S;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.OpenBotInventoryC2S;
+import io.github.greytaiwolf.fakeaiplayer.inventory.BotInventorySessionManager;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotTeleportC2S;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotSnapshotS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.PayloadLimits;
@@ -262,93 +263,13 @@ public final class AIBotServerNetworking {
         }
     }
 
-    public void handleItemMove(ServerPlayer player, BotItemMoveC2S payload) {
-        if (!PayloadLimits.validBotName(payload.botName())
-                || (payload.direction() != BotItemMoveC2S.TAKE && payload.direction() != BotItemMoveC2S.PUT)
-                || payload.slot() < 0
-                || payload.slot() > PayloadLimits.MAX_INVENTORY_SLOT
-                || payload.amount() < 0
-                || payload.amount() > PayloadLimits.MAX_ITEM_MOVE_AMOUNT) {
-            sendSystem(player, "", "无效的物品移动参数。");
+    public void handleOpenInventory(ServerPlayer player, OpenBotInventoryC2S payload) {
+        if (payload.botName() == null || payload.botName().length() > PayloadLimits.BOT_NAME_LENGTH) {
+            sendSystem(player, "", "Invalid bot inventory request.");
             return;
         }
-        Optional<AIPlayerEntity> bot = BotAuthorizationGate.INSTANCE.resolveAuthorized(
-                player, payload.botName(), BotAuthorizationPolicy.Operation.INVENTORY, "network:item_move");
-        if (bot.isEmpty()) {
-            sendSystem(player, "", "找不到该 Bot 或无权限。");
-            return;
-        }
-        AIPlayerEntity target = bot.get();
-        var botInv = target.getInventory();
-        var playerInv = player.getInventory();
-        if (payload.direction() == BotItemMoveC2S.TAKE) {
-            // 从 AI main[slot] 拿到玩家背包
-            int slot = payload.slot();
-            if (slot < 0 || slot >= botInv.items.size()) {
-                return;
-            }
-            ItemStack src = botInv.items.get(slot);
-            if (src.isEmpty()) {
-                return;
-            }
-            int move = payload.amount() == 0 ? src.getCount() : Math.min(payload.amount(), src.getCount());
-            ItemStack moving = src.copy();
-            moving.setCount(move);
-            boolean inserted = playerInv.add(moving); // moving 被原地改为"未放入的剩余"
-            int placed = move - moving.getCount();
-            if (placed > 0) {
-                src.shrink(placed);
-                botInv.setChanged();
-            }
-        } else if (payload.direction() == BotItemMoveC2S.PUT) {
-            // 把玩家 inventory.main[slot] 放进 AI 背包
-            int slot = payload.slot();
-            if (slot < 0 || slot >= playerInv.items.size()) {
-                return;
-            }
-            ItemStack src = playerInv.items.get(slot);
-            if (src.isEmpty()) {
-                return;
-            }
-            int move = payload.amount() == 0 ? src.getCount() : Math.min(payload.amount(), src.getCount());
-            ItemStack moving = src.copy();
-            moving.setCount(move);
-            int placed = insertIntoBot(botInv, moving);
-            if (placed > 0) {
-                src.shrink(placed);
-                playerInv.setChanged();
-            }
-        }
-        // 立即回推一帧快照(含双方背包),UI 不必等 10-tick 周期刷新。
-        if (network.canSend(player, BotSnapshotS2C.ID)) {
-            network.send(player, snapshot(target));
-        }
-    }
-
-    // 把 stack 尽量插入 AI 背包 main 区(先堆叠到同类,再填空槽),返回实际放入数量。
-    private static int insertIntoBot(net.minecraft.world.entity.player.Inventory botInv, ItemStack moving) {
-        int want = moving.getCount();
-        // 1) 堆叠到已有同类未满槽
-        for (int i = 0; i < botInv.items.size() && !moving.isEmpty(); i++) {
-            ItemStack dst = botInv.items.get(i);
-            if (!dst.isEmpty() && ItemStack.isSameItemSameComponents(dst, moving) && dst.getCount() < dst.getMaxStackSize()) {
-                int room = dst.getMaxStackSize() - dst.getCount();
-                int add = Math.min(room, moving.getCount());
-                dst.grow(add);
-                moving.shrink(add);
-            }
-        }
-        // 2) 填空槽
-        for (int i = 0; i < botInv.items.size() && !moving.isEmpty(); i++) {
-            if (botInv.items.get(i).isEmpty()) {
-                botInv.items.set(i, moving.copy());
-                moving.setCount(0);
-            }
-        }
-        if (want != moving.getCount()) {
-            botInv.setChanged();
-        }
-        return want - moving.getCount();
+        BotInventorySessionManager.INSTANCE.tryOpenByName(
+                player, payload.botName(), "network:open_bot_inventory");
     }
 
     private void dispatch(ServerPlayer player, AIPlayerEntity bot, BotCommandC2S payload) {

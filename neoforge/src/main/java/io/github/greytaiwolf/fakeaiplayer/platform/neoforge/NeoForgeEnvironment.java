@@ -4,6 +4,9 @@ import io.github.greytaiwolf.fakeaiplayer.FakeAiPlayer;
 import io.github.greytaiwolf.fakeaiplayer.platform.PlatformEnvironment;
 import net.neoforged.fml.ModList;
 import net.neoforged.fml.loading.FMLPaths;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.item.ItemStack;
 
 import java.nio.file.Path;
 
@@ -28,5 +31,10 @@ final class NeoForgeEnvironment implements PlatformEnvironment {
     @Override
     public String loaderName() {
         return "NeoForge";
+    }
+
+    @Override
+    public boolean canEquip(ItemStack stack, EquipmentSlot slot, LivingEntity entity) {
+        return stack.canEquip(slot, entity);
     }
 }

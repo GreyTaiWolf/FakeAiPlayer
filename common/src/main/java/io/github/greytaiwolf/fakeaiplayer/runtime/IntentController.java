@@ -24,6 +24,7 @@ public final class IntentController {
                                                           ControlOrigin origin,
                                                           String reason) {
         requireServerThread(bot);
+        rejectInventoryOwnedMutation(bot);
         return cancel(bot, origin, reason, IntentControlTransaction.Scope.CURRENT);
     }
 
@@ -31,6 +32,7 @@ public final class IntentController {
                                                       ControlOrigin origin,
                                                       String reason) {
         requireServerThread(bot);
+        rejectInventoryOwnedMutation(bot);
         return cancel(bot, origin, reason, IntentControlTransaction.Scope.ALL);
     }
 
@@ -40,6 +42,7 @@ public final class IntentController {
                                  Supplier<Boolean> startReplacement) {
         requireServerThread(bot);
         Objects.requireNonNull(startReplacement, "startReplacement");
+        rejectInventoryOwnedMutation(bot);
         IntentControlTransaction.Outcome cancellation = cancel(
                 bot, origin, reason, IntentControlTransaction.Scope.CURRENT);
         boolean replacementStarted;
@@ -69,10 +72,16 @@ public final class IntentController {
         }
         boolean changed = BrainCoordinator.INSTANCE.invalidateDecision(bot, "intent_pause:" + normalized);
         changed |= BrainCoordinator.INSTANCE.clearIntentWakeSources(bot);
+        boolean safetyActive = TaskManager.INSTANCE.activeOrigin(bot)
+                .map(TaskOrigin::safety)
+                .orElse(false);
+        IdleCoordinator.INSTANCE.cancelAmbient(bot, "user_pause");
         changed |= TaskManager.INSTANCE.pauseUserIntent(bot, normalized);
         boolean hadActions = bot.getActionPack().hasActiveActions();
-        bot.getActionPack().stopAll();
-        changed |= hadActions;
+        if (!safetyActive) {
+            bot.getActionPack().stopAll();
+            changed |= hadActions;
+        }
         BotLog.comm(bot, "intent_paused", "origin", origin, "reason", normalized,
                 "queue_preserved", GoalExecutor.INSTANCE.queuedGoalCount(bot),
                 "stack_depth", TaskManager.INSTANCE.pausedDepth(bot));
@@ -141,6 +150,12 @@ public final class IntentController {
         }
     }
 
+    private static void rejectInventoryOwnedMutation(AIPlayerEntity bot) {
+        if (TaskManager.INSTANCE.isPausedBy(bot, PauseOwner.INVENTORY)) {
+            throw new IllegalStateException("inventory_session_active");
+        }
+    }
+
     private static final class MinecraftPort implements IntentControlTransaction.Port {
         private final AIPlayerEntity bot;
         private final ControlOrigin origin;
@@ -191,6 +206,7 @@ public final class IntentController {
         public boolean stopActions() {
             boolean changed = bot.getActionPack().hasActiveActions();
             changed |= StuckWatcher.INSTANCE.reset(bot);
+            changed |= IdleCoordinator.INSTANCE.cancelAmbient(bot, "intent_cancelled");
             bot.getActionPack().stopAll();
             return changed;
         }

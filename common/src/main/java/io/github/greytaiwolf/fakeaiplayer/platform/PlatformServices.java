@@ -2,6 +2,9 @@ package io.github.greytaiwolf.fakeaiplayer.platform;
 
 import java.nio.file.Path;
 import java.util.Objects;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.item.ItemStack;
 
 /** Fail-closed holder initialized exactly once by Fabric or NeoForge. */
 public final class PlatformServices {
@@ -31,6 +34,10 @@ public final class PlatformServices {
 
     public static String loaderName() {
         return get().loaderName();
+    }
+
+    public static boolean canEquip(ItemStack stack, EquipmentSlot slot, LivingEntity entity) {
+        return get().canEquip(stack, slot, entity);
     }
 
     private static PlatformEnvironment get() {

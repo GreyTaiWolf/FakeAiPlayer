@@ -3,6 +3,7 @@ package io.github.greytaiwolf.fakeaiplayer.pathfinding;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -29,12 +30,20 @@ public final class Standability {
     }
 
     public static boolean isStandable(ServerLevel world, BlockPos pos) {
-        CacheKey key = new CacheKey(world.dimension().location().toString(), version, pos);
+        return isStandable(world, pos, TraversalPolicy.TASK_WALK_DRY);
+    }
+
+    public static boolean isDryStandable(ServerLevel world, BlockPos pos) {
+        return isStandable(world, pos, TraversalPolicy.TASK_WALK_DRY);
+    }
+
+    public static boolean isStandable(ServerLevel world, BlockPos pos, TraversalPolicy policy) {
+        CacheKey key = new CacheKey(world.dimension().location().toString(), version, pos, policy);
         Boolean cached = CACHE.get(key);
         if (cached != null) {
             return cached;
         }
-        boolean result = compute(world, pos);
+        boolean result = compute(world, pos, policy);
         CACHE.put(key, result);
         return result;
     }
@@ -44,7 +53,30 @@ public final class Standability {
                                                           int horizontalRadius,
                                                           int verticalDown,
                                                           int verticalUp) {
-        Optional<BlockPos> sameColumn = findStandableInColumn(world, origin, verticalDown, verticalUp);
+        return findNearestStandable(
+                world, origin, horizontalRadius, verticalDown, verticalUp,
+                TraversalPolicy.TASK_WALK_DRY, ignored -> true);
+    }
+
+    public static Optional<BlockPos> findNearestStandable(ServerLevel world,
+                                                          BlockPos origin,
+                                                          int horizontalRadius,
+                                                          int verticalDown,
+                                                          int verticalUp,
+                                                          TraversalPolicy policy) {
+        return findNearestStandable(
+                world, origin, horizontalRadius, verticalDown, verticalUp, policy, ignored -> true);
+    }
+
+    public static Optional<BlockPos> findNearestStandable(ServerLevel world,
+                                                          BlockPos origin,
+                                                          int horizontalRadius,
+                                                          int verticalDown,
+                                                          int verticalUp,
+                                                          TraversalPolicy policy,
+                                                          Predicate<BlockPos> additionalCheck) {
+        Optional<BlockPos> sameColumn = findStandableInColumn(
+                world, origin, verticalDown, verticalUp, policy, additionalCheck);
         if (sameColumn.isPresent()) {
             return sameColumn;
         }
@@ -58,7 +90,9 @@ public final class Standability {
                     if (Math.max(Math.abs(dx), Math.abs(dz)) != radius) {
                         continue;
                     }
-                    Optional<BlockPos> candidate = findStandableInColumn(world, origin.offset(dx, 0, dz), verticalDown, verticalUp);
+                    Optional<BlockPos> candidate = findStandableInColumn(
+                            world, origin.offset(dx, 0, dz), verticalDown, verticalUp,
+                            policy, additionalCheck);
                     if (candidate.isEmpty()) {
                         continue;
                     }
@@ -76,26 +110,31 @@ public final class Standability {
         return Optional.empty();
     }
 
-    private static Optional<BlockPos> findStandableInColumn(ServerLevel world, BlockPos origin, int verticalDown, int verticalUp) {
+    private static Optional<BlockPos> findStandableInColumn(ServerLevel world,
+                                                            BlockPos origin,
+                                                            int verticalDown,
+                                                            int verticalUp,
+                                                            TraversalPolicy policy,
+                                                            Predicate<BlockPos> additionalCheck) {
         int topY = world.getMinY() + world.getHeight();
         int minY = Math.max(world.getMinY() + 1, origin.getY() - Math.max(0, verticalDown));
         int maxY = Math.min(topY - 2, origin.getY() + Math.max(0, verticalUp));
         for (int y = Math.min(origin.getY(), maxY); y >= minY; y--) {
             BlockPos candidate = new BlockPos(origin.getX(), y, origin.getZ());
-            if (isStandable(world, candidate)) {
+            if (isStandable(world, candidate, policy) && additionalCheck.test(candidate)) {
                 return Optional.of(candidate.immutable());
             }
         }
         for (int y = Math.max(origin.getY() + 1, minY); y <= maxY; y++) {
             BlockPos candidate = new BlockPos(origin.getX(), y, origin.getZ());
-            if (isStandable(world, candidate)) {
+            if (isStandable(world, candidate, policy) && additionalCheck.test(candidate)) {
                 return Optional.of(candidate.immutable());
             }
         }
         return Optional.empty();
     }
 
-    private static boolean compute(ServerLevel world, BlockPos pos) {
+    private static boolean compute(ServerLevel world, BlockPos pos, TraversalPolicy policy) {
         int topY = world.getMinY() + world.getHeight();
         if (pos.getY() < world.getMinY() + 1 || pos.getY() >= topY - 1) {
             return false;
@@ -104,6 +143,12 @@ public final class Standability {
         BlockState feet = world.getBlockState(pos);
         BlockState head = world.getBlockState(pos.above());
         BlockState below = world.getBlockState(pos.below());
+        if (policy.requiresDryPath()
+                && (!feet.getFluidState().isEmpty()
+                || !head.getFluidState().isEmpty()
+                || !below.getFluidState().isEmpty())) {
+            return false;
+        }
         if (!feet.getCollisionShape(world, pos).isEmpty()) {
             return false;
         }
@@ -112,6 +157,14 @@ public final class Standability {
         }
         if (isDangerous(feet) || isDangerous(head) || isDangerous(below)) {
             return false;
+        }
+        if (policy.allowsWater()
+                && (feet.getFluidState().is(FluidTags.WATER)
+                || head.getFluidState().is(FluidTags.WATER))) {
+            // WATER_CAPABLE is the only policy that models swimming nodes. Unlike a land node it
+            // does not require solid support below; the executor still revalidates collision and
+            // NavSafetyNet takes over if air becomes unsafe.
+            return true;
         }
         // NAV-11:梯子/藤蔓等可攀爬方块,站在其中即可,无需下方支撑。
         if (feet.is(BlockTags.CLIMBABLE)) {
@@ -138,7 +191,7 @@ public final class Standability {
                 || state.is(Blocks.POINTED_DRIPSTONE);
     }
 
-    private record CacheKey(String dimension, long version, BlockPos pos) {
+    private record CacheKey(String dimension, long version, BlockPos pos, TraversalPolicy policy) {
         private CacheKey {
             pos = pos.immutable();
         }

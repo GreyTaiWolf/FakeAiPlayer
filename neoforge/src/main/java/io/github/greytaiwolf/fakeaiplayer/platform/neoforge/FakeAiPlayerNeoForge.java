@@ -10,6 +10,7 @@ import net.neoforged.fml.loading.FMLLoader;
 @Mod(FakeAiPlayer.MOD_ID)
 public final class FakeAiPlayerNeoForge {
     public FakeAiPlayerNeoForge(IEventBus modEventBus) {
+        NeoForgeMenuRegistry.register(modEventBus);
         FakeAiPlayer.initialize(new NeoForgeEnvironment(), new NeoForgeServerNetworkTransport());
         modEventBus.addListener(NeoForgePayloads::register);
         if (FMLLoader.getDist() == Dist.CLIENT) {

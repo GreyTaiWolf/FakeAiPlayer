@@ -5,7 +5,7 @@ import io.github.greytaiwolf.fakeaiplayer.building.preview.BuildingPreviewServic
 import io.github.greytaiwolf.fakeaiplayer.network.AIBotServerNetworking;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotChatS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotCommandC2S;
-import io.github.greytaiwolf.fakeaiplayer.network.payload.BotItemMoveC2S;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.OpenBotInventoryC2S;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotSnapshotS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotTeleportC2S;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.SetOptionC2S;
@@ -22,7 +22,9 @@ import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
 final class NeoForgePayloads {
-    private static final String PROTOCOL_VERSION = "2";
+    // Version 3 replaces the direct item-move packet with the server-authoritative inventory
+    // menu protocol. Keep old clients/servers from silently negotiating incompatible channels.
+    private static final String PROTOCOL_VERSION = "3";
 
     private NeoForgePayloads() {
     }
@@ -46,9 +48,9 @@ final class NeoForgePayloads {
                 server.handleSetOption(player, payload);
             }
         });
-        registrar.playToServer(BotItemMoveC2S.ID, BotItemMoveC2S.CODEC, (payload, context) -> {
+        registrar.playToServer(OpenBotInventoryC2S.ID, OpenBotInventoryC2S.CODEC, (payload, context) -> {
             if (context.player() instanceof ServerPlayer player) {
-                server.handleItemMove(player, payload);
+                server.handleOpenInventory(player, payload);
             }
         });
         registrar.playToServer(BotTeleportC2S.ID, BotTeleportC2S.CODEC, (payload, context) -> {

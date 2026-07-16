@@ -14,6 +14,9 @@ import io.github.greytaiwolf.fakeaiplayer.building.style.VanillaHouseStyles;
 import io.github.greytaiwolf.fakeaiplayer.goal.Goal;
 import io.github.greytaiwolf.fakeaiplayer.goal.StructureVerifier;
 import io.github.greytaiwolf.fakeaiplayer.persist.MissionSpec;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.AStarPathfinder;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.PathfindingResult;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.TraversalPolicy;
 import io.github.greytaiwolf.fakeaiplayer.task.BlueprintLoader;
 import io.github.greytaiwolf.fakeaiplayer.task.BlueprintSchema;
 import net.fabricmc.fabric.api.gametest.v1.FabricGameTest;
@@ -176,6 +179,90 @@ public final class FakeAiPlayerDeterministicGameTests implements FabricGameTest 
             context.succeed();
         } catch (Exception exception) {
             context.fail("Modular house live-world contract failed: " + exception.getMessage());
+        }
+    }
+
+    @GameTest(template = FabricGameTest.EMPTY_STRUCTURE, timeoutTicks = 20)
+    public void dryPathDetoursAroundWater(GameTestHelper context) {
+        BlockPos start = context.absolutePos(new BlockPos(1, 2, 1));
+        BlockPos goal = start.offset(6, 0, 0);
+        prepareFlat(context, start);
+        try {
+            for (int dz = -1; dz <= 1; dz++) {
+                context.getLevel().setBlockAndUpdate(
+                        start.offset(3, 0, dz), Blocks.WATER.defaultBlockState());
+            }
+
+            PathfindingResult result = new AStarPathfinder(
+                    context.getLevel(), start, goal, 5_000, 250L,
+                    TraversalPolicy.TASK_WALK_DRY, 1.0D).findPath(true);
+            require(result.success(), "dry route did not find the available detour: " + result.reason());
+            for (var node : result.path()) {
+                BlockPos position = node.pos();
+                require(context.getLevel().getFluidState(position).isEmpty()
+                                && context.getLevel().getFluidState(position.above()).isEmpty()
+                                && context.getLevel().getFluidState(position.below()).isEmpty(),
+                        "dry route entered fluid at " + position.toShortString());
+            }
+            PathfindingResult aquatic = new AStarPathfinder(
+                    context.getLevel(), start, goal, 5_000, 250L,
+                    TraversalPolicy.WATER_CAPABLE, 1.0D).findPath(true);
+            require(aquatic.success(), "explicit water-capable route failed: " + aquatic.reason());
+            require(aquatic.path().stream().anyMatch(
+                            node -> context.getLevel().getFluidState(node.pos()).is(net.minecraft.tags.FluidTags.WATER)),
+                    "water-capable route never used the shorter water crossing");
+        } finally {
+            clearFlat(context, start);
+        }
+        context.succeed();
+    }
+
+    @GameTest(template = FabricGameTest.EMPTY_STRUCTURE, timeoutTicks = 20)
+    public void cachedPathIsRejectedAfterWallAppears(GameTestHelper context) {
+        BlockPos start = context.absolutePos(new BlockPos(1, 2, 1));
+        BlockPos goal = start.offset(6, 0, 0);
+        prepareFlat(context, start);
+        try {
+            AStarPathfinder firstFinder = new AStarPathfinder(
+                    context.getLevel(), start, goal, 5_000, 250L,
+                    TraversalPolicy.TASK_WALK_DRY, 1.0D);
+            PathfindingResult first = firstFinder.findPath(true);
+            require(first.success() && first.path().size() >= 4, "initial flat route failed");
+
+            BlockPos blocked = first.path().get(first.path().size() / 2).pos();
+            context.getLevel().setBlockAndUpdate(blocked, Blocks.STONE.defaultBlockState());
+            context.getLevel().setBlockAndUpdate(blocked.above(), Blocks.STONE.defaultBlockState());
+            PathfindingResult replanned = new AStarPathfinder(
+                    context.getLevel(), start, goal, 5_000, 250L,
+                    TraversalPolicy.TASK_WALK_DRY, 1.0D).findPath();
+            require(replanned.success(), "wall invalidation did not produce a detour: " + replanned.reason());
+            require(replanned.path().stream().noneMatch(node -> node.pos().equals(blocked)),
+                    "cached route still crossed the newly blocked cell");
+        } finally {
+            clearFlat(context, start);
+        }
+        context.succeed();
+    }
+
+    private static void prepareFlat(GameTestHelper context, BlockPos center) {
+        for (int dx = -1; dx <= 7; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                BlockPos feet = center.offset(dx, 0, dz);
+                context.getLevel().setBlockAndUpdate(feet.below(), Blocks.STONE.defaultBlockState());
+                context.getLevel().setBlockAndUpdate(feet, Blocks.AIR.defaultBlockState());
+                context.getLevel().setBlockAndUpdate(feet.above(), Blocks.AIR.defaultBlockState());
+            }
+        }
+    }
+
+    private static void clearFlat(GameTestHelper context, BlockPos center) {
+        for (int dx = -1; dx <= 7; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                BlockPos feet = center.offset(dx, 0, dz);
+                context.getLevel().setBlockAndUpdate(feet.below(), Blocks.AIR.defaultBlockState());
+                context.getLevel().setBlockAndUpdate(feet, Blocks.AIR.defaultBlockState());
+                context.getLevel().setBlockAndUpdate(feet.above(), Blocks.AIR.defaultBlockState());
+            }
         }
     }
 

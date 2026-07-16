@@ -7,6 +7,7 @@ import io.github.greytaiwolf.fakeaiplayer.manager.AIPlayerManager;
 import io.github.greytaiwolf.fakeaiplayer.observe.BotProfiler;
 import io.github.greytaiwolf.fakeaiplayer.observe.TpsGuard;
 import io.github.greytaiwolf.fakeaiplayer.runtime.ExecutionStack;
+import io.github.greytaiwolf.fakeaiplayer.runtime.PauseOwner;
 import io.github.greytaiwolf.fakeaiplayer.runtime.TaskOrigin;
 import net.minecraft.server.MinecraftServer;
 
@@ -23,7 +24,7 @@ public final class TaskManager {
     private final Map<UUID, Task> active = new ConcurrentHashMap<>();
     private final Map<UUID, TaskOrigin> activeOrigins = new ConcurrentHashMap<>();
     private final Map<UUID, ExecutionStack<Task>> executionStacks = new ConcurrentHashMap<>();
-    private final Set<UUID> userPaused = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, Set<PauseOwner>> pauseLocks = new ConcurrentHashMap<>();
     private final Map<UUID, TaskStatus> lastStatus = new ConcurrentHashMap<>();
     private final Map<UUID, FailureRecord> lastFailure = new ConcurrentHashMap<>();
     private final Map<UUID, FailureRecord> pendingFailure = new ConcurrentHashMap<>();
@@ -32,9 +33,11 @@ public final class TaskManager {
     }
 
     public void assign(AIPlayerEntity bot, Task task, TaskOrigin origin) {
-        if (isUserPaused(bot) && !origin.safety()) {
-            throw new IllegalStateException("mission_user_paused");
+        if (hasPersistentPause(bot) && !origin.safety()) {
+            throw new IllegalStateException("mission_paused:" + pauseOwners(bot));
         }
+        io.github.greytaiwolf.fakeaiplayer.coordination.IdleCoordinator.INSTANCE
+                .cancelAmbient(bot, "task_assigned");
         abort(bot);
         bot.getActionPack().stopAll();
         UUID uuid = bot.getUUID();
@@ -105,7 +108,7 @@ public final class TaskManager {
             }
         }
         activeOrigins.remove(uuid);
-        userPaused.remove(uuid);
+        pauseLocks.remove(uuid);
         lastFailure.remove(uuid);
         pendingFailure.remove(uuid);
         lastStatus.put(uuid, TaskStatus.idle());
@@ -119,7 +122,7 @@ public final class TaskManager {
         activeOrigins.remove(uuid);
         ExecutionStack<Task> stack = executionStacks.remove(uuid);
         java.util.List<ExecutionStack.Frame<Task>> pausedFrames = stack == null ? java.util.List.of() : stack.drain();
-        userPaused.remove(uuid);
+        pauseLocks.remove(uuid);
         boolean hadFailure = lastFailure.remove(uuid) != null;
         boolean hadPendingFailure = pendingFailure.remove(uuid) != null;
         if (current != null) {
@@ -172,7 +175,23 @@ public final class TaskManager {
     }
 
     public boolean isUserPaused(AIPlayerEntity bot) {
-        return userPaused.contains(bot.getUUID());
+        return isPausedBy(bot, PauseOwner.USER);
+    }
+
+    public boolean isPausedBy(AIPlayerEntity bot, PauseOwner owner) {
+        Set<PauseOwner> owners = pauseLocks.get(bot.getUUID());
+        return owners != null && owners.contains(owner);
+    }
+
+    /** True when user or inventory interaction explicitly owns the bot's ordinary-work pause. */
+    public boolean hasPersistentPause(AIPlayerEntity bot) {
+        Set<PauseOwner> owners = pauseLocks.get(bot.getUUID());
+        return owners != null && owners.stream().anyMatch(PauseOwner::persistentLock);
+    }
+
+    public Set<PauseOwner> pauseOwners(AIPlayerEntity bot) {
+        Set<PauseOwner> owners = pauseLocks.get(bot.getUUID());
+        return owners == null ? Set.of() : Set.copyOf(owners);
     }
 
     public TaskStatus status(AIPlayerEntity bot) {
@@ -188,38 +207,93 @@ public final class TaskManager {
     }
 
     public void pauseFor(AIPlayerEntity bot, String why) {
+        pauseFor(bot, PauseOwner.SYSTEM, why);
+    }
+
+    public boolean pauseFor(AIPlayerEntity bot, PauseOwner pauseOwner, String why) {
         UUID uuid = bot.getUUID();
+        boolean changed = acquirePauseLock(uuid, pauseOwner);
         Task current = active.remove(uuid);
         TaskOrigin origin = activeOrigins.remove(uuid);
         if (current == null) {
-            return;
+            return changed;
         }
         current.pause(bot);
         TaskOrigin preservedOrigin = origin == null
                 ? TaskOrigin.of(TaskOrigin.Kind.SYSTEM_BACKGROUND, "unknown_origin") : origin;
         ExecutionStack<Task> stack = executionStacks.computeIfAbsent(uuid, ignored -> new ExecutionStack<>());
-        stack.push(current, preservedOrigin);
+        stack.push(current, preservedOrigin, pauseOwner);
         TaskStatus status = TaskStatus.from(current);
         lastStatus.put(bot.getUUID(), status);
         BotReporter.INSTANCE.onStatus(bot.getServer(), bot, status);
         BotLog.task(bot, "task_paused", "name", current.name(), "why", why,
-                "origin", preservedOrigin.kind(), "stack_depth", stack.size());
+                "origin", preservedOrigin.kind(), "pause_owner", pauseOwner,
+                "stack_depth", stack.size());
+        return true;
     }
 
+    /** Legacy automatic-unwind entry point. Manual USER/INVENTORY frames are intentionally ignored. */
     public void resumeFromPause(AIPlayerEntity bot) {
+        resumeAutomaticPause(bot);
+    }
+
+    public boolean resumeAutomaticPause(AIPlayerEntity bot) {
+        return resumeSafetyPause(bot);
+    }
+
+    public boolean resumeSafetyPause(AIPlayerEntity bot) {
+        return resumeAutomaticOwnedPause(bot, PauseOwner.SAFETY);
+    }
+
+    public boolean resumeSystemPause(AIPlayerEntity bot) {
+        return resumeAutomaticOwnedPause(bot, PauseOwner.SYSTEM);
+    }
+
+    private boolean resumeAutomaticOwnedPause(AIPlayerEntity bot, PauseOwner owner) {
+        boolean released = releasePauseLock(bot.getUUID(), owner);
+        boolean resumed = resumeTop(bot, frame -> frame.pauseOwner() == owner);
+        return released || resumed;
+    }
+
+    /**
+     * Releases exactly one persistent pause owner. Closing an inventory can therefore never release
+     * a user pause (and vice versa).
+     */
+    public boolean resumeOwnedPause(AIPlayerEntity bot, PauseOwner pauseOwner) {
+        UUID uuid = bot.getUUID();
+        boolean changed = releasePauseLock(uuid, pauseOwner);
+        if (!changed) {
+            return false;
+        }
+        if (hasPersistentPause(bot)) {
+            return true;
+        }
+        Set<PauseOwner> remainingOwners = pauseOwners(bot);
+        return resumeTop(bot, frame -> PauseOwner.resumeAllowedAfterPersistentRelease(
+                frame.pauseOwner(), remainingOwners)) || changed;
+    }
+
+    private boolean resumeTop(AIPlayerEntity bot,
+                              java.util.function.Predicate<ExecutionStack.Frame<Task>> allowed) {
         UUID uuid = bot.getUUID();
         if (active.containsKey(uuid)) {
-            return;
+            return false;
         }
         ExecutionStack<Task> stack = executionStacks.get(uuid);
         if (stack == null) {
-            return;
+            return false;
         }
-        Optional<ExecutionStack.Frame<Task>> resumable = stack.popResumable(userPaused.contains(uuid));
-        if (resumable.isEmpty()) {
-            return;
+        Optional<ExecutionStack.Frame<Task>> top = stack.peek();
+        if (top.isEmpty() || !allowed.test(top.get())) {
+            return false;
         }
-        ExecutionStack.Frame<Task> frame = resumable.get();
+        // A USER/INVENTORY lock protects ordinary work, but it must not strand an outer safety
+        // task when a nested safety interrupt completes. Only a non-safety frame is blocked by a
+        // persistent lock; safety frames retain their own LIFO continuation.
+        if (hasPersistentPause(bot) && !top.get().origin().safety()) {
+            return false;
+        }
+        ExecutionStack.Frame<Task> frame = stack.pop().orElseThrow();
         Task task = frame.work();
         active.put(uuid, task);
         activeOrigins.put(uuid, frame.origin());
@@ -231,30 +305,27 @@ public final class TaskManager {
             executionStacks.remove(uuid, stack);
         }
         BotLog.task(bot, "task_resumed", "name", task.name(), "origin", frame.origin().kind(),
-                "stack_depth", stack.size(), "user_paused", userPaused.contains(uuid));
+                "pause_owner", frame.pauseOwner(), "stack_depth", stack.size(),
+                "pause_locks", pauseOwners(bot));
+        return true;
     }
 
     public boolean pauseUserIntent(AIPlayerEntity bot, String why) {
         UUID uuid = bot.getUUID();
-        boolean changed = userPaused.add(uuid);
         TaskOrigin origin = activeOrigins.get(uuid);
-        if (active.containsKey(uuid) && (origin == null || !origin.safety())) {
-            pauseFor(bot, "user_pause:" + why);
-            changed = true;
+        boolean safetyActive = origin != null && origin.safety();
+        boolean changed = safetyActive
+                ? acquirePauseLock(uuid, PauseOwner.USER)
+                : pauseFor(bot, PauseOwner.USER, "user_pause:" + why);
+        if (!safetyActive) {
+            bot.getActionPack().stopAll();
         }
-        bot.getActionPack().stopAll();
         BotLog.task(bot, "mission_user_paused", "why", why, "stack_depth", pausedDepth(bot));
         return changed;
     }
 
     public boolean resumeUserIntent(AIPlayerEntity bot, String why) {
-        UUID uuid = bot.getUUID();
-        boolean changed = userPaused.remove(uuid);
-        if (!active.containsKey(uuid)) {
-            int before = pausedDepth(bot);
-            resumeFromPause(bot);
-            changed |= pausedDepth(bot) != before;
-        }
+        boolean changed = resumeOwnedPause(bot, PauseOwner.USER);
         BotLog.task(bot, "mission_user_resumed", "why", why, "stack_depth", pausedDepth(bot));
         return changed;
     }
@@ -268,7 +339,7 @@ public final class TaskManager {
                 active.remove(uuid);
                 activeOrigins.remove(uuid);
                 executionStacks.remove(uuid);
-                userPaused.remove(uuid);
+                pauseLocks.remove(uuid);
                 continue;
             }
             AIPlayerEntity player = bot.get();
@@ -303,18 +374,27 @@ public final class TaskManager {
                 lastFailure.remove(uuid);
                 pendingFailure.remove(uuid);
                 BotLog.task(player, "task_completed", "name", task.name(), "elapsed_ticks", task.elapsedTicks());
+                if (origin != null && origin.kind() == TaskOrigin.Kind.SYSTEM_BACKGROUND) {
+                    resumeSystemPause(player);
+                }
             } else if (task.state() == TaskState.FAILED) {
                 active.remove(uuid);
                 activeOrigins.remove(uuid);
                 recordFailure(player, task.name(), task.failureReason(), server.getTickCount());
                 BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.TASK, player, "task_failed",
                         "name", task.name(), "reason", task.failureReason(), "elapsed_ticks", task.elapsedTicks());
+                if (origin != null && origin.kind() == TaskOrigin.Kind.SYSTEM_BACKGROUND) {
+                    resumeSystemPause(player);
+                }
             } else if (task.state() == TaskState.CANCELLED) {
                 active.remove(uuid);
                 activeOrigins.remove(uuid);
                 lastFailure.remove(uuid);
                 pendingFailure.remove(uuid);
                 BotLog.task(player, "task_cancelled", "name", task.name(), "reason", task.failureReason());
+                if (origin != null && origin.kind() == TaskOrigin.Kind.SYSTEM_BACKGROUND) {
+                    resumeSystemPause(player);
+                }
             }
         }
     }
@@ -345,7 +425,7 @@ public final class TaskManager {
         active.clear();
         activeOrigins.clear();
         executionStacks.clear();
-        userPaused.clear();
+        pauseLocks.clear();
         lastStatus.clear();
         lastFailure.clear();
         pendingFailure.clear();
@@ -356,7 +436,7 @@ public final class TaskManager {
         cancelIntentTasks(bot, "bot_unload");
         executionStacks.remove(bot.getUUID());
         activeOrigins.remove(bot.getUUID());
-        userPaused.remove(bot.getUUID());
+        pauseLocks.remove(bot.getUUID());
         lastStatus.remove(bot.getUUID());
         lastFailure.remove(bot.getUUID());
         pendingFailure.remove(bot.getUUID());
@@ -367,7 +447,7 @@ public final class TaskManager {
         active.clear();
         activeOrigins.clear();
         executionStacks.clear();
-        userPaused.clear();
+        pauseLocks.clear();
         lastStatus.clear();
         lastFailure.clear();
         pendingFailure.clear();
@@ -379,6 +459,24 @@ public final class TaskManager {
 
     private static boolean isCritical(Task task) {
         return task instanceof EvadeTask || task instanceof CombatTask || task instanceof EatTask || task instanceof ResupplyTask;
+    }
+
+    private boolean acquirePauseLock(UUID uuid, PauseOwner owner) {
+        if (!owner.persistentLock()) {
+            return false;
+        }
+        return pauseLocks.computeIfAbsent(uuid, ignored -> ConcurrentHashMap.newKeySet()).add(owner);
+    }
+
+    private boolean releasePauseLock(UUID uuid, PauseOwner owner) {
+        Set<PauseOwner> owners = pauseLocks.get(uuid);
+        if (owners == null || !owners.remove(owner)) {
+            return false;
+        }
+        if (owners.isEmpty()) {
+            pauseLocks.remove(uuid, owners);
+        }
+        return true;
     }
 
     public record FailureRecord(String name, String reason, int count, int tick) {

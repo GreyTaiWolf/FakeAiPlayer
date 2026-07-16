@@ -67,7 +67,7 @@ public final class DescendToYTask extends AbstractTask {
         lateralDetours = 0;
         // 带铁套加成:下潜进危险深层前主动穿上背包里最好的甲(钻石计划已在 preamble 备了头胸甲)。
         // 深潜死因多是生存(岩浆/怪/低血),铁甲直接减伤;不等战斗触发才穿(被动伤害也护)。
-        io.github.greytaiwolf.fakeaiplayer.action.EquipAction.equipBestArmor(bot);
+        io.github.greytaiwolf.fakeaiplayer.action.EquipAction.equipBestArmor(bot, "descend_start");
     }
 
     @Override

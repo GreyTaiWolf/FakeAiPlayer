@@ -524,7 +524,7 @@ public final class ToolRegistry {
         });
 
         register("equip_armor", "Equip the best armor pieces from inventory and select the best weapon", objectSchema().build(), (bot, args) -> {
-            int equipped = EquipAction.equipBestArmor(bot);
+            int equipped = EquipAction.equipBestArmor(bot, "llm_tool");
             EquipAction.equipBestWeapon(bot);
             return ok("equipped_armor_pieces: " + equipped);
         });

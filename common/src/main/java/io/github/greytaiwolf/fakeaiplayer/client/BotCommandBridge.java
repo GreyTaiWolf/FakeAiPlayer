@@ -1,7 +1,7 @@
 package io.github.greytaiwolf.fakeaiplayer.client;
 
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotCommandC2S;
-import io.github.greytaiwolf.fakeaiplayer.network.payload.BotItemMoveC2S;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.OpenBotInventoryC2S;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotTeleportC2S;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.SetOptionC2S;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.SubscribeBotC2S;
@@ -67,10 +67,9 @@ public final class BotCommandBridge {
         }
     }
 
-    /** 在 owner 与自己的 AI 之间移动物品；服务端统一复核 owner/OP。 */
-    public static void moveItem(String botName, int direction, int slot, int amount) {
-        if (ClientNetworkServices.canSend(BotItemMoveC2S.ID)) {
-            ClientNetworkServices.send(new BotItemMoveC2S(clean(botName), direction, slot, amount));
+    public static void openInventory(String botName) {
+        if (ClientNetworkServices.canSend(OpenBotInventoryC2S.ID)) {
+            ClientNetworkServices.send(new OpenBotInventoryC2S(clean(botName)));
         }
     }
 

@@ -1,6 +1,7 @@
 package io.github.greytaiwolf.fakeaiplayer.action;
 
 import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
+import io.github.greytaiwolf.fakeaiplayer.inventory.BotInventorySessionManager;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import java.util.EnumMap;
 import java.util.Map;
@@ -26,6 +27,14 @@ public final class EquipAction {
     }
 
     public static int equipBestArmor(AIPlayerEntity bot) {
+        return equipBestArmor(bot, "explicit_request");
+    }
+
+    public static int equipBestArmor(AIPlayerEntity bot, String reason) {
+        if (BotInventorySessionManager.INSTANCE.isOpen(bot)) {
+            BotLog.action(bot, "equip_armor_blocked", "reason", "inventory_session");
+            return 0;
+        }
         Inventory inventory = bot.getInventory();
         Map<EquipmentSlot, Candidate> best = new EnumMap<>(EquipmentSlot.class);
         for (int slot = 0; slot < inventory.items.size(); slot++) {
@@ -55,12 +64,17 @@ public final class EquipAction {
             bot.setItemSlot(slot, candidate.stack());
             inventory.setChanged();
             equipped++;
-            BotLog.action(bot, "equip_armor", "slot", slot.getSerializedName(), "item", candidate.stack().getItem(), "score", candidate.score());
+            BotLog.action(bot, "equip_armor", "slot", slot.getSerializedName(),
+                    "item", candidate.stack().getItem(), "score", candidate.score(),
+                    "reason", reason == null ? "unknown" : reason);
         }
         return equipped;
     }
 
     public static OptionalInt equipBestWeapon(AIPlayerEntity bot) {
+        if (BotInventorySessionManager.INSTANCE.isOpen(bot)) {
+            return OptionalInt.empty();
+        }
         OptionalInt slot = bestWeaponSlot(bot);
         slot.ifPresent(value -> InventoryAction.equipFromSlot(bot, value));
         return slot;
@@ -98,6 +112,9 @@ public final class EquipAction {
     }
 
     public static boolean equipShieldOffhand(AIPlayerEntity bot) {
+        if (BotInventorySessionManager.INSTANCE.isOpen(bot)) {
+            return false;
+        }
         if (bot.getOffhandItem().is(Items.SHIELD)) {
             return true;
         }

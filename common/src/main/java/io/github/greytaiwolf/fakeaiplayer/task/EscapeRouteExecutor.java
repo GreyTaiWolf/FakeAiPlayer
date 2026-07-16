@@ -5,8 +5,12 @@ import io.github.greytaiwolf.fakeaiplayer.action.ActionResult;
 import io.github.greytaiwolf.fakeaiplayer.action.WalkToController;
 import io.github.greytaiwolf.fakeaiplayer.mode.ObservableWorldQuery;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.DangerCheck;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.LocalOpenness;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.MoveType;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.NeighborEnumerator;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.Node;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.Standability;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.TraversalPolicy;
 import java.util.List;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.LivingEntity;
@@ -22,8 +26,10 @@ import net.minecraft.world.phys.Vec3;
 final class EscapeRouteExecutor {
     private static final int MAX_TICKS = 360;
     private static final int NO_PROGRESS_LIMIT = 50;
+    private static final int ROUTE_REVALIDATE_LOOKAHEAD = 3;
 
     private final List<Node> path;
+    private final boolean terminalOpenRequired;
     private int index = 1;
     private WalkToController walker;
     private Vec3 lastPos;
@@ -31,7 +37,12 @@ final class EscapeRouteExecutor {
     private int elapsed;
 
     EscapeRouteExecutor(List<Node> path) {
+        this(path, true);
+    }
+
+    EscapeRouteExecutor(List<Node> path, boolean terminalOpenRequired) {
         this.path = List.copyOf(path);
+        this.terminalOpenRequired = terminalOpenRequired;
     }
 
     ActionResult tick(ActionPack pack) {
@@ -54,14 +65,10 @@ final class EscapeRouteExecutor {
             cleanup(pack);
             return ActionResult.failed("escape_route_world_edit_step:" + next.moveType());
         }
-        String danger = DangerCheck.scan(pack.player().serverLevel(), next.pos());
-        if (danger != null) {
+        String invalid = validateUpcomingRoute(pack);
+        if (invalid != null) {
             cleanup(pack);
-            return ActionResult.failed("escape_route_danger:" + danger);
-        }
-        if (hostileOccupiesNextStep(pack, next.pos())) {
-            cleanup(pack);
-            return ActionResult.failed("escape_route_hostile_blocked");
+            return ActionResult.failed("escape_route_invalidated:" + invalid);
         }
 
         if (walker == null) {
@@ -94,6 +101,40 @@ final class EscapeRouteExecutor {
 
     void abort(ActionPack pack) {
         cleanup(pack);
+    }
+
+    private String validateUpcomingRoute(ActionPack pack) {
+        var world = pack.player().serverLevel();
+        Standability.clearCache();
+        NeighborEnumerator validator = new NeighborEnumerator(
+                false, false, TraversalPolicy.ESCAPE_DRY_OPEN);
+        validator.setPathGoal(path.get(path.size() - 1).pos());
+        int last = Math.min(path.size() - 1, index + ROUTE_REVALIDATE_LOOKAHEAD - 1);
+        for (int candidateIndex = index; candidateIndex <= last; candidateIndex++) {
+            Node candidate = path.get(candidateIndex);
+            if (!supports(candidate.moveType())) {
+                return "world_edit_step:" + candidate.moveType();
+            }
+            String danger = DangerCheck.scan(
+                    world, candidate.pos(), TraversalPolicy.ESCAPE_DRY_OPEN);
+            if (danger != null) {
+                return "danger:" + danger;
+            }
+            Node previous = path.get(candidateIndex - 1);
+            boolean transitionValid = validator.hasTransition(
+                    previous.pos(), candidate.pos(), candidate.moveType(), world);
+            if (!transitionValid) {
+                return "transition_blocked";
+            }
+            if (hostileOccupiesNextStep(pack, candidate.pos())) {
+                return "hostile_blocked";
+            }
+        }
+        if (terminalOpenRequired && last == path.size() - 1 && !LocalOpenness.isOpen(
+                world, path.get(last).pos(), TraversalPolicy.ESCAPE_DRY_OPEN)) {
+            return "terminal_dead_end";
+        }
+        return null;
     }
 
     private static boolean hostileOccupiesNextStep(ActionPack pack, BlockPos next) {
