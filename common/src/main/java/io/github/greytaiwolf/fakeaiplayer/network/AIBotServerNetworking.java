@@ -2,8 +2,11 @@ package io.github.greytaiwolf.fakeaiplayer.network;
 
 import io.github.greytaiwolf.fakeaiplayer.auth.BotAuthorizationGate;
 import io.github.greytaiwolf.fakeaiplayer.auth.BotAuthorizationPolicy;
+import io.github.greytaiwolf.fakeaiplayer.brain.BotAiConnectionService;
 import io.github.greytaiwolf.fakeaiplayer.brain.BrainCoordinator;
 import io.github.greytaiwolf.fakeaiplayer.brain.BotRuntimeOptions;
+import io.github.greytaiwolf.fakeaiplayer.brain.chat.BotChatRouter;
+import io.github.greytaiwolf.fakeaiplayer.brain.social.BotSocialCoordinator;
 import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.manager.AIPlayerManager;
@@ -11,13 +14,17 @@ import io.github.greytaiwolf.fakeaiplayer.goal.GoalExecutor;
 import io.github.greytaiwolf.fakeaiplayer.memory.BotMemory;
 import io.github.greytaiwolf.fakeaiplayer.memory.BotMemoryStore;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotChatS2C;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.BotAiCredentialStatusS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotCommandC2S;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.OpenBotAiSetupS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.OpenBotInventoryC2S;
 import io.github.greytaiwolf.fakeaiplayer.inventory.BotInventorySessionManager;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotTeleportC2S;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotSnapshotS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.PayloadLimits;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.SetOptionC2S;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.SetBotAiCredentialC2S;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.RestoreBotAiCredentialC2S;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.SubscribeBotC2S;
 import io.github.greytaiwolf.fakeaiplayer.runtime.IntentController;
 import io.github.greytaiwolf.fakeaiplayer.runtime.RuntimeLifecycleCoordinator;
@@ -40,6 +47,7 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -56,7 +64,14 @@ public final class AIBotServerNetworking {
     private static final Set<String> COMMAND_ACTIONS = Set.of(
             "move", "mine", "craft", "smelt", "eat", "sleep", "abort", "chat", "pause", "resume", "reset");
     private static final Set<String> OPTION_KEYS = Set.of("manual", "memory", "reports");
+    private static final int CREDENTIAL_ATTEMPT_WINDOW_TICKS = 1_200;
+    private static final int MAX_CREDENTIAL_ATTEMPTS_PER_WINDOW = 4;
     private final Map<UUID, UUID> subscriptions = new ConcurrentHashMap<>();
+    /** Player whose successfully verified client credential is active for a bot. */
+    private final Map<UUID, UUID> credentialActors = new ConcurrentHashMap<>();
+    /** Exact pending generation and player waiting for a no-tool connection probe. */
+    private final Map<UUID, PendingCredentialActor> pendingCredentialActors = new ConcurrentHashMap<>();
+    private final Map<CredentialAttemptKey, ArrayDeque<Integer>> credentialAttempts = new ConcurrentHashMap<>();
     private volatile ServerNetworkTransport network = new ServerNetworkTransport() {
         @Override
         public boolean canSend(ServerPlayer player,
@@ -79,7 +94,31 @@ public final class AIBotServerNetworking {
     }
 
     public void onDisconnect(ServerPlayer player) {
-        subscriptions.remove(player.getUUID());
+        UUID playerId = player.getUUID();
+        subscriptions.remove(playerId);
+        BotAiSetupSessions.INSTANCE.clear(playerId);
+        credentialAttempts.keySet().removeIf(key -> playerId.equals(key.playerId()));
+        pendingCredentialActors.entrySet().removeIf(entry -> {
+            PendingCredentialActor pending = entry.getValue();
+            if (!playerId.equals(pending.playerId())) {
+                return false;
+            }
+            BotAiConnectionService.INSTANCE.discardPending(entry.getKey());
+            BrainCoordinator.INSTANCE.rejectBotApiKey(entry.getKey(), pending.generation());
+            return true;
+        });
+        credentialActors.entrySet().removeIf(entry -> {
+            if (!playerId.equals(entry.getValue())) {
+                return false;
+            }
+            UUID botId = entry.getKey();
+            BotAiConnectionService.INSTANCE.discardPending(botId);
+            BrainCoordinator.INSTANCE.revokeBotApiKey(botId);
+            PendingCredentialActor displaced = pendingCredentialActors.remove(botId);
+            notifyDisplacedPending(player.getServer(), displaced);
+            BotSocialCoordinator.INSTANCE.clear(botId);
+            return true;
+        });
     }
 
     public void tick(MinecraftServer server) {
@@ -107,14 +146,31 @@ public final class AIBotServerNetworking {
 
     public void clear() {
         subscriptions.clear();
+        credentialActors.clear();
+        pendingCredentialActors.clear();
+        credentialAttempts.clear();
+        BotAiSetupSessions.INSTANCE.clearAll();
+        BotAiConnectionService.INSTANCE.reset();
+        BotChatRouter.INSTANCE.clearAll();
+        BotSocialCoordinator.INSTANCE.clearAll();
         snapshotTick = 0;
     }
 
     public void clearBot(UUID botId) {
         subscriptions.entrySet().removeIf(entry -> botId.equals(entry.getValue()));
+        BotAiConnectionService.INSTANCE.discardPending(botId);
+        credentialActors.remove(botId);
+        pendingCredentialActors.remove(botId);
+        BrainCoordinator.INSTANCE.revokeBotApiKey(botId);
+        BotChatRouter.INSTANCE.clear(botId);
+        BotSocialCoordinator.INSTANCE.clear(botId);
     }
 
     public void sendBotChat(AIPlayerEntity bot, String role, String text) {
+        BotChatRouter.INSTANCE.route(bot, role, text, this::sendPanelChat);
+    }
+
+    private void sendPanelChat(AIPlayerEntity bot, String role, String text) {
         if (subscriptions.isEmpty()) {
             return;
         }
@@ -139,6 +195,217 @@ public final class AIBotServerNetworking {
                         PayloadLimits.truncate(text, PayloadLimits.CHAT_TEXT_LENGTH)));
             }
         }
+    }
+
+    /** Issues a short-lived setup nonce and opens the masked client credential screen. */
+    public boolean beginBotAiSetup(ServerPlayer player, AIPlayerEntity bot) {
+        if (!network.canSend(player, OpenBotAiSetupS2C.ID)) {
+            return false;
+        }
+        UUID nonce = BotAiSetupSessions.INSTANCE.create(
+                player.getUUID(),
+                bot.getUUID(),
+                bot.getGameProfile().getName(),
+                player.getServer().getTickCount());
+        network.send(player, new OpenBotAiSetupS2C(bot.getGameProfile().getName(), nonce));
+        return true;
+    }
+
+    /** Disconnects active/pending session credentials and optionally deletes the caller's local key. */
+    public void disconnectBotAiCredential(ServerPlayer player, AIPlayerEntity bot) {
+        UUID botId = bot.getUUID();
+        PendingCredentialActor pending = pendingCredentialActors.remove(botId);
+        if (pending != null) {
+            BotAiConnectionService.INSTANCE.discardPending(botId);
+            BrainCoordinator.INSTANCE.rejectBotApiKey(botId, pending.generation());
+        }
+        credentialActors.remove(botId);
+        BrainCoordinator.INSTANCE.revokeBotApiKey(botId);
+        BotSocialCoordinator.INSTANCE.clear(botId);
+        if (player != null) {
+            sendCredentialStatus(
+                    player,
+                    bot.getGameProfile().getName(),
+                    BotAiCredentialStatusS2C.NO_NONCE,
+                    BotAiCredentialStatusS2C.DISCONNECTED,
+                    false,
+                    true);
+        }
+    }
+
+    public void handleSetBotAiCredential(ServerPlayer player, SetBotAiCredentialC2S payload) {
+        Optional<AIPlayerEntity> resolved = BotAuthorizationGate.INSTANCE.resolveAuthorized(
+                player,
+                payload.botName(),
+                BotAuthorizationPolicy.Operation.ADMIN,
+                "network:set_bot_ai_credential");
+        if (resolved.isEmpty()) {
+            sendCredentialStatus(player, payload.botName(), payload.nonce(),
+                    BotAiCredentialStatusS2C.UNAUTHORIZED, false, false);
+            return;
+        }
+        AIPlayerEntity bot = resolved.get();
+        boolean validSession = BotAiSetupSessions.INSTANCE.consume(
+                player.getUUID(),
+                bot.getUUID(),
+                bot.getGameProfile().getName(),
+                payload.nonce(),
+                player.getServer().getTickCount());
+        if (!validSession) {
+            sendCredentialStatus(player, bot.getGameProfile().getName(), payload.nonce(),
+                    BotAiCredentialStatusS2C.REQUEST_EXPIRED, false, false);
+            return;
+        }
+        bindAndProbe(player, bot, payload.apiKey(), payload.nonce(), false);
+    }
+
+    public void handleRestoreBotAiCredential(ServerPlayer player, RestoreBotAiCredentialC2S payload) {
+        Optional<AIPlayerEntity> resolved = BotAuthorizationGate.INSTANCE.resolveAuthorized(
+                player,
+                payload.botName(),
+                BotAuthorizationPolicy.Operation.ADMIN,
+                "network:restore_bot_ai_credential");
+        if (resolved.isEmpty()) {
+            sendCredentialStatus(player, payload.botName(), BotAiCredentialStatusS2C.NO_NONCE,
+                    BotAiCredentialStatusS2C.UNAUTHORIZED, false, false);
+            return;
+        }
+        bindAndProbe(
+                player,
+                resolved.get(),
+                payload.apiKey(),
+                BotAiCredentialStatusS2C.NO_NONCE,
+                true);
+    }
+
+    private void bindAndProbe(ServerPlayer player,
+                              AIPlayerEntity bot,
+                              String apiKey,
+                              UUID nonce,
+                              boolean restored) {
+        if (!allowCredentialAttempt(player, bot.getUUID())) {
+            sendCredentialStatus(player, bot.getGameProfile().getName(), nonce,
+                    BotAiCredentialStatusS2C.RATE_LIMITED, false, false);
+            return;
+        }
+
+        io.github.greytaiwolf.fakeaiplayer.brain.BotApiCredentialRegistry.CredentialUpdate update;
+        try {
+            update = BrainCoordinator.INSTANCE.stageBotApiKey(bot.getUUID(), apiKey);
+        } catch (IllegalArgumentException invalid) {
+            sendCredentialStatus(player, bot.getGameProfile().getName(), nonce,
+                    BotAiCredentialStatusS2C.INVALID_KEY, false, false);
+            return;
+        }
+        PendingCredentialActor pending = new PendingCredentialActor(
+                player.getUUID(),
+                update.generation(),
+                bot.getGameProfile().getName(),
+                nonce);
+        PendingCredentialActor displaced = pendingCredentialActors.put(bot.getUUID(), pending);
+        if (displaced != null && displaced.generation() != pending.generation()) {
+            notifyDisplacedPending(player.getServer(), displaced);
+        }
+
+        BotAiConnectionService.INSTANCE.verifyAndGreet(bot, update.generation(), result -> {
+            if (!pendingCredentialActors.remove(bot.getUUID(), pending)) {
+                return;
+            }
+            if (result.connected()) {
+                var committed = BrainCoordinator.INSTANCE.commitBotApiKey(
+                        bot.getUUID(), result.credentialGeneration());
+                if (!committed.changed()) {
+                    sendCredentialStatus(player, bot.getGameProfile().getName(), nonce,
+                            BotAiCredentialStatusS2C.REQUEST_EXPIRED, false, false);
+                    return;
+                }
+                credentialActors.put(bot.getUUID(), player.getUUID());
+                sendCredentialStatus(
+                        player,
+                        bot.getGameProfile().getName(),
+                        nonce,
+                        restored ? BotAiCredentialStatusS2C.RESTORED : BotAiCredentialStatusS2C.CONNECTED,
+                        true,
+                        false);
+                if (!result.greeting().isBlank()) {
+                    sendBotChat(bot, "bot", result.greeting());
+                }
+                return;
+            }
+
+            BrainCoordinator.INSTANCE.rejectBotApiKey(
+                    bot.getUUID(), result.credentialGeneration());
+            sendCredentialStatus(player, bot.getGameProfile().getName(), nonce,
+                    credentialFailureStatus(result.statusCode()), false, false);
+        });
+    }
+
+    private boolean allowCredentialAttempt(ServerPlayer player, UUID botId) {
+        int tick = player.getServer().getTickCount();
+        CredentialAttemptKey key = new CredentialAttemptKey(player.getUUID(), botId);
+        ArrayDeque<Integer> attempts = credentialAttempts.computeIfAbsent(
+                key, ignored -> new ArrayDeque<>());
+        synchronized (attempts) {
+            while (!attempts.isEmpty() && tick - attempts.peekFirst() > CREDENTIAL_ATTEMPT_WINDOW_TICKS) {
+                attempts.removeFirst();
+            }
+            if (attempts.size() >= MAX_CREDENTIAL_ATTEMPTS_PER_WINDOW) {
+                return false;
+            }
+            attempts.addLast(tick);
+            return true;
+        }
+    }
+
+    private void sendCredentialStatus(ServerPlayer player,
+                                      String botName,
+                                      UUID nonce,
+                                      String status,
+                                      boolean connected,
+                                      boolean forgetLocal) {
+        if (player == null || player.getServer() == null) {
+            return;
+        }
+        ServerPlayer online = player.getServer().getPlayerList().getPlayer(player.getUUID());
+        if (online != null && network.canSend(online, BotAiCredentialStatusS2C.ID)) {
+            network.send(online, new BotAiCredentialStatusS2C(
+                    PayloadLimits.truncate(botName, PayloadLimits.BOT_NAME_LENGTH),
+                    nonce,
+                    status,
+                    connected,
+                    forgetLocal));
+        }
+    }
+
+    private void notifyDisplacedPending(MinecraftServer server, PendingCredentialActor pending) {
+        if (server == null || pending == null) {
+            return;
+        }
+        ServerPlayer player = server.getPlayerList().getPlayer(pending.playerId());
+        if (player != null) {
+            sendCredentialStatus(player, pending.botName(), pending.nonce(),
+                    BotAiCredentialStatusS2C.BUSY, false, false);
+        }
+    }
+
+    private static String credentialFailureStatus(String code) {
+        return switch (code) {
+            case "auth_error" -> BotAiCredentialStatusS2C.INVALID_KEY;
+            case "rate_limited" -> BotAiCredentialStatusS2C.RATE_LIMITED;
+            case "busy" -> BotAiCredentialStatusS2C.BUSY;
+            default -> BotAiCredentialStatusS2C.PROVIDER_ERROR;
+        };
+    }
+
+    private record PendingCredentialActor(
+            UUID playerId,
+            long generation,
+            String botName,
+            UUID nonce
+    ) {
+    }
+
+    private record CredentialAttemptKey(UUID playerId, UUID botId) {
     }
 
     public void handleSubscribe(ServerPlayer player, SubscribeBotC2S payload) {

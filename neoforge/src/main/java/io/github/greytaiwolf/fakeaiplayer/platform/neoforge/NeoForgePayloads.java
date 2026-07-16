@@ -4,8 +4,12 @@ import io.github.greytaiwolf.fakeaiplayer.client.AIBotClientNetworking;
 import io.github.greytaiwolf.fakeaiplayer.building.preview.BuildingPreviewService;
 import io.github.greytaiwolf.fakeaiplayer.network.AIBotServerNetworking;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotChatS2C;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.BotAiCredentialStatusS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotCommandC2S;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.OpenBotAiSetupS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.OpenBotInventoryC2S;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.RestoreBotAiCredentialC2S;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.SetBotAiCredentialC2S;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotSnapshotS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotTeleportC2S;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.SetOptionC2S;
@@ -22,9 +26,8 @@ import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
 final class NeoForgePayloads {
-    // Version 3 replaces the direct item-move packet with the server-authoritative inventory
-    // menu protocol. Keep old clients/servers from silently negotiating incompatible channels.
-    private static final String PROTOCOL_VERSION = "3";
+    // Version 4 adds the client-local per-Bot credential setup/restore handshake.
+    private static final String PROTOCOL_VERSION = "4";
 
     private NeoForgePayloads() {
     }
@@ -53,6 +56,16 @@ final class NeoForgePayloads {
                 server.handleOpenInventory(player, payload);
             }
         });
+        registrar.playToServer(SetBotAiCredentialC2S.ID, SetBotAiCredentialC2S.CODEC, (payload, context) -> {
+            if (context.player() instanceof ServerPlayer player) {
+                server.handleSetBotAiCredential(player, payload);
+            }
+        });
+        registrar.playToServer(RestoreBotAiCredentialC2S.ID, RestoreBotAiCredentialC2S.CODEC, (payload, context) -> {
+            if (context.player() instanceof ServerPlayer player) {
+                server.handleRestoreBotAiCredential(player, payload);
+            }
+        });
         registrar.playToServer(BotTeleportC2S.ID, BotTeleportC2S.CODEC, (payload, context) -> {
             if (context.player() instanceof ServerPlayer player) {
                 server.handleTeleport(player, payload);
@@ -76,6 +89,10 @@ final class NeoForgePayloads {
         registrar.playToClient(BotSnapshotS2C.ID, BotSnapshotS2C.CODEC,
                 (payload, context) -> AIBotClientNetworking.handle(payload));
         registrar.playToClient(BotChatS2C.ID, BotChatS2C.CODEC,
+                (payload, context) -> AIBotClientNetworking.handle(payload));
+        registrar.playToClient(OpenBotAiSetupS2C.ID, OpenBotAiSetupS2C.CODEC,
+                (payload, context) -> AIBotClientNetworking.handle(payload));
+        registrar.playToClient(BotAiCredentialStatusS2C.ID, BotAiCredentialStatusS2C.CODEC,
                 (payload, context) -> AIBotClientNetworking.handle(payload));
         registrar.playToClient(BuildingPreviewBeginS2C.ID, BuildingPreviewBeginS2C.CODEC,
                 (payload, context) -> AIBotClientNetworking.handle(payload));

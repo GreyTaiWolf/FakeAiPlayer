@@ -16,8 +16,10 @@
 - 本地 dirty-worktree run 可以用于诊断，但必须是 `UNVERIFIED`，不能作为发布结论。
 - 新式 `VERIFIED` 能力基线只能由 `reports/baselines/index.tsv` 显式选择，不能按“最好”或“最新”自动挑选。
 - 当前模块住宅/建筑投影属于双加载器接线的未发布能力：服务端方案、分块传输、Fabric/NeoForge 客户端线框和人工确认已进入源码，但双加载器真实客户端与完整生存施工验收尚未完成。准确边界、命令和限制见 [AI 建筑系统设计基线](AI_BUILDING_SYSTEM.md)。
-- CI 静态门禁会从共享源码推导全部 C2S/S2C payload，检查两端注册，并验证建筑预览、原版式 Bot Menu、客户端 screen、断线清理、loader 元数据、共享类和资源均进入正确生产 JAR，防止后续更新再次只接入单一加载器。
-- 本地已用 Temurin Java 21.0.11 完成 Java 21 源码语法解析、纯生成器编译/12,800 组方案烟雾和静态门禁；历史同步提交 `dfb0ab8` 的 GitHub Actions 全矩阵通过 10 项 Fabric GameTest。当前源码已扩展到 47 个 JUnit 类、189 个 `@Test` 与 24 项 Fabric GameTest；最新结果必须以 PR #8 修复后的新 CI run 为准。
+- 每 Bot API Key 通过 `/fakeaiplayer ai setup <name>` 的遮罩客户端 UI 提交；验证成功后才明文写入当前玩家的 `config/fakeaiplayer-client.json`（POSIX 尽量 `0600`）。服务端只在会话内存持有玩家 Key，新 Key 的失败验证不会替换旧 Key。该文件不加密，客户端本机和服务器管理边界必须信任。
+- Bot 普通回复和连接成功后的可选问候会以 `[AI] <Bot>` 进入 owner-only 主聊天；不向附近玩家/全服广播。主动问候不开放工具，不能自行启动任务；新任务需 owner/已授权 OP 明确输入，既有生存危险接管例外保留。
+- CI 静态门禁会从共享源码推导全部 C2S/S2C payload，检查 Fabric/NeoForge 双端注册，并专项验证凭据 nonce、pending/commit/reject、secret 脱敏、客户端明文文件权限、owner-only 聊天、建筑预览、Bot Menu、断线清理和生产 JAR 内容，防止后续更新只接入单一加载器。NeoForge 协议版本为 `4`。
+- 本地已用 Temurin Java 21.0.11 完成 Java 21 源码语法解析、纯生成器编译/12,800 组方案烟雾和静态门禁；历史同步提交 `dfb0ab8` 的 GitHub Actions 全矩阵通过 10 项 Fabric GameTest。当前源码清单为 59 个 JUnit 类、228 个 `@Test` 与 24 项 Fabric GameTest；最新通过结论必须以本次提交的新 CI run 为准。
 
 建筑能力当前应读作以下链路，而不是“AI 可以任意造房子”：
 

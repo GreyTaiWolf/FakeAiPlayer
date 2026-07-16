@@ -15,6 +15,20 @@ required_files=(
   common/src/main/java/io/github/greytaiwolf/fakeaiplayer/inventory/BotInventoryMenu.java
   common/src/main/java/io/github/greytaiwolf/fakeaiplayer/inventory/BotInventorySessionManager.java
   common/src/main/java/io/github/greytaiwolf/fakeaiplayer/network/payload/OpenBotInventoryC2S.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotAiSubcommand.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/brain/BotApiCredentialRegistry.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/brain/BotAiConnectionService.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/brain/LatestPerBotExecutor.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/brain/chat/BotChatRouter.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/brain/social/BotSocialCoordinator.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/client/credential/ClientCredentialStore.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/client/credential/ClientCredentialManager.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/client/screen/BotAiSetupScreen.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/network/BotAiSetupSessions.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/network/payload/SetBotAiCredentialC2S.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/network/payload/RestoreBotAiCredentialC2S.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/network/payload/OpenBotAiSetupS2C.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/network/payload/BotAiCredentialStatusS2C.java
   fabric/build.gradle
   neoforge/build.gradle
   fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FabricMenuRegistry.java
@@ -71,7 +85,7 @@ if find common/src/main fabric/src/main neoforge/src/main -type f \
     \( -iname '*gametest*.java' -o -path '*/gametest/*' \) -print -quit | grep -q .; then
   fail 'GameTest implementation leaked into the production source set'
 fi
-if grep -RqE 'AIBot(Test|Verify)Subcommand|literal\("(test|verify)"\)' \
+if grep -RqE 'AIBot(Test|Verify)Subcommand' \
     common/src/main/java fabric/src/main/java neoforge/src/main/java; then
   fail 'production command graph references a verification harness'
 fi
@@ -118,10 +132,10 @@ for payload in "${s2c_payloads[@]}"; do
     || fail "NeoForge is missing S2C registration/handler: $payload"
 done
 
-# Protocol v3 replaces direct item moves with a server-authoritative vanilla Menu. Check the full
-# loader edge: type/handler, menu registration, client screen and disconnect lease cleanup.
-grep -Fq 'PROTOCOL_VERSION = "3"' "$neoforge_payloads" \
-  || fail 'NeoForge inventory protocol version was not bumped to 3'
+# Protocol v4 retains the server-authoritative vanilla Menu and adds the per-Bot credential
+# handshake. Check the inventory edge here; the credential-specific invariants follow below.
+grep -Fq 'PROTOCOL_VERSION = "4"' "$neoforge_payloads" \
+  || fail 'NeoForge protocol version was not bumped to 4'
 for payloads in "$fabric_payloads" "$neoforge_payloads"; do
   grep -Fq 'OpenBotInventoryC2S.ID' "$payloads" \
     || fail "$payloads is missing OpenBotInventoryC2S"
@@ -144,6 +158,98 @@ grep -Fq 'BotInventorySessionManager.INSTANCE.onViewerDisconnect(handler.player)
   || fail 'Fabric does not release bot inventory sessions on disconnect'
 grep -Fq 'BotInventorySessionManager.INSTANCE.onViewerDisconnect(player)' "$neoforge_events" \
   || fail 'NeoForge does not release bot inventory sessions on disconnect'
+
+# Per-Bot credentials are client-persisted plaintext by explicit product choice, but activation is
+# server-authoritative and two-phase: stage -> no-tool probe -> commit/reject. Keep the safety and
+# dual-loader edges explicit in addition to the generic payload parity catalog above.
+credential_registry=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/brain/BotApiCredentialRegistry.java
+connection_service=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/brain/BotAiConnectionService.java
+server_networking=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/network/AIBotServerNetworking.java
+setup_sessions=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/network/BotAiSetupSessions.java
+client_store=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/client/credential/ClientCredentialStore.java
+client_manager=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/client/credential/ClientCredentialManager.java
+setup_screen=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/client/screen/BotAiSetupScreen.java
+chat_router=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/brain/chat/BotChatRouter.java
+social_coordinator=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/brain/social/BotSocialCoordinator.java
+
+grep -Fq '.then(AIBotAiSubcommand.build())' \
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotCommand.java \
+  || fail 'per-Bot AI credential commands are not attached to the production command tree'
+for invariant in 'literal("setup")' 'literal("status")' 'literal("test")' 'literal("disconnect")'; do
+  grep -Fq "$invariant" common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotAiSubcommand.java \
+    || fail "per-Bot AI credential command is missing: $invariant"
+done
+
+credential_c2s=(SetBotAiCredentialC2S RestoreBotAiCredentialC2S)
+credential_s2c=(OpenBotAiSetupS2C BotAiCredentialStatusS2C)
+for payload in "${credential_c2s[@]}"; do
+  grep -Fq "playC2S().register(${payload}.ID" "$fabric_payloads" \
+    || fail "Fabric is missing credential C2S type registration: $payload"
+  grep -Fq "registerGlobalReceiver(${payload}.ID" "$fabric_payloads" \
+    || fail "Fabric is missing credential C2S receiver: $payload"
+  grep -Fq "playToServer(${payload}.ID" "$neoforge_payloads" \
+    || fail "NeoForge is missing credential C2S handler: $payload"
+done
+for payload in "${credential_s2c[@]}"; do
+  grep -Fq "playS2C().register(${payload}.ID" "$fabric_payloads" \
+    || fail "Fabric is missing credential S2C type registration: $payload"
+  grep -Fq "registerGlobalReceiver(${payload}.ID" "$fabric_client" \
+    || fail "Fabric is missing credential S2C client receiver: $payload"
+  grep -Fq "playToClient(${payload}.ID" "$neoforge_payloads" \
+    || fail "NeoForge is missing credential S2C client handler: $payload"
+done
+for handler in handleSetBotAiCredential handleRestoreBotAiCredential; do
+  grep -Fq "$handler" "$fabric_payloads" \
+    || fail "Fabric is missing credential server handler: $handler"
+  grep -Fq "$handler" "$neoforge_payloads" \
+    || fail "NeoForge is missing credential server handler: $handler"
+done
+
+for invariant in 'stageBotApiKey(' 'commitBotApiKey(' 'rejectBotApiKey('; do
+  grep -Fq "$invariant" "$server_networking" \
+    || fail "credential network flow is missing two-phase transition: $invariant"
+done
+if grep -Fq 'setBotApiKey(' "$server_networking"; then
+  fail 'credential network flow activates an unverified key before the provider probe'
+fi
+for invariant in 'clientForProbe(' 'List.of()' 'This turn has no tools'; do
+  grep -Fq "$invariant" "$connection_service" \
+    || fail "credential probe is missing no-tool/staged invariant: $invariant"
+done
+for invariant in 'pendingApiKey' 'pendingGeneration' 'commit(UUID botId' 'reject(UUID botId'; do
+  grep -Fq "$invariant" "$credential_registry" \
+    || fail "credential registry is missing staged replacement invariant: $invariant"
+done
+for invariant in 'consume(' 'clearAll()'; do
+  grep -Fq "$invariant" "$setup_sessions" \
+    || fail "credential setup nonce lifecycle is missing: $invariant"
+done
+
+for payload in SetBotAiCredentialC2S RestoreBotAiCredentialC2S; do
+  payload_file="$payload_dir/${payload}.java"
+  grep -Fq 'apiKey=<redacted>' "$payload_file" \
+    || fail "$payload does not redact its secret-bearing toString()"
+done
+for invariant in 'FILE_NAME = "fakeaiplayer-client.json"' 'OWNER_ONLY' 'ATOMIC_MOVE' 'applyOwnerOnlyPermissions'; do
+  grep -Fq "$invariant" "$client_store" \
+    || fail "client credential store is missing plaintext-file safety invariant: $invariant"
+done
+grep -Fq 'RestoreBotAiCredentialC2S' "$client_manager" \
+  || fail 'saved client credentials are not restored on the matching connection scope'
+for invariant in 'setFormatter(' 'GLFW.GLFW_KEY_C' 'GLFW.GLFW_KEY_X' \
+    'payload.connected() && !pendingKey.isBlank()'; do
+  grep -Fq "$invariant" "$setup_screen" \
+    || fail "masked credential screen is missing safety invariant: $invariant"
+done
+
+grep -Fq 'BotChatRouter.INSTANCE.route' "$server_networking" \
+  || fail 'bot output does not pass through the owner-only chat router'
+for invariant in 'getPlayer(ownerId)' 'sendSystemMessage' '"[AI] <"'; do
+  grep -Fq "$invariant" "$chat_router" \
+    || fail "owner-only chat router is missing invariant: $invariant"
+done
+grep -Fq 'BotSocialRequest.withoutTools' "$social_coordinator" \
+  || fail 'proactive social turns are not constrained to the no-tool request type'
 
 # Building preview has additional lifecycle, render and explicit-confirmation invariants beyond
 # the generic payload catalog.

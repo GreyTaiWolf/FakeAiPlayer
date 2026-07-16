@@ -19,6 +19,9 @@ public final class PayloadLimits {
 
     public static final int ROLE_LENGTH = 32;
     public static final int CHAT_TEXT_LENGTH = 8_192;
+    /** DeepSeek-compatible bearer token. Kept deliberately below Minecraft's generic UTF cap. */
+    public static final int API_KEY_LENGTH = 512;
+    public static final int CREDENTIAL_STATUS_LENGTH = 64;
 
     public static final int TASK_NAME_LENGTH = 128;
     public static final int TASK_STATE_LENGTH = 64;
@@ -70,6 +73,21 @@ public final class PayloadLimits {
 
     public static boolean validBotName(String value) {
         return value != null && !value.isBlank() && value.length() <= BOT_NAME_LENGTH;
+    }
+
+    public static boolean validApiKey(String value) {
+        if (value == null || value.isBlank() || value.length() > API_KEY_LENGTH) {
+            return false;
+        }
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            // Bearer tokens are visible ASCII. This also excludes whitespace, CR/LF and
+            // surrogate pairs before they can reach an HTTP Authorization header.
+            if (character < 0x21 || character > 0x7e) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public static void requireUtf(String value, int maximumLength, String field) {

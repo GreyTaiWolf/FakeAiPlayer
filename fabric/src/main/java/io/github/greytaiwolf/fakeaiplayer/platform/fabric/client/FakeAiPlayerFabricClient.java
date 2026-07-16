@@ -9,7 +9,9 @@ import io.github.greytaiwolf.fakeaiplayer.client.screen.BotInventoryScreen;
 import io.github.greytaiwolf.fakeaiplayer.inventory.BotMenuTypes;
 import net.minecraft.client.gui.screens.MenuScreens;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotChatS2C;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.BotAiCredentialStatusS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BotSnapshotS2C;
+import io.github.greytaiwolf.fakeaiplayer.network.payload.OpenBotAiSetupS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BuildingPreviewBeginS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BuildingPreviewChunkS2C;
 import io.github.greytaiwolf.fakeaiplayer.network.payload.BuildingPreviewClearS2C;
@@ -32,6 +34,10 @@ public final class FakeAiPlayerFabricClient implements ClientModInitializer {
         ClientPlayNetworking.registerGlobalReceiver(BotSnapshotS2C.ID, (payload, context) ->
                 context.client().execute(() -> AIBotClientNetworking.handle(payload)));
         ClientPlayNetworking.registerGlobalReceiver(BotChatS2C.ID, (payload, context) ->
+                context.client().execute(() -> AIBotClientNetworking.handle(payload)));
+        ClientPlayNetworking.registerGlobalReceiver(OpenBotAiSetupS2C.ID, (payload, context) ->
+                context.client().execute(() -> AIBotClientNetworking.handle(payload)));
+        ClientPlayNetworking.registerGlobalReceiver(BotAiCredentialStatusS2C.ID, (payload, context) ->
                 context.client().execute(() -> AIBotClientNetworking.handle(payload)));
         ClientPlayNetworking.registerGlobalReceiver(BuildingPreviewBeginS2C.ID, (payload, context) ->
                 context.client().execute(() -> AIBotClientNetworking.handle(payload)));

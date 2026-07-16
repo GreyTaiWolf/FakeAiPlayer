@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -47,9 +48,10 @@ public final class BrainCoordinator {
         if (executor != null) {
             executor.shutdown();
         }
+        BotApiCredentialRegistry.INSTANCE.configure(config.deepseek());
         toolRegistry = new ToolRegistry();
         dispatcher = new ActionDispatcher(toolRegistry);
-        executor = new AsyncDecisionExecutor(new DeepSeekApiClient(config.deepseek()));
+        executor = new AsyncDecisionExecutor(BotApiCredentialRegistry.INSTANCE);
     }
 
     public boolean handleMessage(AIPlayerEntity bot, String senderName, String text) {
@@ -262,6 +264,83 @@ public final class BrainCoordinator {
         return true;
     }
 
+    /**
+     * Installs a session-only bot credential and invalidates work issued with an older key.
+     * The returned value is redacted and safe for a status payload.
+     */
+    public BotApiCredentialRegistry.CredentialUpdate setBotApiKey(UUID botId, String apiKey) {
+        BotApiCredentialRegistry.CredentialUpdate update =
+                BotApiCredentialRegistry.INSTANCE.bind(botId, apiKey);
+        if (update.changed()) {
+            onBotCredentialChanged(botId, update.generation());
+        }
+        return update;
+    }
+
+    /** Stages an unverified key; the normal brain continues using its prior active credential. */
+    public BotApiCredentialRegistry.CredentialUpdate stageBotApiKey(UUID botId, String apiKey) {
+        BotApiCredentialRegistry.CredentialUpdate update =
+                BotApiCredentialRegistry.INSTANCE.stage(botId, apiKey);
+        onBotCredentialChanged(botId, update.generation());
+        return update;
+    }
+
+    /** Activates exactly the staged generation that completed a successful no-tool probe. */
+    public BotApiCredentialRegistry.CredentialUpdate commitBotApiKey(UUID botId, long generation) {
+        BotApiCredentialRegistry.CredentialUpdate update =
+                BotApiCredentialRegistry.INSTANCE.commit(botId, generation);
+        if (update.changed()) {
+            onBotCredentialChanged(botId, update.generation());
+        }
+        return update;
+    }
+
+    /** Rejects exactly the failed staged generation and preserves the prior active credential. */
+    public BotApiCredentialRegistry.CredentialUpdate rejectBotApiKey(UUID botId, long generation) {
+        BotApiCredentialRegistry.CredentialUpdate update =
+                BotApiCredentialRegistry.INSTANCE.reject(botId, generation);
+        if (update.changed()) {
+            onBotCredentialChanged(botId, update.generation());
+        }
+        return update;
+    }
+
+    /** Removes a session-only bot credential and safely falls back to the server key, if any. */
+    public BotApiCredentialRegistry.CredentialUpdate revokeBotApiKey(UUID botId) {
+        BotApiCredentialRegistry.CredentialUpdate update =
+                BotApiCredentialRegistry.INSTANCE.revoke(botId);
+        if (update.changed()) {
+            onBotCredentialChanged(botId, update.generation());
+        }
+        return update;
+    }
+
+    public BotApiCredentialRegistry.CredentialState botApiCredentialStatus(UUID botId) {
+        return BotApiCredentialRegistry.INSTANCE.status(botId);
+    }
+
+    /**
+     * Public invalidation hook for credential payload handlers. It contains no secret and makes
+     * every callback from an older credential lease fail closed.
+     */
+    public boolean onBotCredentialChanged(UUID botId, long credentialGeneration) {
+        Objects.requireNonNull(botId, "botId");
+        boolean pendingDiscarded = executor != null && executor.discardPending(botId);
+        BotConversation conversation = conversations.get(botId);
+        boolean decisionInvalidated = invalidateCredentialDecision(
+                conversation == null ? null : conversation.decision);
+        BotLog.commSystem("bot_api_credential_changed",
+                "bot_uuid", botId,
+                "generation", credentialGeneration,
+                "decision_invalidated", decisionInvalidated,
+                "pending_discarded", pendingDiscarded);
+        return decisionInvalidated || pendingDiscarded;
+    }
+
+    static boolean invalidateCredentialDecision(DecisionSession decision) {
+        return decision != null && decision.invalidateIfBusy();
+    }
+
     public boolean clearIntentWakeSources(AIPlayerEntity bot) {
         boolean awaitingCleared = awaitingTask.remove(bot.getUUID()) != null;
         boolean wakeTickCleared = nextGoalWakeTick.remove(bot.getUUID()) != null;
@@ -377,6 +456,7 @@ public final class BrainCoordinator {
         nextGoalWakeTick.clear();
         awaitingTask.clear();
         awaitingExternalConfirmation.clear();
+        BotApiCredentialRegistry.INSTANCE.clearSession();
     }
 
     public BrainStatus status(AIPlayerEntity bot) {
