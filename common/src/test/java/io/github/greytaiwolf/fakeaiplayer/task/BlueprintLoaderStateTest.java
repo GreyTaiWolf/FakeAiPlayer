@@ -107,14 +107,14 @@ class BlueprintLoaderStateTest {
         BlueprintSchema.Op fullVolume = new BlueprintSchema.Op(
                 "fill",
                 new int[]{0, 0, 0},
-                new int[]{15, 15, 15},
+                new int[]{127, 3, 127},
                 "minecraft:oak_planks",
                 null);
         BlueprintSchema source = new BlueprintSchema(
                 "overlapping_work",
-                16,
-                16,
-                16,
+                128,
+                4,
+                128,
                 List.of(),
                 List.of(fullVolume, fullVolume, fullVolume, fullVolume, fullVolume));
 

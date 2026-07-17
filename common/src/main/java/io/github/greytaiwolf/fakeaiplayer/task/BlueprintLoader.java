@@ -329,6 +329,10 @@ public final class BlueprintLoader {
                 if (expansionWork > MAX_EXPANSION_WORK) {
                     throw new IOException("blueprint_expansion_work_too_large: " + expansionWork);
                 }
+            }
+            // Validate the complete operation budget before allocating any expanded cells. This
+            // keeps a knowingly over-budget, heavily overlapping program cheap to reject.
+            for (BlueprintSchema.Op op : schema.ops()) {
                 for (BlueprintSchema.BlockPlacement placement : expandOp(op)) {
                     put(placements, placement);
                 }
