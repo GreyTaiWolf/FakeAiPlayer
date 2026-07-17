@@ -74,8 +74,8 @@ public final class AIBotServerNetworking {
     private final Map<CredentialAttemptKey, ArrayDeque<Integer>> credentialAttempts = new ConcurrentHashMap<>();
     private volatile ServerNetworkTransport network = new ServerNetworkTransport() {
         @Override
-        public boolean canSend(ServerPlayer player,
-                               net.minecraft.network.protocol.common.custom.CustomPacketPayload.Type<?> type) {
+        public boolean canSendToClient(ServerPlayer player,
+                                       net.minecraft.network.protocol.common.custom.CustomPacketPayload.Type<?> type) {
             return false;
         }
 
@@ -138,7 +138,7 @@ public final class AIBotServerNetworking {
                 subscriptions.remove(entry.getKey(), entry.getValue());
                 continue;
             }
-            if (network.canSend(viewer, BotSnapshotS2C.ID)) {
+            if (network.canSendToClient(viewer, BotSnapshotS2C.ID)) {
                 network.send(viewer, snapshot(bot.get()));
             }
         }
@@ -188,7 +188,7 @@ public final class AIBotServerNetworking {
                 subscriptions.remove(entry.getKey(), entry.getValue());
                 continue;
             }
-            if (network.canSend(viewer, BotChatS2C.ID)) {
+            if (network.canSendToClient(viewer, BotChatS2C.ID)) {
                 network.send(viewer, new BotChatS2C(
                         PayloadLimits.truncate(bot.getGameProfile().getName(), PayloadLimits.BOT_NAME_LENGTH),
                         PayloadLimits.truncate(role, PayloadLimits.ROLE_LENGTH),
@@ -199,7 +199,7 @@ public final class AIBotServerNetworking {
 
     /** Issues a short-lived setup nonce and opens the masked client credential screen. */
     public boolean beginBotAiSetup(ServerPlayer player, AIPlayerEntity bot) {
-        if (!network.canSend(player, OpenBotAiSetupS2C.ID)) {
+        if (!network.canSendToClient(player, OpenBotAiSetupS2C.ID)) {
             return false;
         }
         UUID nonce = BotAiSetupSessions.INSTANCE.create(
@@ -367,7 +367,7 @@ public final class AIBotServerNetworking {
             return;
         }
         ServerPlayer online = player.getServer().getPlayerList().getPlayer(player.getUUID());
-        if (online != null && network.canSend(online, BotAiCredentialStatusS2C.ID)) {
+        if (online != null && network.canSendToClient(online, BotAiCredentialStatusS2C.ID)) {
             network.send(online, new BotAiCredentialStatusS2C(
                     PayloadLimits.truncate(botName, PayloadLimits.BOT_NAME_LENGTH),
                     nonce,
@@ -427,7 +427,7 @@ public final class AIBotServerNetworking {
         }
         AIPlayerEntity target = bot.get();
         subscriptions.put(player.getUUID(), target.getUUID());
-        if (network.canSend(player, BotSnapshotS2C.ID)) {
+        if (network.canSendToClient(player, BotSnapshotS2C.ID)) {
             network.send(player, snapshot(target));
         }
         sendSystem(player, target.getGameProfile().getName(), "已订阅 " + target.getGameProfile().getName());
@@ -665,7 +665,7 @@ public final class AIBotServerNetworking {
     }
 
     private void sendSystem(ServerPlayer player, String botName, String text) {
-        if (network.canSend(player, BotChatS2C.ID)) {
+        if (network.canSendToClient(player, BotChatS2C.ID)) {
             network.send(player, new BotChatS2C(
                     PayloadLimits.truncate(botName, PayloadLimits.BOT_NAME_LENGTH),
                     "system",

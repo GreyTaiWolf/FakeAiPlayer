@@ -90,6 +90,27 @@ class BlueprintGeneratedPersistenceTest {
     }
 
     @Test
+    void canonicalDigestBindsPersistedExternalSupportContract() throws Exception {
+        BlueprintSchema.BlockPlacement legacy = new BlueprintSchema.BlockPlacement(
+                0, 1, 0, "minecraft:cobblestone", null, java.util.Map.of(),
+                io.github.greytaiwolf.fakeaiplayer.building.plan.CellOperation.PLACE,
+                io.github.greytaiwolf.fakeaiplayer.building.plan.ReplacePolicy.REQUIRE_EMPTY,
+                "", 0, List.of());
+        BlueprintSchema.BlockPlacement supported = new BlueprintSchema.BlockPlacement(
+                0, 1, 0, "minecraft:cobblestone", null, java.util.Map.of(),
+                io.github.greytaiwolf.fakeaiplayer.building.plan.CellOperation.PLACE,
+                io.github.greytaiwolf.fakeaiplayer.building.plan.ReplacePolicy.REQUIRE_EMPTY,
+                "", 0, List.of(), true);
+        BlueprintSchema legacySchema = new BlueprintSchema(
+                "support", 1, 2, 1, List.of(legacy), List.of());
+        BlueprintSchema supportedSchema = new BlueprintSchema(
+                "support", 1, 2, 1, List.of(supported), List.of());
+
+        assertNotEquals(BlueprintLoader.canonicalDigest(legacySchema),
+                BlueprintLoader.canonicalDigest(supportedSchema));
+    }
+
+    @Test
     void confirmedBuildTaskFreezesTheVerifiedProgramAtItsConstructorBoundary() throws Exception {
         List<BlueprintSchema.BlockPlacement> mutablePlacements = new ArrayList<>();
         mutablePlacements.add(new BlueprintSchema.BlockPlacement(

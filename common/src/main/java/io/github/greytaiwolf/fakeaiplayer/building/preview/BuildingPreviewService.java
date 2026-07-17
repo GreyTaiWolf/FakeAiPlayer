@@ -4,12 +4,12 @@ import io.github.greytaiwolf.fakeaiplayer.auth.BotAuthorizationGate;
 import io.github.greytaiwolf.fakeaiplayer.auth.BotAuthorizationPolicy;
 import io.github.greytaiwolf.fakeaiplayer.building.plan.BlockStateResolver;
 import io.github.greytaiwolf.fakeaiplayer.building.plan.BlockStateSpec;
-import io.github.greytaiwolf.fakeaiplayer.building.plan.BuildPhase;
 import io.github.greytaiwolf.fakeaiplayer.building.plan.BuildingPlan;
 import io.github.greytaiwolf.fakeaiplayer.building.plan.BuildingPlanBlueprintAdapter;
 import io.github.greytaiwolf.fakeaiplayer.building.plan.BuildingPlanFingerprint;
 import io.github.greytaiwolf.fakeaiplayer.building.plan.BuildingPlanOrder;
 import io.github.greytaiwolf.fakeaiplayer.building.plan.BuildingPlanValidator;
+import io.github.greytaiwolf.fakeaiplayer.building.plan.BuildingSupportContract;
 import io.github.greytaiwolf.fakeaiplayer.building.plan.CellOperation;
 import io.github.greytaiwolf.fakeaiplayer.building.plan.PlanPlacement;
 import io.github.greytaiwolf.fakeaiplayer.building.plan.PlanTransform;
@@ -36,6 +36,7 @@ import io.github.greytaiwolf.fakeaiplayer.task.BlueprintLoader;
 import io.github.greytaiwolf.fakeaiplayer.task.BlueprintSchema;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -64,9 +65,18 @@ public final class BuildingPreviewService {
     private static final int SESSION_TTL_TICKS = 20 * 300;
     private static final double MAX_CONFIRM_DISTANCE_SQUARED = 128.0D * 128.0D;
     private static final int CHUNK_SIZE = PayloadLimits.MAX_PREVIEW_CHUNK_CELLS;
+    private static final int MAX_TRANSFER_CHUNKS_PER_TICK = 8;
+    private static final int MAX_CONFIRM_VALIDATION_CELLS_PER_VIEWER_TICK = 1_024;
+    private static final int MAX_CONFIRM_VALIDATION_CELLS_GLOBAL_TICK = 4_096;
+    private static final int CONFIRM_RETRY_COOLDOWN_TICKS = 100;
     private static final int MAX_REPORTED_CONFLICTS = 8;
 
     private final Map<UUID, Session> sessionsByViewer = new ConcurrentHashMap<>();
+    private final Map<UUID, BuildingPreviewTransfer> transfersByViewer = new ConcurrentHashMap<>();
+    private final Map<UUID, ConfirmationValidation> confirmationsByViewer = new ConcurrentHashMap<>();
+    private final Map<UUID, ConfirmationAttemptWindow> confirmationAttemptsByViewer =
+            new ConcurrentHashMap<>();
+    private int confirmationFairCursor;
     private volatile ServerNetworkTransport network = NoNetwork.INSTANCE;
 
     private BuildingPreviewService() {
@@ -156,13 +166,17 @@ public final class BuildingPreviewService {
             return OpenResult.failed("投影网络编码超出安全限制: " + exception.getMessage());
         }
         Session previous = sessionsByViewer.put(viewer.getUUID(), session);
+        confirmationsByViewer.remove(viewer.getUUID());
+        confirmationAttemptsByViewer.remove(viewer.getUUID());
         if (previous != null) {
+            cancelTransfer(viewer.getUUID(), previous.sessionId());
             releaseExternalWaitIfNoSession(previous);
             sendClear(viewer, previous.sessionId(), "replaced");
         }
         try {
             publish(viewer, bot, session);
         } catch (RuntimeException exception) {
+            cancelTransfer(viewer.getUUID(), session.sessionId());
             if (sessionsByViewer.remove(viewer.getUUID(), session)) {
                 releaseExternalWaitIfNoSession(session);
             }
@@ -184,7 +198,7 @@ public final class BuildingPreviewService {
         if (session.acknowledgedTransformRevision() != session.transformRevision()) {
             return ConfirmResult.failed("客户端尚未完整显示当前投影，请稍候或使用投影确认按键。");
         }
-        return confirm(player, session, IntentController.ControlOrigin.PLAYER_COMMAND);
+        return requestConfirmation(player, session, IntentController.ControlOrigin.PLAYER_COMMAND);
     }
 
     public void handleReady(ServerPlayer player, BuildingPreviewReadyC2S payload) {
@@ -193,6 +207,13 @@ public final class BuildingPreviewService {
                 || !current.sessionId().equals(payload.sessionId())
                 || !current.previewHash().equals(payload.previewHash())
                 || current.transformRevision() != payload.transformRevision()) {
+            return;
+        }
+        BuildingPreviewTransfer transfer = transfersByViewer.get(player.getUUID());
+        if (transfer != null && transfer.matches(
+                payload.sessionId(), payload.previewHash(), payload.transformRevision())) {
+            // A Ready received before the authoritative Commit cannot acknowledge a partial
+            // staging buffer, even if a modified client guesses the tuple from Begin.
             return;
         }
         Session acknowledged = new Session(
@@ -215,7 +236,7 @@ public final class BuildingPreviewService {
         if (session.acknowledgedTransformRevision() != session.transformRevision()) {
             return fail(player, "客户端尚未完成当前投影的摘要校验，请等待投影完全显示后再确认。");
         }
-        return confirm(player, session, IntentController.ControlOrigin.PLAYER_PANEL);
+        return requestConfirmation(player, session, IntentController.ControlOrigin.PLAYER_PANEL);
     }
 
     public boolean cancelLatest(ServerPlayer player, String reason) {
@@ -223,6 +244,9 @@ public final class BuildingPreviewService {
         if (session == null) {
             return false;
         }
+        cancelTransfer(player.getUUID(), session.sessionId());
+        confirmationsByViewer.remove(player.getUUID());
+        confirmationAttemptsByViewer.remove(player.getUUID());
         releaseExternalWaitIfNoSession(session);
         sendClear(player, session.sessionId(), reason == null ? "cancelled" : reason);
         return true;
@@ -258,6 +282,9 @@ public final class BuildingPreviewService {
         if (session == null) {
             return UpdateResult.failed("没有可移动的建筑投影。");
         }
+        if (isSiteLocked(session.plan())) {
+            return UpdateResult.failed("该方案已绑定地形调查坐标，不能移动；请在新位置重新调查并生成。");
+        }
         return update(player, session, anchor.immutable(), session.transform());
     }
 
@@ -265,6 +292,9 @@ public final class BuildingPreviewService {
         Session session = sessionsByViewer.get(player.getUUID());
         if (session == null) {
             return UpdateResult.failed("没有可旋转的建筑投影。");
+        }
+        if (isSiteLocked(session.plan())) {
+            return UpdateResult.failed("该方案已绑定地形调查坐标，不能旋转；请按新朝向重新调查并生成。");
         }
         PlanTransform transform = new PlanTransform(session.transform().mirror(), rotation);
         int oldWidth = session.prepared().width();
@@ -286,6 +316,9 @@ public final class BuildingPreviewService {
                 continue;
             }
             if (sessionsByViewer.remove(entry.getKey(), session)) {
+                cancelTransfer(entry.getKey(), session.sessionId());
+                confirmationsByViewer.remove(entry.getKey());
+                confirmationAttemptsByViewer.remove(entry.getKey());
                 releaseExternalWaitIfNoSession(session);
                 ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
                 if (player != null) {
@@ -294,10 +327,15 @@ public final class BuildingPreviewService {
                 }
             }
         }
+        tickTransfers(server);
+        tickConfirmations(server);
     }
 
     public void onDisconnect(ServerPlayer player) {
         Session removed = sessionsByViewer.remove(player.getUUID());
+        transfersByViewer.remove(player.getUUID());
+        confirmationsByViewer.remove(player.getUUID());
+        confirmationAttemptsByViewer.remove(player.getUUID());
         if (removed != null) {
             releaseExternalWaitIfNoSession(removed);
         }
@@ -306,6 +344,10 @@ public final class BuildingPreviewService {
     public void clear(MinecraftServer server) {
         List<Map.Entry<UUID, Session>> removed = List.copyOf(sessionsByViewer.entrySet());
         sessionsByViewer.clear();
+        transfersByViewer.clear();
+        confirmationsByViewer.clear();
+        confirmationAttemptsByViewer.clear();
+        confirmationFairCursor = 0;
         for (Map.Entry<UUID, Session> entry : removed) {
             releaseExternalWaitIfNoSession(entry.getValue());
             ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
@@ -315,9 +357,9 @@ public final class BuildingPreviewService {
         }
     }
 
-    private ConfirmResult confirm(ServerPlayer player,
-                                  Session session,
-                                  IntentController.ControlOrigin controlOrigin) {
+    private ConfirmResult requestConfirmation(ServerPlayer player,
+                                              Session session,
+                                              IntentController.ControlOrigin controlOrigin) {
         MinecraftServer server = player.getServer();
         if (server.getTickCount() > session.expiresAtTick()) {
             return rejectAndClear(player, session, "建筑投影已过期，请重新生成。");
@@ -339,6 +381,60 @@ public final class BuildingPreviewService {
         if (player.distanceToSqr(Vec3.atCenterOf(session.anchor())) > MAX_CONFIRM_DISTANCE_SQUARED) {
             return fail(player, "距离建筑锚点超过 128 格。");
         }
+
+        UUID viewerId = player.getUUID();
+        ConfirmationValidation active = confirmationsByViewer.get(viewerId);
+        if (active != null && active.matches(session)) {
+            return ConfirmResult.accepted("建筑确认校验正在分批进行，请稍候。");
+        }
+        int now = server.getTickCount();
+        ConfirmationAttemptWindow attempt = confirmationAttemptsByViewer.get(viewerId);
+        if (attempt != null && attempt.sessionId().equals(session.sessionId())
+                && now < attempt.nextAllowedTick()) {
+            // Do not emit a chat line for every repeated C2S packet. The first accepted request
+            // already tells the player that validation is in progress.
+            return ConfirmResult.failed("建筑确认重试过快，请稍候。");
+        }
+        ConfirmationValidation validation = new ConfirmationValidation(session, controlOrigin);
+        confirmationsByViewer.put(viewerId, validation);
+        confirmationAttemptsByViewer.put(viewerId, new ConfirmationAttemptWindow(
+                session.sessionId(), now + CONFIRM_RETRY_COOLDOWN_TICKS));
+        String message = "已开始分批校验建筑投影；校验期间不会修改世界。";
+        player.sendSystemMessage(Component.literal("[FakeAiPlayer] " + message));
+        return ConfirmResult.accepted(message);
+    }
+
+    private ConfirmResult finishConfirmation(ServerPlayer player,
+                                             Session session,
+                                             IntentController.ControlOrigin controlOrigin,
+                                             WorldValidation worldValidation) {
+        if (sessionsByViewer.get(player.getUUID()) != session) {
+            return ConfirmResult.failed("建筑投影已变化，已丢弃旧校验结果。");
+        }
+        MinecraftServer server = player.getServer();
+        if (server.getTickCount() > session.expiresAtTick()) {
+            return rejectAndClear(player, session, "建筑投影已过期，请重新生成。");
+        }
+        Optional<AIPlayerEntity> botOptional = AIPlayerManager.INSTANCE.getByUuid(session.botId());
+        if (botOptional.isEmpty()) {
+            return fail(player, "Bot 已离线；投影会保留到过期，Bot 上线后可重试。");
+        }
+        AIPlayerEntity bot = botOptional.get();
+        if (!BotAuthorizationGate.INSTANCE.authorize(
+                player, bot, BotAuthorizationPolicy.Operation.COMMAND, "building_preview:confirm_finish")) {
+            return rejectAndClear(player, session, "找不到该 Bot 或无权限。");
+        }
+        ServerLevel world = player.serverLevel();
+        if (world != bot.serverLevel()
+                || !world.dimension().location().toString().equals(session.dimension())) {
+            return fail(player, "玩家、Bot 或投影所在维度已经变化。");
+        }
+        if (player.distanceToSqr(Vec3.atCenterOf(session.anchor())) > MAX_CONFIRM_DISTANCE_SQUARED) {
+            return fail(player, "距离建筑锚点超过 128 格。");
+        }
+        if (!worldValidation.valid()) {
+            return fail(player, worldValidation.message());
+        }
         String currentHash = BuildingPlanFingerprint.sha256(session.plan());
         if (!currentHash.equals(session.planHash())) {
             return rejectAndClear(player, session, "服务端建筑方案哈希发生变化。");
@@ -354,11 +450,6 @@ public final class BuildingPreviewService {
             return rejectAndClear(player, session, "服务端投影摘要发生变化。");
         }
 
-        WorldValidation worldValidation = validateWorld(world, session);
-        if (!worldValidation.valid()) {
-            return fail(player, worldValidation.message());
-        }
-
         BlueprintSchema blueprint;
         try {
             blueprint = BuildingPlanBlueprintAdapter.adapt(session.plan(), session.transform());
@@ -369,9 +460,8 @@ public final class BuildingPreviewService {
         if (parityProblem != null) {
             return rejectAndClear(player, session, "投影与执行蓝图不一致: " + parityProblem);
         }
-        String generatedName = "generated_"
-                + session.sessionId().toString().replace("-", "")
-                + "_r" + session.transformRevision();
+        String generatedName = generatedBlueprintName(
+                session.plan(), session.sessionId(), session.transformRevision());
         String blueprintDigest;
         try {
             blueprintDigest = BlueprintLoader.canonicalDigest(blueprint);
@@ -405,6 +495,9 @@ public final class BuildingPreviewService {
             return fail(player, "建造任务未能启动；投影已保留，可排查材料规划后重试。");
         }
         boolean removed = sessionsByViewer.remove(player.getUUID(), session);
+        cancelTransfer(player.getUUID(), session.sessionId());
+        confirmationsByViewer.remove(player.getUUID());
+        confirmationAttemptsByViewer.remove(player.getUUID());
         BrainCoordinator.INSTANCE.markExternalWorkStarted(bot, session.sessionId());
         if (removed) {
             sendClear(player, session.sessionId(), "queued");
@@ -433,6 +526,11 @@ public final class BuildingPreviewService {
         if (player.serverLevel() != bot.serverLevel()
                 || !player.serverLevel().dimension().location().toString().equals(current.dimension())) {
             return UpdateResult.failed("玩家、Bot 与投影必须位于同一维度。");
+        }
+        if (isSiteLocked(current.plan())) {
+            // Defense in depth for future transform entry points: terrain-adapted foundations and
+            // stilts contain surveyed absolute assumptions and cannot follow an arbitrary anchor.
+            return UpdateResult.failed("该方案已绑定地形调查坐标；请重新调查，而不是变换现有投影。");
         }
         PreparedPreview prepared;
         try {
@@ -467,9 +565,12 @@ public final class BuildingPreviewService {
         if (!sessionsByViewer.replace(player.getUUID(), current, updated)) {
             return UpdateResult.failed("投影已被另一个操作更新，请重试。");
         }
+        confirmationsByViewer.remove(player.getUUID());
+        confirmationAttemptsByViewer.remove(player.getUUID());
         try {
             publish(player, bot, updated);
         } catch (RuntimeException exception) {
+            cancelTransfer(player.getUUID(), updated.sessionId());
             if (sessionsByViewer.remove(player.getUUID(), updated)) {
                 releaseExternalWaitIfNoSession(updated);
             }
@@ -481,9 +582,41 @@ public final class BuildingPreviewService {
         return UpdateResult.updated(updated.view());
     }
 
+    static boolean isSiteLocked(BuildingPlan plan) {
+        return plan != null && "true".equals(plan.metadata().get("site_locked"));
+    }
+
+    static String generatedBlueprintName(BuildingPlan plan, UUID sessionId, int transformRevision) {
+        Objects.requireNonNull(plan, "plan");
+        Objects.requireNonNull(sessionId, "sessionId");
+        String buildingCode = sanitizedBuildingCode(plan.metadata().get("building_code"));
+        String codeSegment = buildingCode.isEmpty() ? "" : "b" + buildingCode + "_";
+        return "generated_"
+                + codeSegment
+                + sessionId.toString().replace("-", "")
+                + "_r" + transformRevision;
+    }
+
+    private static String sanitizedBuildingCode(String candidate) {
+        if (candidate == null || candidate.isEmpty()) {
+            return "";
+        }
+        StringBuilder digits = new StringBuilder(Math.min(candidate.length(), 32));
+        for (int index = 0; index < candidate.length() && digits.length() < 32; index++) {
+            char character = candidate.charAt(index);
+            if (character >= '0' && character <= '9') {
+                digits.append(character);
+            }
+        }
+        return digits.toString();
+    }
+
     private ConfirmResult rejectAndClear(ServerPlayer player, Session session, String message) {
         if (session != null) {
             if (sessionsByViewer.remove(player.getUUID(), session)) {
+                cancelTransfer(player.getUUID(), session.sessionId());
+                confirmationsByViewer.remove(player.getUUID());
+                confirmationAttemptsByViewer.remove(player.getUUID());
                 releaseExternalWaitIfNoSession(session);
                 sendClear(player, session.sessionId(), "rejected: " + message);
             }
@@ -508,66 +641,59 @@ public final class BuildingPreviewService {
         return ConfirmResult.failed(message);
     }
 
-    private WorldValidation validateWorld(ServerLevel world, Session session) {
-        List<String> conflicts = new ArrayList<>();
-        int conflictCount = 0;
-        Map<String, List<PlanPlacement>> atomicGroups = new LinkedHashMap<>();
-        for (PlanPlacement placement : session.plan().placements()) {
-            if (!placement.atomicGroup().isBlank()) {
-                atomicGroups.computeIfAbsent(placement.atomicGroup(), ignored -> new ArrayList<>())
-                        .add(placement);
-            }
+    /** Advances all confirmation scans under one global main-thread world-read budget. */
+    private void tickConfirmations(MinecraftServer server) {
+        int remaining = MAX_CONFIRM_VALIDATION_CELLS_GLOBAL_TICK;
+        List<Map.Entry<UUID, ConfirmationValidation>> pending =
+                new ArrayList<>(confirmationsByViewer.entrySet());
+        pending.sort(Comparator.comparing(entry -> entry.getKey().toString()));
+        if (pending.isEmpty()) {
+            confirmationFairCursor = 0;
+            return;
         }
-        Set<String> partialGroups = new HashSet<>();
-        for (Map.Entry<String, List<PlanPlacement>> entry : atomicGroups.entrySet()) {
-            if (entry.getValue().size() < 2) {
+        int start = Math.floorMod(confirmationFairCursor, pending.size());
+        confirmationFairCursor = (start + 1) % pending.size();
+        for (int offset = 0; offset < pending.size(); offset++) {
+            if (remaining <= 0) {
+                break;
+            }
+            Map.Entry<UUID, ConfirmationValidation> entry =
+                    pending.get((start + offset) % pending.size());
+            UUID viewerId = entry.getKey();
+            ConfirmationValidation validation = entry.getValue();
+            Session session = sessionsByViewer.get(viewerId);
+            ServerPlayer player = server.getPlayerList().getPlayer(viewerId);
+            if (player == null || session == null || !validation.matches(session)) {
+                confirmationsByViewer.remove(viewerId, validation);
                 continue;
             }
-            int satisfiedCount = 0;
-            boolean inspectable = true;
-            BlockPos firstPos = null;
-            for (PlanPlacement placement : entry.getValue()) {
-                BlockPos pos = worldPos(session, placement);
-                if (firstPos == null) {
-                    firstPos = pos;
+            if (player.serverLevel().dimension().location().toString()
+                    .equals(session.dimension())) {
+                try {
+                    int allowance = Math.min(
+                            remaining, MAX_CONFIRM_VALIDATION_CELLS_PER_VIEWER_TICK);
+                    int consumed = validation.advance(player.serverLevel(), allowance);
+                    remaining -= consumed;
+                    if (validation.complete()
+                            && confirmationsByViewer.remove(viewerId, validation)) {
+                        finishConfirmation(
+                                player, session, validation.controlOrigin(), validation.result());
+                    }
+                } catch (RuntimeException exception) {
+                    if (confirmationsByViewer.remove(viewerId, validation)) {
+                        player.sendSystemMessage(Component.literal(
+                                "[FakeAiPlayer] 建筑确认校验失败，请重试。"));
+                        BotLog.error("building_confirmation_validation_failed", exception,
+                                "viewer_id", viewerId,
+                                "session_id", session.sessionId(),
+                                "phase", validation.phaseName());
+                    }
                 }
-                if (!inspectable(world, pos)) {
-                    inspectable = false;
-                    break;
-                }
-                BlockStateSpec expected = session.transform().apply(placement.state());
-                BlockState actual = world.getBlockState(pos);
-                if (alreadySatisfied(actual, expected, placement.operation())) {
-                    satisfiedCount++;
-                }
-            }
-            if (inspectable && satisfiedCount > 0 && satisfiedCount < entry.getValue().size()) {
-                partialGroups.add(entry.getKey());
-                conflictCount++;
-                if (conflicts.size() < MAX_REPORTED_CONFLICTS) {
-                    conflicts.add(firstPos.toShortString() + ":原子结构 " + entry.getKey()
-                            + " 仅部分存在；请先完整移除或完整保留");
-                }
-            }
-        }
-        for (PlanPlacement placement : session.plan().placements()) {
-            if (!placement.atomicGroup().isBlank() && partialGroups.contains(placement.atomicGroup())) {
-                continue;
-            }
-            BlockPos pos = worldPos(session, placement);
-            String problem = validateCell(world, pos, session.transform().apply(placement.state()), placement);
-            if (problem != null) {
-                conflictCount++;
-                if (conflicts.size() < MAX_REPORTED_CONFLICTS) {
-                    conflicts.add(pos.toShortString() + ":" + problem);
-                }
+            } else if (confirmationsByViewer.remove(viewerId, validation)) {
+                player.sendSystemMessage(Component.literal(
+                        "[FakeAiPlayer] 玩家维度已变化，建筑确认校验已取消。"));
             }
         }
-        if (conflictCount == 0) {
-            return WorldValidation.ok();
-        }
-        String suffix = conflictCount > conflicts.size() ? " 等，共 " + conflictCount + " 处" : "";
-        return WorldValidation.failed("确认校验发现冲突: " + String.join("; ", conflicts) + suffix);
     }
 
     private static BlockPos worldPos(Session session, PlanPlacement placement) {
@@ -593,10 +719,11 @@ public final class BuildingPreviewService {
                 : BlockStateResolver.matches(actual, expected);
     }
 
-    private String validateCell(ServerLevel world,
-                                BlockPos pos,
-                                BlockStateSpec expected,
-                                PlanPlacement placement) {
+    private static String validateCell(ServerLevel world,
+                                       BlockPos pos,
+                                       BlockStateSpec expected,
+                                       PlanPlacement placement,
+                                       Map<String, PlanPlacement> placementsById) {
         if (pos.getY() < world.getMinY()
                 || pos.getY() >= world.getMinY() + world.getHeight()) {
             return "超出建筑高度";
@@ -607,9 +734,7 @@ public final class BuildingPreviewService {
         if (!world.hasChunkAt(pos)) {
             return "区块未加载";
         }
-        if (placement.phase() == BuildPhase.FOUNDATION
-                && placement.operation() == CellOperation.PLACE
-                && placement.dy() == 0) {
+        if (BuildingSupportContract.requiresExternalSupport(placement, placementsById)) {
             BlockPos supportPos = pos.below();
             if (!inspectable(world, supportPos)) {
                 return "地基下方不可检查";
@@ -753,18 +878,67 @@ public final class BuildingPreviewService {
         PreparedPreview prepared = session.prepared();
         int chunkCount = (prepared.cells().size() + CHUNK_SIZE - 1) / CHUNK_SIZE;
         network.send(viewer, beginPayload(bot, session));
-        for (int chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
-            int from = chunkIndex * CHUNK_SIZE;
-            int to = Math.min(prepared.cells().size(), from + CHUNK_SIZE);
-            network.send(viewer, new BuildingPreviewChunkS2C(
-                    session.sessionId(),
-                    session.previewHash(),
-                    session.transformRevision(),
-                    chunkIndex,
-                    prepared.cells().subList(from, to)));
+        // The client publishes staging data only after Commit. Queue the chunks instead of
+        // synchronously emitting up to 256 packets from one command/server tick.
+        transfersByViewer.put(viewer.getUUID(), new BuildingPreviewTransfer(
+                session.sessionId(), session.previewHash(), session.transformRevision(), chunkCount));
+    }
+
+    private void tickTransfers(MinecraftServer server) {
+        for (Map.Entry<UUID, BuildingPreviewTransfer> entry : transfersByViewer.entrySet()) {
+            UUID viewerId = entry.getKey();
+            BuildingPreviewTransfer transfer = entry.getValue();
+            Session session = sessionsByViewer.get(viewerId);
+            if (session == null || !transfer.matches(
+                    session.sessionId(), session.previewHash(), session.transformRevision())) {
+                transfersByViewer.remove(viewerId, transfer);
+                continue;
+            }
+            ServerPlayer viewer = server.getPlayerList().getPlayer(viewerId);
+            if (viewer == null) {
+                transfersByViewer.remove(viewerId, transfer);
+                continue;
+            }
+            try {
+                int sent = 0;
+                while (!transfer.complete() && sent < MAX_TRANSFER_CHUNKS_PER_TICK) {
+                    int chunkIndex = transfer.nextChunk();
+                    int from = chunkIndex * CHUNK_SIZE;
+                    int to = Math.min(session.prepared().cells().size(), from + CHUNK_SIZE);
+                    network.send(viewer, new BuildingPreviewChunkS2C(
+                            session.sessionId(),
+                            session.previewHash(),
+                            session.transformRevision(),
+                            chunkIndex,
+                            session.prepared().cells().subList(from, to)));
+                    sent++;
+                }
+                if (transfer.complete()) {
+                    network.send(viewer, new BuildingPreviewCommitS2C(
+                            session.sessionId(), session.previewHash(), session.transformRevision()));
+                    transfersByViewer.remove(viewerId, transfer);
+                }
+            } catch (RuntimeException exception) {
+                if (!transfersByViewer.remove(viewerId, transfer)) {
+                    continue;
+                }
+                if (sessionsByViewer.remove(viewerId, session)) {
+                    releaseExternalWaitIfNoSession(session);
+                }
+                sendClear(viewer, session.sessionId(), "transfer_failed");
+                viewer.sendSystemMessage(Component.literal(
+                        "[FakeAiPlayer] 建筑投影分片发送失败，请重新生成。"));
+                BotLog.error("building_preview_transfer_failed", exception,
+                        "viewer_id", viewerId,
+                        "session_id", session.sessionId(),
+                        "remaining_chunks", transfer.remainingChunks());
+            }
         }
-        network.send(viewer, new BuildingPreviewCommitS2C(
-                session.sessionId(), session.previewHash(), session.transformRevision()));
+    }
+
+    private void cancelTransfer(UUID viewerId, UUID sessionId) {
+        transfersByViewer.computeIfPresent(viewerId, (ignored, transfer) ->
+                transfer.sessionId().equals(sessionId) ? null : transfer);
     }
 
     private BuildingPreviewBeginS2C beginPayload(AIPlayerEntity bot, Session session) {
@@ -792,18 +966,18 @@ public final class BuildingPreviewService {
     }
 
     private boolean supportsPreview(ServerPlayer player) {
-        return network.canSend(player, BuildingPreviewBeginS2C.ID)
-                && network.canSend(player, BuildingPreviewChunkS2C.ID)
-                && network.canSend(player, BuildingPreviewCommitS2C.ID)
-                && network.canSend(player, BuildingPreviewClearS2C.ID)
-                && network.canSend(player, BuildingPreviewReadyC2S.ID)
-                && network.canSend(player, BuildingPreviewConfirmC2S.ID)
-                && network.canSend(player, BuildingPreviewCancelC2S.ID);
+        // ServerPlayNetworking.canSend is directional: it can only probe receivers advertised by
+        // the client for S2C payloads. C2S registration is enforced when those packets arrive and
+        // must never be queried through this transport (Fabric otherwise rejects every preview).
+        return network.canSendToClient(player, BuildingPreviewBeginS2C.ID)
+                && network.canSendToClient(player, BuildingPreviewChunkS2C.ID)
+                && network.canSendToClient(player, BuildingPreviewCommitS2C.ID)
+                && network.canSendToClient(player, BuildingPreviewClearS2C.ID);
     }
 
     private void sendClear(ServerPlayer player, UUID sessionId, String reason) {
         try {
-            if (network.canSend(player, BuildingPreviewClearS2C.ID)) {
+            if (network.canSendToClient(player, BuildingPreviewClearS2C.ID)) {
                 network.send(player, new BuildingPreviewClearS2C(sessionId, reason));
             }
         } catch (RuntimeException exception) {
@@ -811,6 +985,185 @@ public final class BuildingPreviewService {
             BotLog.error("building_preview_clear_send_failed", exception,
                     "viewer_id", player.getUUID(), "session_id", sessionId);
         }
+    }
+
+    /** Mutable server-thread cursor for a bounded, revision-specific world validation. */
+    private static final class ConfirmationValidation {
+        private final Session session;
+        private final IntentController.ControlOrigin controlOrigin;
+        private final Map<String, PlanPlacement> placementsById = new LinkedHashMap<>();
+        private final Map<String, List<PlanPlacement>> atomicGroups = new LinkedHashMap<>();
+        private final Set<String> partialGroups = new HashSet<>();
+        private final List<String> conflicts = new ArrayList<>();
+
+        private ValidationPhase phase = ValidationPhase.INDEX;
+        private int indexCursor;
+        private List<Map.Entry<String, List<PlanPlacement>>> atomicEntries = List.of();
+        private int atomicEntryCursor;
+        private int atomicMemberCursor;
+        private int atomicSatisfied;
+        private boolean atomicInspectable;
+        private BlockPos atomicFirstPos;
+        private int cellCursor;
+        private int conflictCount;
+
+        private ConfirmationValidation(
+                Session session,
+                IntentController.ControlOrigin controlOrigin
+        ) {
+            this.session = session;
+            this.controlOrigin = controlOrigin;
+        }
+
+        private boolean matches(Session candidate) {
+            return candidate != null
+                    && session.sessionId().equals(candidate.sessionId())
+                    && session.previewHash().equals(candidate.previewHash())
+                    && session.transformRevision() == candidate.transformRevision();
+        }
+
+        private int advance(ServerLevel world, int allowance) {
+            if (allowance < 1 || complete()) {
+                return 0;
+            }
+            int consumed = 0;
+            List<PlanPlacement> placements = session.plan().placements();
+            while (consumed < allowance && !complete()) {
+                switch (phase) {
+                    case INDEX -> {
+                        if (indexCursor >= placements.size()) {
+                            atomicEntries = List.copyOf(atomicGroups.entrySet());
+                            phase = ValidationPhase.ATOMIC_GROUPS;
+                            continue;
+                        }
+                        PlanPlacement placement = placements.get(indexCursor++);
+                        placementsById.put(placement.id(), placement);
+                        if (!placement.atomicGroup().isBlank()) {
+                            atomicGroups.computeIfAbsent(
+                                    placement.atomicGroup(), ignored -> new ArrayList<>())
+                                    .add(placement);
+                        }
+                        consumed++;
+                    }
+                    case ATOMIC_GROUPS -> {
+                        if (atomicEntryCursor >= atomicEntries.size()) {
+                            phase = ValidationPhase.CELLS;
+                            continue;
+                        }
+                        Map.Entry<String, List<PlanPlacement>> entry =
+                                atomicEntries.get(atomicEntryCursor);
+                        List<PlanPlacement> members = entry.getValue();
+                        if (members.size() < 2) {
+                            atomicEntryCursor++;
+                            consumed++;
+                            continue;
+                        }
+                        if (atomicMemberCursor == 0) {
+                            atomicSatisfied = 0;
+                            atomicInspectable = true;
+                            atomicFirstPos = null;
+                        }
+                        PlanPlacement placement = members.get(atomicMemberCursor);
+                        BlockPos pos = worldPos(session, placement);
+                        if (atomicFirstPos == null) {
+                            atomicFirstPos = pos;
+                        }
+                        if (!inspectable(world, pos)) {
+                            atomicInspectable = false;
+                            atomicMemberCursor = members.size();
+                        } else {
+                            BlockStateSpec expected = session.transform().apply(placement.state());
+                            BlockState actual = world.getBlockState(pos);
+                            if (alreadySatisfied(actual, expected, placement.operation())) {
+                                atomicSatisfied++;
+                            }
+                            atomicMemberCursor++;
+                        }
+                        consumed++;
+                        if (atomicMemberCursor >= members.size()) {
+                            if (atomicInspectable
+                                    && atomicSatisfied > 0
+                                    && atomicSatisfied < members.size()) {
+                                partialGroups.add(entry.getKey());
+                                addConflict(atomicFirstPos.toShortString() + ":原子结构 "
+                                        + entry.getKey() + " 仅部分存在；请先完整移除或完整保留");
+                            }
+                            atomicMemberCursor = 0;
+                            atomicEntryCursor++;
+                        }
+                    }
+                    case CELLS -> {
+                        if (cellCursor >= placements.size()) {
+                            phase = ValidationPhase.COMPLETE;
+                            continue;
+                        }
+                        PlanPlacement placement = placements.get(cellCursor++);
+                        consumed++;
+                        if (!placement.atomicGroup().isBlank()
+                                && partialGroups.contains(placement.atomicGroup())) {
+                            continue;
+                        }
+                        BlockPos pos = worldPos(session, placement);
+                        String problem = validateCell(
+                                world,
+                                pos,
+                                session.transform().apply(placement.state()),
+                                placement,
+                                placementsById);
+                        if (problem != null) {
+                            addConflict(pos.toShortString() + ":" + problem);
+                        }
+                    }
+                    case COMPLETE -> {
+                        return consumed;
+                    }
+                }
+            }
+            return consumed;
+        }
+
+        private void addConflict(String conflict) {
+            conflictCount++;
+            if (conflicts.size() < MAX_REPORTED_CONFLICTS) {
+                conflicts.add(conflict);
+            }
+        }
+
+        private boolean complete() {
+            return phase == ValidationPhase.COMPLETE;
+        }
+
+        private IntentController.ControlOrigin controlOrigin() {
+            return controlOrigin;
+        }
+
+        private String phaseName() {
+            return phase.name();
+        }
+
+        private WorldValidation result() {
+            if (!complete()) {
+                throw new IllegalStateException("building_confirmation_validation_incomplete");
+            }
+            if (conflictCount == 0) {
+                return WorldValidation.ok();
+            }
+            String suffix = conflictCount > conflicts.size()
+                    ? " 等，共 " + conflictCount + " 处"
+                    : "";
+            return WorldValidation.failed(
+                    "确认校验发现冲突: " + String.join("; ", conflicts) + suffix);
+        }
+    }
+
+    private enum ValidationPhase {
+        INDEX,
+        ATOMIC_GROUPS,
+        CELLS,
+        COMPLETE
+    }
+
+    private record ConfirmationAttemptWindow(UUID sessionId, int nextAllowedTick) {
     }
 
     private record Session(
@@ -883,6 +1236,10 @@ public final class BuildingPreviewService {
     }
 
     public record ConfirmResult(boolean success, String message) {
+        private static ConfirmResult accepted(String message) {
+            return new ConfirmResult(true, message);
+        }
+
         private static ConfirmResult confirmed(String message) {
             return new ConfirmResult(true, message);
         }
@@ -916,8 +1273,8 @@ public final class BuildingPreviewService {
         INSTANCE;
 
         @Override
-        public boolean canSend(ServerPlayer player,
-                               net.minecraft.network.protocol.common.custom.CustomPacketPayload.Type<?> type) {
+        public boolean canSendToClient(ServerPlayer player,
+                                       net.minecraft.network.protocol.common.custom.CustomPacketPayload.Type<?> type) {
             return false;
         }
 

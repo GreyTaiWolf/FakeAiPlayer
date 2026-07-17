@@ -11,6 +11,8 @@ import io.github.greytaiwolf.fakeaiplayer.action.LookAction;
 import io.github.greytaiwolf.fakeaiplayer.action.MiningAction;
 import io.github.greytaiwolf.fakeaiplayer.action.MovementAction;
 import io.github.greytaiwolf.fakeaiplayer.action.ToolSelector;
+import io.github.greytaiwolf.fakeaiplayer.building.catalog.BuildingCatalogEntry;
+import io.github.greytaiwolf.fakeaiplayer.building.catalog.BuildingSeedCode;
 import io.github.greytaiwolf.fakeaiplayer.building.generator.HouseDimensions;
 import io.github.greytaiwolf.fakeaiplayer.building.generator.ModularHouseGenerator;
 import io.github.greytaiwolf.fakeaiplayer.building.generator.ModularHouseRequest;
@@ -19,6 +21,7 @@ import io.github.greytaiwolf.fakeaiplayer.building.plan.PlanTransform;
 import io.github.greytaiwolf.fakeaiplayer.building.preview.BuildingPreviewService;
 import io.github.greytaiwolf.fakeaiplayer.building.style.HouseMaterialStyle;
 import io.github.greytaiwolf.fakeaiplayer.building.style.VanillaHouseStyles;
+import io.github.greytaiwolf.fakeaiplayer.building.workflow.CatalogBuildingDraftService;
 import io.github.greytaiwolf.fakeaiplayer.coordination.Job;
 import io.github.greytaiwolf.fakeaiplayer.coordination.TaskBoard;
 import io.github.greytaiwolf.fakeaiplayer.auth.BotAuthorizationGate;
@@ -402,8 +405,16 @@ public final class ToolRegistry {
                 .property("material", stringSchema("wall material palette: planks (default) / stone_like / glass"))
                 .build(), (bot, args) -> rejectDirectLlmBuild());
 
-        register("draft_building", "Design or revise a detailed modular house and show the owner a server-authoritative world projection before construction. Use for 漂亮建筑/设计房子/带梁柱窗户门廊台阶屋顶/先看看蓝图/design or preview a house. Choose only style, dimensions and seed; the deterministic compiler creates all blocks, state properties, dependencies and phases. Repeating this tool replaces the previous draft. It NEVER starts construction: after calling it, STOP and wait for the human to inspect and confirm the projection.", objectSchema()
-                .property("style", stringSchema("oak_cottage (oak timber) or spruce_lodge (spruce timber)"))
+        register("draft_building", "Design or revise a building and show the owner a server-authoritative projection before construction. For large or multi-storey buildings, pass a 4+ digit building_code, or random_code=true to allocate a shareable four-digit code; a code deterministically fixes archetype, dimensions, floors, style, roof and entropy. Omit both only for the legacy small modular house inputs. The server searches loaded/observable terrain and may fall back to an explicitly unsurveyed manual projection. Repeating this tool replaces the previous draft. It NEVER confirms or starts construction: after calling it, STOP and wait for the human to inspect and confirm the projection.", objectSchema()
+                .property("building_code", stringSchema(
+                        "optional 4..32 digit public building code, preserving leading zeroes; fixes the complete multi-storey design"))
+                .property("random_code", booleanSchema(
+                        "true to choose and return a random four-digit public code; cannot be combined with building_code"))
+                .property("search_radius", integerSchema(
+                        "loaded/observable automatic site-search radius, default 32", 0,
+                        CatalogBuildingDraftService.MAX_SEARCH_RADIUS))
+                .property("style", stringSchema(
+                        "legacy small-house style: oak_cottage, spruce_lodge, birch_townhouse, dark_oak_manor, or stone_keep"))
                 .property("width", integerSchema("enclosed width in blocks, default 9", 7, 16))
                 .property("depth", integerSchema("enclosed depth in blocks, default 9", 7, 16))
                 .property("wall_height", integerSchema(
@@ -414,6 +425,39 @@ public final class ToolRegistry {
             if (owner == null) {
                 return fail("building_preview_requires_online_owner");
             }
+            boolean hasBuildingCode = args.has("building_code")
+                    && args.get("building_code").isJsonPrimitive()
+                    && !args.get("building_code").getAsString().isBlank();
+            boolean randomCode = optionalBoolean(args, "random_code", false);
+            if (hasBuildingCode && randomCode) {
+                return fail("building_code_and_random_code_are_mutually_exclusive");
+            }
+            if (hasBuildingCode || randomCode) {
+                BuildingSeedCode code;
+                try {
+                    code = randomCode
+                            ? BuildingSeedCode.fourDigit(owner.getRandom().nextInt(
+                                    BuildingSeedCode.INITIAL_CAPACITY))
+                            : BuildingSeedCode.parse(args.get("building_code").getAsString());
+                } catch (IllegalArgumentException exception) {
+                    return fail("invalid_building_code: expected_4_to_32_decimal_digits");
+                }
+                int searchRadius = optionalInt(
+                        args, "search_radius", CatalogBuildingDraftService.DEFAULT_SEARCH_RADIUS);
+                CatalogBuildingDraftService.PreparedDraft draft;
+                try {
+                    draft = CatalogBuildingDraftService.prepare(owner, bot, code, searchRadius);
+                } catch (IllegalArgumentException | IllegalStateException exception) {
+                    return fail("building_plan_failed: " + exception.getMessage());
+                }
+                BuildingPreviewService.OpenResult result = BuildingPreviewService.INSTANCE.open(
+                        owner, bot, draft.plan(), draft.anchor(), draft.transform(), true);
+                if (!result.success()) {
+                    return fail(result.message());
+                }
+                return ok(catalogDraftResultJson(draft, result));
+            }
+
             String styleName = optionalString(args, "style", "oak_cottage");
             HouseMaterialStyle style = houseStyle(styleName);
             int width = optionalInt(args, "width", 9);
@@ -456,8 +500,17 @@ public final class ToolRegistry {
             }
             BuildingPreviewService.SessionView value = session.get();
             return ok("{\"state\":\"awaiting_player_confirmation\",\"plan\":\""
-                    + escape(value.planName()) + "\",\"placements\":" + value.placementCount()
-                    + ",\"anchor\":\"" + value.anchor().toShortString() + "\"}");
+                    + escape(value.planName()) + "\",\"plan_id\":\"" + escape(value.planId())
+                    + "\",\"plan_hash\":\"" + value.planHash()
+                    + "\",\"preview_hash\":\"" + value.previewHash()
+                    + "\",\"dimension\":\"" + escape(value.dimension())
+                    + "\",\"placements\":" + value.placementCount()
+                    + ",\"size\":{\"width\":" + value.width()
+                    + ",\"height\":" + value.height() + ",\"depth\":" + value.depth()
+                    + "},\"anchor\":{\"x\":" + value.anchor().getX()
+                    + ",\"y\":" + value.anchor().getY() + ",\"z\":" + value.anchor().getZ()
+                    + "},\"rotation\":\"" + value.rotation()
+                    + "\",\"transform_revision\":" + value.transformRevision() + "}");
         });
 
         register("cancel_building_preview", "Cancel the current unconfirmed modular-building draft. Use only when the human explicitly asks to discard/cancel the proposed building.", objectSchema()
@@ -1099,6 +1152,57 @@ public final class ToolRegistry {
         return fail(BUILDING_PREVIEW_REQUIRED);
     }
 
+    private static String catalogDraftResultJson(
+            CatalogBuildingDraftService.PreparedDraft draft,
+            BuildingPreviewService.OpenResult result) {
+        BuildingCatalogEntry entry = draft.entry();
+        JsonObject response = new JsonObject();
+        response.addProperty("state", "awaiting_player_confirmation");
+        response.addProperty("building_code", entry.seedCode().value());
+        response.addProperty("catalog_version", entry.catalogVersion());
+        response.addProperty("generator_version", entry.generatorVersion());
+        response.addProperty("archetype", entry.archetype().id());
+        response.addProperty("style", entry.styleId());
+        response.addProperty("roof", entry.roofType().id());
+        response.addProperty("floors", entry.floors());
+        response.addProperty("entropy", Long.toUnsignedString(entry.entropy()));
+        response.addProperty("plan_id", draft.plan().planId());
+        response.addProperty("design_hash", draft.designHash());
+        response.addProperty("plan_hash", result.planHash());
+        response.addProperty("placements", result.placementCount());
+        response.addProperty("automatic_site", draft.automaticallySelectedSite());
+        response.addProperty("site_locked", draft.automaticallySelectedSite());
+        response.addProperty("site_strategy", draft.siteStrategy());
+        response.addProperty("site_signature", draft.siteSignature());
+        response.addProperty("fallback_reason", draft.fallbackReason());
+        response.addProperty("search_radius", draft.searchRadius());
+        response.addProperty("rotation", draft.transform().rotation().name());
+
+        JsonObject designSize = new JsonObject();
+        designSize.addProperty("width", entry.width());
+        designSize.addProperty("depth", entry.depth());
+        designSize.addProperty("floors", entry.floors());
+        response.add("design_size", designSize);
+        JsonObject projectionSize = new JsonObject();
+        projectionSize.addProperty("width", draft.plan().width());
+        projectionSize.addProperty("height", draft.plan().height());
+        projectionSize.addProperty("depth", draft.plan().depth());
+        response.add("projection_size", projectionSize);
+        JsonObject anchor = new JsonObject();
+        anchor.addProperty("x", draft.anchor().getX());
+        anchor.addProperty("y", draft.anchor().getY());
+        anchor.addProperty("z", draft.anchor().getZ());
+        response.add("anchor", anchor);
+        JsonObject metadata = new JsonObject();
+        draft.plan().metadata().forEach(metadata::addProperty);
+        response.add("metadata", metadata);
+        response.addProperty("manual_confirmation_required", true);
+        response.addProperty(
+                "instruction",
+                "STOP. The human must inspect and confirm this projection; AI cannot confirm it.");
+        return response.toString();
+    }
+
     private static boolean isBuildKind(String value) {
         return value != null && "build".equals(value.trim().toLowerCase(java.util.Locale.ROOT));
     }
@@ -1117,6 +1221,9 @@ public final class ToolRegistry {
         return switch (normalized) {
             case "oak", "cottage", "oak_cottage" -> VanillaHouseStyles.OAK_COTTAGE;
             case "spruce", "lodge", "spruce_lodge" -> VanillaHouseStyles.SPRUCE_LODGE;
+            case "birch", "townhouse", "birch_townhouse" -> VanillaHouseStyles.BIRCH_TOWNHOUSE;
+            case "dark_oak", "manor", "dark_oak_manor" -> VanillaHouseStyles.DARK_OAK_MANOR;
+            case "stone", "keep", "stone_keep" -> VanillaHouseStyles.STONE_KEEP;
             default -> throw new IllegalArgumentException("unknown_house_style: " + value);
         };
     }

@@ -38,6 +38,7 @@ import net.minecraft.world.phys.shapes.CollisionContext;
 
 public final class BuildTask extends AbstractTask {
     private static final int WORK_STAND_HORIZONTAL_RADIUS = 3;
+    private static final int RECOVERY_CELLS_PER_TICK = 128;
     // A standing player's eye is roughly 1.62 blocks above the feet. Searching five blocks below
     // the target is therefore required for a legal 4.5-block interaction from the loft deck.
     private static final int WORK_STAND_BELOW_TARGET = 5;
@@ -99,7 +100,7 @@ public final class BuildTask extends AbstractTask {
             try {
                 // Freeze the verified program into the loader's deep-immutable expanded form.
                 // Runtime ticks can then compare two cached SHA-256 strings instead of resolving
-                // up to 4096 BlockStates and hashing the complete plan on the server thread.
+                // up to 65,536 BlockStates and hashing the complete plan on the server thread.
                 executionBlueprint = BlueprintLoader.expand(blueprint);
                 validatedDigest = BlueprintLoader.canonicalDigest(executionBlueprint);
                 if (!expectedBlueprintDigest.equals(validatedDigest)) {
@@ -181,7 +182,7 @@ public final class BuildTask extends AbstractTask {
         if (!confirmedBindingStillValid(bot)) {
             return;
         }
-        if (elapsed > 16000) {
+        if (elapsed > taskTimeoutTicks()) {
             // 真实地形建房=整地(挖高填低)+逐格砌 100+ 块,且重活拖低 tps;7200t 不够(实测只到 81/116)。
             // 放宽到 16000t 让真实地形也能整地+落成;lab 平整建房 346t 远不触此上限,零影响。
             bot.getActionPack().stopAll();
@@ -411,6 +412,29 @@ public final class BuildTask extends AbstractTask {
     }
 
     private void build(AIPlayerEntity bot) {
+        // Resumed large buildings can contain tens of thousands of already-finished cells. Scan a
+        // bounded batch per tick instead of spending one full tick on every no-op placement.
+        if (expectedBlueprintDigest != null) {
+            int recovered = 0;
+            while (nextIndex < blueprint.placements().size()
+                    && recovered < RECOVERY_CELLS_PER_TICK) {
+                BlueprintSchema.BlockPlacement candidate = blueprint.placements().get(nextIndex);
+                String prerequisiteProblem = prerequisiteProblem(bot.serverLevel(), candidate);
+                BlockPos candidatePos = anchor.offset(
+                        candidate.dx(), candidate.dy(), candidate.dz());
+                String foundationProblem = reviewedFoundationSupportProblem(
+                        bot.serverLevel(), candidatePos, candidate);
+                if (prerequisiteProblem != null || foundationProblem != null
+                        || !placementAlreadySatisfied(bot.serverLevel(), candidate)) {
+                    break;
+                }
+                finishBuildTarget(false);
+                recovered++;
+            }
+            if (recovered >= RECOVERY_CELLS_PER_TICK) {
+                return;
+            }
+        }
         if (nextIndex >= blueprint.placements().size()) {
             var report = StructureVerifier.verify(
                     bot.serverLevel(), blueprint, anchor, placedBlocks, skippedBlocks);
@@ -483,6 +507,15 @@ public final class BuildTask extends AbstractTask {
             case PRESERVE -> verifyPreservedCell(bot, placement, pos);
             case TEMPORARY -> failUnsafeMutation(bot, "temporary_cell_requires_cleanup_executor", pos);
         }
+    }
+
+    private int taskTimeoutTicks() {
+        // One shipment is deliberately bounded by GoalPlanner, but recovery still has to scan the
+        // complete immutable program. Cap the allowance so a pathological task cannot run forever.
+        long recoveryTicks = (blueprint.placements().size() + RECOVERY_CELLS_PER_TICK - 1L)
+                / RECOVERY_CELLS_PER_TICK;
+        long budget = 16_000L + recoveryTicks * 4L;
+        return (int) Math.min(72_000L, budget);
     }
 
     private void placeBlueprintBlock(AIPlayerEntity bot,
@@ -781,20 +814,22 @@ public final class BuildTask extends AbstractTask {
 
     /**
      * Confirmation-time terrain evidence can change while the bot gathers materials. The current
-     * generated-plan format does not persist a phase field, but every reviewed modular foundation
-     * cell is a sequenced PLACE at local y=0. Recheck its external support at execution time and
-     * again immediately before useItemOn so a dug-out, flooded or unloaded base cannot become a
-     * floating structure through a confirmation-to-build race.
+     * executor blueprint persists whether each reviewed foundation cell depends on existing
+     * terrain. Recheck that support at execution time and again immediately before useItemOn so a
+     * dug-out, flooded or unloaded base cannot become a floating structure through a
+     * confirmation-to-build race. The sequenced-y=0 fallback preserves this protection for
+     * blueprints saved before the explicit flag existed.
      */
     private String reviewedFoundationSupportProblem(
             ServerLevel world,
             BlockPos pos,
             BlueprintSchema.BlockPlacement placement
     ) {
-        if (expectedBlueprintDigest == null
-                || placement.sequence() == null
-                || placement.operation() != CellOperation.PLACE
-                || placement.dy() != 0) {
+        boolean legacyReviewedFoundation = expectedBlueprintDigest != null
+                && placement.sequence() != null
+                && placement.dy() == 0;
+        if (placement.operation() != CellOperation.PLACE
+                || !placement.requiresExternalSupport() && !legacyReviewedFoundation) {
             return null;
         }
         BlockPos supportPos = pos.below();

@@ -18,7 +18,7 @@ public record BlueprintSchema(
         List<Op> ops
 ) {
     /**
-     * One ordered executor cell. The final five fields carry the reviewed V2 plan semantics into
+     * One ordered executor cell. The final six fields carry the reviewed V2 plan semantics into
      * the legacy task/persistence format; their defaults keep old JSON blueprints compatible.
      *
      * <p>{@code sequence} is nullable only for legacy blueprints. Once one expanded cell has a
@@ -36,7 +36,8 @@ public record BlueprintSchema(
             ReplacePolicy replacePolicy,
             String atomicGroup,
             Integer sequence,
-            List<Integer> prerequisites
+            List<Integer> prerequisites,
+            boolean requiresExternalSupport
     ) {
         public BlockPlacement {
             TreeMap<String, String> normalized = new TreeMap<>();
@@ -80,9 +81,24 @@ public record BlueprintSchema(
                               CellOperation operation,
                               ReplacePolicy replacePolicy,
                               String atomicGroup,
+                              Integer sequence,
+                              List<Integer> prerequisites) {
+            this(dx, dy, dz, blockId, palette, properties, operation, replacePolicy,
+                    atomicGroup, sequence, prerequisites, false);
+        }
+
+        public BlockPlacement(int dx,
+                              int dy,
+                              int dz,
+                              String blockId,
+                              String palette,
+                              Map<String, String> properties,
+                              CellOperation operation,
+                              ReplacePolicy replacePolicy,
+                              String atomicGroup,
                               Integer sequence) {
             this(dx, dy, dz, blockId, palette, properties, operation, replacePolicy,
-                    atomicGroup, sequence, List.of());
+                    atomicGroup, sequence, List.of(), false);
         }
 
         public BlockPlacement(int dx,

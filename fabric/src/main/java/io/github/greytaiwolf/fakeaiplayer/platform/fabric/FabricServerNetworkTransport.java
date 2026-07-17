@@ -7,7 +7,7 @@ import net.minecraft.server.level.ServerPlayer;
 
 final class FabricServerNetworkTransport implements ServerNetworkTransport {
     @Override
-    public boolean canSend(ServerPlayer player, CustomPacketPayload.Type<?> type) {
+    public boolean canSendToClient(ServerPlayer player, CustomPacketPayload.Type<?> type) {
         return ServerPlayNetworking.canSend(player, type);
     }
 

@@ -18,6 +18,10 @@ public final class BuildingPlanBlueprintAdapter {
             throw new IllegalArgumentException("invalid_building_plan: " + validation.problems().get(0).code());
         }
         PlanTransform normalized = transform == null ? PlanTransform.IDENTITY : transform;
+        Map<String, PlanPlacement> placementsById = new LinkedHashMap<>();
+        for (PlanPlacement placement : plan.placements()) {
+            placementsById.put(placement.id(), placement);
+        }
         List<PlanPlacement> ordered = BuildingPlanOrder.stableTopological(plan);
         Map<String, Integer> sequenceById = new LinkedHashMap<>();
         for (int index = 0; index < ordered.size(); index++) {
@@ -57,7 +61,9 @@ public final class BuildingPlanBlueprintAdapter {
                     placement.replacePolicy(),
                     placement.atomicGroup(),
                     sequence++,
-                    prerequisites));
+                    prerequisites,
+                    BuildingSupportContract.requiresExternalSupport(
+                            placement, placementsById)));
         }
         return new BlueprintSchema(
                 plan.name(),
