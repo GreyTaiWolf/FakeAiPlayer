@@ -611,6 +611,8 @@ public final class GoalExecutor {
     }
 
     private void handleStepFailure(MinecraftServer server, AIPlayerEntity bot, ActivePlan plan, String reason) {
+        boolean placedBuildingCells = plan.currentTask instanceof BuildTask build
+                && build.placedBlocks() > 0;
         captureTaskEvidence(plan);
         // 第4层:best-effort 步骤(如 HUNT 备粮)失败不阻断整体目标——跳过它直接继续下一步。
         // 这样"挖钻石前备点肉"在周围没动物时也不会让整条挖矿目标 goal_failed(续航仍由饥饿链兜底)。
@@ -638,7 +640,8 @@ public final class GoalExecutor {
         int curTarget = goalTargetCount(bot, plan.goal);
         long hMoved2 = (long) (bp.getX() - plan.snapX) * (bp.getX() - plan.snapX)
                      + (long) (bp.getZ() - plan.snapZ) * (bp.getZ() - plan.snapZ);
-        boolean madeProgress = plan.completedSteps > plan.snapSteps
+        boolean madeProgress = placedBuildingCells
+                || plan.completedSteps > plan.snapSteps
                 || curTarget > plan.snapTargetCount
                 || bp.getY() < plan.snapY
                 || hMoved2 >= 64;
@@ -651,8 +654,11 @@ public final class GoalExecutor {
         plan.snapY = bp.getY();
         plan.snapZ = bp.getZ();
         plan.lifetimeReplans++;
-        // 死亡闸:连续 3 次无进展 replan,或终生 12 次(防"挖一点卡一点"无限磨),或 replan 关闭 → 判死。
-        if (plan.replanCount >= 3 || plan.lifetimeReplans >= 12 || !AIBotConfig.get().goal().replanOnFailureEnabled()) {
+        // Large reviewed builds intentionally resupply in bounded inventory batches. They may
+        // need more than twelve productive resumes; no-progress retries remain capped at three.
+        int lifetimeLimit = plan.goal instanceof Goal.Build ? 64 : 12;
+        if (plan.replanCount >= 3 || plan.lifetimeReplans >= lifetimeLimit
+                || !AIBotConfig.get().goal().replanOnFailureEnabled()) {
             finishActive(bot, plan, evaluate(bot, plan), reason, false, true);
             return;
         }

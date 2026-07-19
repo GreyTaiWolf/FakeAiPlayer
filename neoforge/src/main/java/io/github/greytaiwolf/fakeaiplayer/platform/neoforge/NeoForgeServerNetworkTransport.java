@@ -7,7 +7,7 @@ import net.neoforged.neoforge.network.PacketDistributor;
 
 final class NeoForgeServerNetworkTransport implements ServerNetworkTransport {
     @Override
-    public boolean canSend(ServerPlayer player, CustomPacketPayload.Type<?> type) {
+    public boolean canSendToClient(ServerPlayer player, CustomPacketPayload.Type<?> type) {
         return player.connection != null && player.connection.hasChannel(type);
     }
 

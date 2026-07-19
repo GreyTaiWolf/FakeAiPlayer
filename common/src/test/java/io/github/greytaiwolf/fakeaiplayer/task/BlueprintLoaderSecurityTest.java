@@ -62,7 +62,7 @@ class BlueprintLoaderSecurityTest {
         Path oversized = directory.resolve("oversized.json");
         byte[] oneMegabyte = new byte[1024 * 1024];
         try (OutputStream output = Files.newOutputStream(oversized)) {
-            for (int index = 0; index < 5; index++) {
+            for (int index = 0; index < 33; index++) {
                 output.write(oneMegabyte);
             }
         }

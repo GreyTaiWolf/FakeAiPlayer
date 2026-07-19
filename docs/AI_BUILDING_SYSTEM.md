@@ -8,13 +8,15 @@
 
 - `IN SOURCE`：V2 不可变 plan、结构/registry 两阶段校验、确定性指纹、vanilla 坐标与 BlockState 变换，以及保留 operation、replace policy、atomic group 和稳定 sequence 的旧执行器适配层。
 - `IN SOURCE`：`modular-house-3` 确定性模块住宅生成器，现有 `oak_cottage`、`spruce_lodge` 两套 vanilla 材料风格；方案包含地基、地板、梁柱、墙体、窗户、双格门、门廊、自然地面两级入口台阶、前后永久露台、永久支撑直梯、可步行阁楼、无方向檐口、人字屋顶和屋脊。楼梯、阁楼和露台在高柱前完成；门和西侧门框延后到屋顶完成后，门轴由门框依赖顺序强制；Bot 通过露台、楼梯、阁楼、圈梁和檐口从两侧逐排攀建坡面。施工接近寻路禁止计划外挖墙或垫柱，并用方块轮廓 raycast 预先证明真实 clicked face、方向方块朝向和柱/梁轴线。
-- `IN SOURCE / FABRIC + NEOFORGE`：服务端 `PreviewSession`、Begin/Chunk/Commit/Clear 分块协议、客户端 staging 后原子发布、Ready 回执、彩色世界线框、移动/90°旋转、显式确认/取消和断线/超时清理。
+- `IN SOURCE`：`building-catalog-1` 与 `multi-storey-building-1`。规范建筑码从 `0000..9999` 开始，之后按 `10000` 继续；v1 由显式历史 resolver 和覆盖初始 10,000 码全部目录字段的黄金 manifest SHA-256 冻结。同一码固定解析为 archetype、11–48 格宽深、2–8 层、五套 vanilla 材料风格之一、屋顶模块和 domain-separated entropy。编译器生成完整筏板地基、逐层楼板、内外框架、外墙/窗/双格门、确定性室内隔墙、永久承重折返楼梯、平屋顶女儿墙或阶梯山墙顶。最大 48×48×8 的两类屋顶均低于 65,536 格计划上限。`BuildingDesignFingerprint` 排除玩家、会话、名称、坐标和 revision，使同一码设计能跨实例比较。
+- `IN SOURCE / PARTIAL`：有界两阶段选址先对最多 25 个分布候选采样角点、边中点和中心，再只完整调查每个朝向的最佳候选；全部候选与双朝向共享 40,000 次 standability probe 硬上限。所有地形读取先检查已加载区块；strict survival 还要求观察证据，operator 隐藏扫描也不会同步加载区块。完整调查的 v2 SHA-256 绑定维度、完整坐标、高度网格、水/阻挡计数和重算的 min/max/方差；实际旋转方案和新增桩柱还会逐格检查上部净空、流体、方块实体及替换策略。干燥且高差不超过 5 的地形编译为 `LEVEL` 或永久 `STILTS` 地基并锁定坐标。找不到安全候选时只返回 `MANUAL_UNSURVEYED` 投影。
+- `IN SOURCE / FABRIC + NEOFORGE`：服务端 `PreviewSession`、Begin/Chunk/Commit/Clear 分块协议、客户端 staging 后原子发布、Ready 回执、缺失 `PLACE` 格的半透明真实 BlockState baked model、冲突彩色线框、移动/90°旋转、显式确认/取消和断线/超时清理。经过场地适配且带 `site_locked=true` 的方案禁止移动/旋转，必须在新坐标重新调查。
 - `IN SOURCE`：命令入口和 AI 工具 `draft_building`、`building_preview_status`、`cancel_building_preview`。AI 只能起草、查询和取消；确认施工仍必须由已授权的在线玩家完成。
 - `IN SOURCE`：旧 AI `build_house`、`assign_task build` 和 `post_job build` 均失败关闭并返回“使用 `draft_building`”；空闲协调器也不再执行持久化的旧 build Job。人工直接输入的确定性建造命令仍属于另一条显式授权入口，不等于给模型确认权。
 - `IN SOURCE`：V2 placement 依赖会在 adapter 中转换为稳定的前置 sequence。Loader 拒绝缺失、非先行或无 sequence 的依赖；`BuildTask` 在依赖格改变世界前重新精确比较每个前置格的 BlockState，reviewed V2 格一旦失败便失败关闭，而不是跳过支撑继续施工。
-- `PARTIAL`：确认会重新检查 owner、Bot、维度、距离、hash、transform revision、边界、区块、BlockState、替换策略、流体、方块实体和原子组；位于局部 `dy=0` 的 `FOUNDATION/PLACE` 格还要求下方可检查、无流体且上表面稳固，并在执行落块前再次检查，然后才把确定方案交给既有备料/建造链。材料规划用保留账本防止门、楼梯、工作台、熔炉和工具前置吞掉最终地板/梁材，沙子按缺口增量采集，literal 圆石与宽松 stone-like 工具链也已拆开。此路径已在 Temurin Java 21.0.11 下完成源码语法解析、纯生成器编译/12,800 方案烟雾与静态门禁；本地完整 Gradle 曾因当前环境 JVM 无法访问外部 Maven、在 `fabric-loom` 解析时于项目编译前中止，但随后同步提交 `dfb0ab8` 的 GitHub Actions 全矩阵通过 `:common:test`、10 项 Fabric GameTest、Fabric/NeoForge 生产构建、产物检查、两 JVM 持久化与 strict-survival runtime/evidence。确认后的自动备料目前仍没有 mission-scoped 场地保护和分阶段工具/背包物流：采集可能选中投影支撑或已完成构件，大批原木/圆石还缺少可靠的工具耐久预算。因此 Fabric/NeoForge 真实客户端、真实生存材料链和复杂地形 GameTest 均尚未完成，不能称为“建筑已可靠完成”，该能力仍须保持 `UNVERIFIED`，不能据此宣称已达到发布质量。
+- `PARTIAL`：确认会重新检查 owner、Bot、维度、距离、hash、transform revision、边界、区块、BlockState、替换策略、流体、方块实体和原子组；世界检查按每玩家 1,024、全局 4,096 单元/tick 分批，并有会话进行中闸与 100 tick 重试冷却。任何无正下方计划依赖的 `FOUNDATION/PLACE` 格都要求外部支撑；该布尔契约进入 canonical executor blueprint，并在执行落块前再次检查。大型 generated 方案每次只规划前 1,792 个未完成材料单位，达到上限立即停止扫描；缺料失败后按真实世界状态重新生成下一批。恢复时每 tick 最多跳过 128 个已完成格，生产性大型建造最多允许 64 次补给重规划，而连续无进展仍限制为 3 次。材料规划用保留账本防止门、楼梯、工作台、熔炉和工具前置吞掉最终构件。旧模块住宅的既有 CI 证据不自动证明本次多层实现；Fabric/NeoForge 客户端、真实大型生存材料链和复杂地形 GameTest 仍未完成，能力保持 `UNVERIFIED`。
 - `PARTIAL`：普通原版 `BlockItem` 会用 `BlockPlaceContext` 做保守预测；草、花、雪层走真实的“点击可替换目标格”交互，门下半格使用双格放置语义。带流体目标会在确认期拒绝，reviewed plan 不使用 `setBlock` 修正或兜底。当前公开住宅以永久阁楼通路避免临时脚手架；通用高层/复杂屋顶脚手架、错误状态事务回滚和模组方块适配仍未完成。
-- `TODO`：双加载器客户端实机验证、VBO/分区缓存、场地调查、A/B/C 方案、类型化局部修改、楼层/阶段过滤、完整 BOM UI、完整二层房间/阳台/栏杆，以及真实 GameTest 和双加载器发布证据。
+- `TODO`：双加载器客户端实机验证、持久 VBO/分区网格缓存、A/B/C 方案、类型化局部修改、楼层/阶段过滤、完整 BOM UI、阳台/栏杆/L 形体量/复杂屋顶、通用 NBT 模块池，以及真实大型 GameTest 和双加载器发布证据。
 
 因此，下文同时包含“当前实际协议”和长期设计。只有标为 `IN SOURCE` 的部分已经接线；它也只表示源码存在，不表示已在游戏中验收。
 
@@ -88,7 +90,7 @@ cancel_build          停工并只清理 Bot 自己记录的临时结构
 
 当前切片只开放其中的安全子集：
 
-- `draft_building(style, width, depth, wall_height, seed)`：生成确定方案并发布给在线 owner，不修改世界；
+- `draft_building(building_code|random_code, search_radius)`：解析或分配可分享的建筑码，生成多层方案、尝试安全选址并发布给在线 owner；也兼容旧 `style/width/depth/wall_height/seed` 小屋输入；
 - `building_preview_status()`：只读查询当前投影；
 - `cancel_building_preview()`：取消当前投影；
 - 不向模型注册确认工具。模型调用 `draft_building` 后必须停止并等待玩家检查。
@@ -100,8 +102,11 @@ AI 等待状态绑定到具体 `sessionId`，而不是只记录一个 Bot 布尔
 ### 当前建筑命令
 
 ```text
-/fakeaiplayer building draft <bot> <oak_cottage|spruce_lodge>
+/fakeaiplayer building draft <bot> <oak_cottage|spruce_lodge|birch_townhouse|dark_oak_manor|stone_keep>
 /fakeaiplayer building draft <bot> <style> <width> <depth> <wall_height> [seed]
+/fakeaiplayer building catalog <building_code>
+/fakeaiplayer building code <bot> <building_code> [search_radius]
+/fakeaiplayer building random <bot> [search_radius]
 /fakeaiplayer building move <x> <y> <z>
 /fakeaiplayer building rotate <north|east|south|west>
 /fakeaiplayer building status
@@ -109,7 +114,7 @@ AI 等待状态绑定到具体 `sessionId`，而不是只记录一个 Bot 布尔
 /fakeaiplayer building cancel
 ```
 
-命令与 AI 工具当前把宽/深限制在 `7..16`，墙高限制在 `4..5`；公开尺寸均带永久直梯和阁楼屋顶通路。更大的 generator API 范围只是设计能力：仅当 `wall_height < depth`、能给直梯保留两端 landing 时加入该通路，否则 metadata 标记 `roof_access=design_only`，不会由当前命令承诺施工。`move` 接受的是投影锚点的绝对世界坐标。每位玩家同时只保留一个投影，新 draft 会替换旧 draft；会话默认五分钟过期，确认者必须与投影同维度且距锚点不超过 128 格。确认/取消按键会注册到控制设置但默认不绑定，玩家需要自行绑定。当前完整网络注册和世界渲染已在 Fabric 与 NeoForge 两端接线；两端客户端仍需分别完成真实联机与渲染验收。
+旧小屋命令仍把宽/深限制在 `7..16`、墙高限制在 `4..5`。建筑码路径公开 11–48 的宽深和 2–8 层，完整设计由 code、catalog version 与 generator version 固定，命令和 AI 都返回 `design_hash`、`plan_hash`、原型、尺寸、楼层、风格、屋顶、entropy 与选址结果。`building random`/`random_code=true` 只是分配并返回一个四位码；以后用该码可重现相同设计。自动地形适配的 plan 带 `site_locked=true`，不能移动或旋转；人工 fallback 可移动。每位玩家同时只保留一个投影，新 draft 会替换旧 draft；会话默认五分钟过期，确认者必须与投影同维度且距锚点不超过 128 格。AI 没有确认工具。
 
 ## BuildingPlan V2
 
@@ -235,7 +240,7 @@ validated BuildingPlan / bounded palette + chunks
 client acknowledged transform revision / AI-conversation linkage / expiresAt
 ```
 
-当前 NeoForge payload：
+当前 Fabric/NeoForge 共用 payload：
 
 ```text
 BuildingPreviewBeginS2C
@@ -261,7 +266,11 @@ BuildingPreviewCancelC2S / BuildingPreviewClearS2C
 
 客户端先在 staging buffer 接收同一 tuple 的分块；允许乱序，但拒绝重复 chunk、缺块、数量错误、越界坐标、非法 palette index、过旧 revision 和摘要不匹配。只有 Commit 校验通过才原子替换当前快照；传输中的半份方案不会渲染。新 draft、移动或旋转会形成新 transform revision 并重新发布有界快照；当前尚未实现“只发 transform、不重传 cells”的增量优化。临时进入其他维度时保留已审核快照但停止渲染，返回原维度后恢复显示；断线、取消、拒绝或超时才清理缓存。
 
-第一版设置独立 `MAX_PREVIEW_PLACEMENTS = 4096` 和 payload/palette/属性字符串预算；超过限制的 plan 不会发布。当前 NeoForge renderer 在 `AFTER_PARTICLES` 阶段用 `RenderType.lines`/`ShapeRenderer.renderLineBox` 即时画线框，并做 192 格距离、视锥和维度裁剪。它没有 VBO、16×16×16 分区缓存、真实方块模型、方块实体、实体或动态流体渲染。
+协议设置独立 `MAX_PREVIEW_PLACEMENTS = 65,536` 和 payload/palette/属性字符串预算；超过限制的 plan 不会发布，每个 Chunk 最多携带 256 格。服务端发送 Begin 后将传输放入每玩家单一 revision cursor，每个 server tick 最多发送 8 个 Chunk；全部分片成功后才发送 Commit。替换、更新、取消、确认、断线、超时、停服或发送异常都会清理匹配传输；Commit 前伪造的 Ready 不会被接受。服务端能力探测只检查 Begin/Chunk/Commit/Clear 四个 S2C 接收端；Ready/Confirm/Cancel 是 C2S，不能通过 Fabric 的服务端 `canSend` 反向探测。
+
+Fabric 与 NeoForge renderer 都在 `AFTER_ENTITIES` 阶段调用 common 的同一渲染核心，并做维度、192 格距离、已加载区块、section 和逐格视锥裁剪。palette 的 BlockState 只在 session/revision/hash 改变时解析一次；格子按 16×16×16 section 到相机的距离排序，并跨帧提升一个稳定 section，避免固定相机下后段永久饥饿。每帧最多检查 16,384 格、输出 4,096 格，其中真实模型最多 256 格；超过模型预算的缺失格退化为青色线框。私有 buffer 的批次上传异常会失败关闭并在后续帧重建，不让单个模型/驱动异常持续打断渲染循环。
+
+缺失 `PLACE`/`TEMPORARY` 格通过原版 `BlockRenderDispatcher.renderSingleBlock` 渲染方块图集上的精确 baked model，因此楼梯、门、台阶和朝向属性显示的是计划 BlockState 的真实轮廓与纹理。正确格隐藏；错误状态、错误方块、待清除格和 `PRESERVE` 冲突仍叠加各自颜色线框。未知 palette、非 `MODEL` render shape 或模型渲染异常会失败关闭到线框。模型和线框使用投影自己的 immediate buffer，两端都不会结束 Minecraft 或其他模组的全局 `RenderType.lines` 批次。当前仍没有持久 VBO、方块实体、实体或动态流体投影。
 
 投影颜色：
 
@@ -275,18 +284,18 @@ BuildingPreviewCancelC2S / BuildingPreviewClearS2C
 
 当前生成器不会把临时脚手架交给旧执行器；浅蓝只是协议/渲染语义预留。
 
-当前交互支持绝对锚点移动和四向旋转。`PlanTransform` 能表达镜像，但尚无玩家镜像命令；楼层/阶段过滤、A/B/C 候选、局部 revision、模型面预览和材料/冲突 UI 都是后续工作。
+当前交互支持普通方案的绝对锚点移动和四向旋转；场地锁定方案必须重新调查而不能变换。`PlanTransform` 能表达镜像，但尚无玩家镜像命令；楼层/阶段过滤、A/B/C 候选、局部 revision 和材料/冲突 UI 都是后续工作。
 
-客户端组装状态位于 common；NeoForge 提供 payload 注册、按键与世界渲染适配。Fabric 尚未注册这些 payload 或 renderer。NeoForge renderer 留在 NeoForge client 源集，专用服务器不会加载它。
+客户端组装、palette 缓存、分类、section 索引、预算和模型渲染核心位于 common；Fabric 与 NeoForge 分别只提供 payload 注册、按键和世界渲染事件适配。两端 renderer 留在各自 client 源集，专用服务器不会加载它们。
 
-确认操作携带 `sessionId + digest + transformRevision`，且只有服务端记录了同 revision 的 Ready 回执才接受。服务端再次检查 Bot/owner 权限、玩家/Bot/投影维度、128 格距离、计划 hash、世界边界、建筑高度、区块加载、BlockState、operation/ReplacePolicy、方块实体和多格原子组；第一版拒绝 `FORCE_AUTHORIZED` 和部分已存在的门原子组。旧 tuple 失败但不能删除玩家更新后的新会话，避免延迟包破坏当前方案。
+确认操作携带 `sessionId + digest + transformRevision`，且只有服务端记录了同 revision 的 Ready 回执才接受。服务端再次检查 Bot/owner 权限、玩家/Bot/投影维度、128 格距离、计划 hash、世界边界、建筑高度、区块加载、BlockState、operation/ReplacePolicy、方块实体和多格原子组；大型世界扫描由 revision-specific cursor 跨 tick 完成，重复包只命中进行中闸/冷却。第一版拒绝 `FORCE_AUTHORIZED` 和部分已存在的门原子组。旧 tuple 失败但不能删除玩家更新后的新会话，避免延迟包破坏当前方案。
 
 ## 持久化与恢复
 
 当前确认路径会把变换后的精确 `BlueprintSchema` 写入受限的 `generated_*` 命名空间，再提交带确定锚点的 `Goal.Build`：
 
 - 材料闭包预检先直接使用同一份内存 blueprint；只有预检成功才写文件，因此不存在“文件尚未生成导致预检必失败”，也不会因预检拒绝留下孤儿文件；
-- 写入前执行 expansion、BlockState、operation/policy、sequence 和 4 MiB 文件上限校验；
+- 写入前执行 expansion、BlockState、operation/policy、sequence 和 32 MiB 文件上限校验；展开格上限为 65,536；
 - 生成文件使用耐久临时文件替换，不跟随 symlink；同名同内容重试幂等，同名不同内容失败，并在写入后通过普通有界 loader 回读及 canonical SHA-256 核验；
 - `Goal.Build`/`MissionSpec` 保存 blueprint 名、`anchor_x/y/z`、维度与 `blueprint_digest`。执行器只接受投影确认服务写出的 `generated_*` 名称及完整绑定；升级前的 preset/custom/generated 记录仍可读取以隔离旧存档，但一律不可信执行；
 - Goal checkpoint 保存锚点和已观测进度。恢复、执行前重新读取持久化 blueprint 并比较摘要；`BuildTask` 每 tick 在导航或世界变更前比较不可变执行蓝图摘要和目标维度。备料期间跨维度会立即终止整条确认任务，而不会在另一个世界的同坐标继续施工。
@@ -327,14 +336,14 @@ temporaryBlocks / reservedMaterials / externalConflicts
 
 ### P3：两层与 AI Brief
 
-- 完整二层房间、折返楼梯、阳台、栏杆和可追踪通用脚手架；
-- `survey/draft/revise/preview/confirm/status/cancel`；
+- 已有 2–8 层楼板、确定性隔墙与永久承重折返楼梯；仍缺语义房间、阳台、栏杆和可追踪通用脚手架；
+- 已有 catalog/random draft、自动调查、preview/status/cancel 与仅玩家 confirm；仍缺 revise 和 A/B/C；
 - A/B/C 方案与类型化局部 revision。
 
 ### P4：风格包与复杂地形
 
 - 平原、云杉山屋、木骨架三种风格；
-- 阶梯/桩柱/挡土墙地基；
+- 已有平地/桩柱地基；仍缺切坡、阶梯和挡土墙；
 - L 形、四坡顶、交叉人字顶和多 Bot 分工。
 
 任何阶段都不能用“源码存在”作为完成标准。至少需要单元测试、属性/种子回归、真实 GameTest、Fabric/NeoForge 构建和专服 smoke；建筑能力只有在真实种子上终态完整验收后才能标为 VERIFIED。

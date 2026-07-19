@@ -98,6 +98,13 @@ fabric_payloads=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform
 fabric_server=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FakeAiPlayerFabric.java
 fabric_client=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/client/FakeAiPlayerFabricClient.java
 fabric_renderer=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/client/FabricBuildingPreviewRenderer.java
+shared_preview_renderer=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/building/preview/client/BuildingPreviewWorldRenderer.java
+preview_service=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/building/preview/BuildingPreviewService.java
+preview_palette=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/building/preview/client/ResolvedPreviewPalette.java
+ghost_block_renderer=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/building/preview/client/GhostBlockRenderer.java
+support_contract=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/building/plan/BuildingSupportContract.java
+blueprint_adapter=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/building/plan/BuildingPlanBlueprintAdapter.java
+build_task=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/task/BuildTask.java
 fabric_menu=fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FabricMenuRegistry.java
 neoforge_payloads=neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgePayloads.java
 neoforge_entry=neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/FakeAiPlayerNeoForge.java
@@ -301,21 +308,52 @@ grep -Fq 'WorldRenderEvents.AFTER_ENTITIES.register' "$fabric_renderer" \
   || fail 'Fabric building preview renderer is not attached to a world render event'
 grep -Fq 'ClientPlayConnectionEvents.DISCONNECT.register' "$fabric_renderer" \
   || fail 'Fabric building preview client state is not cleared on disconnect'
-grep -Fq 'RenderLevelStageEvent.Stage.AFTER_PARTICLES' "$neoforge_renderer" \
-  || fail 'NeoForge building preview renderer is not attached to the expected render stage'
+# Ghost blocks use vanilla entityTranslucent and therefore must render while the Fabulous entity
+# target/composite lifetime is active. Keep both loader adapters at their AFTER_ENTITIES boundary.
+grep -Fq 'RenderLevelStageEvent.Stage.AFTER_ENTITIES' "$neoforge_renderer" \
+  || fail 'NeoForge building preview renderer is not attached to the entity-translucent stage'
 grep -Fq 'ClientPlayerNetworkEvent.LoggingOut' "$neoforge_renderer" \
   || fail 'NeoForge building preview client state is not cleared on logout'
-for renderer in "$fabric_renderer" "$neoforge_renderer"; do
-  for invariant in \
-      MAX_RENDER_DISTANCE_SQUARED \
-      BuildingPreviewClientState.INSTANCE.active \
-      BlockStateResolver.resolve \
-      ShapeRenderer.renderLineBox \
-      CLEAR_CONFLICT \
-      PRESERVE_CONFLICT; do
-    grep -Fq "$invariant" "$renderer" \
-      || fail "$renderer is missing building preview renderer invariant: $invariant"
-  done
+for adapter in "$fabric_renderer" "$neoforge_renderer"; do
+  grep -Fq 'BuildingPreviewWorldRenderer' "$adapter" \
+    || fail "$adapter does not delegate to the shared building preview renderer"
+done
+for invariant in \
+    MAX_RENDER_DISTANCE_SQUARED \
+    BuildingPreviewClientState.INSTANCE.active \
+    CLEAR_CONFLICT \
+    PRESERVE_CONFLICT; do
+  grep -Fq "$invariant" "$shared_preview_renderer" \
+    || fail "$shared_preview_renderer is missing building preview renderer invariant: $invariant"
+done
+for invariant in \
+    'MAX_CONFIRM_VALIDATION_CELLS_GLOBAL_TICK = 4_096' \
+    'MAX_CONFIRM_VALIDATION_CELLS_PER_VIEWER_TICK = 1_024' \
+    'CONFIRM_RETRY_COOLDOWN_TICKS = 100' \
+    'tickConfirmations(server)' \
+    'new ConfirmationValidation'; do
+  grep -Fq "$invariant" "$preview_service" \
+    || fail "$preview_service is missing paced confirmation invariant: $invariant"
+done
+grep -Fq 'BuildingSupportContract.requiresExternalSupport' "$preview_service" \
+  || fail 'preview confirmation does not use the shared terrain-support contract'
+grep -Fq 'BuildingSupportContract.requiresExternalSupport' "$blueprint_adapter" \
+  || fail 'executor blueprint does not persist the shared terrain-support contract'
+grep -Fq 'placement.requiresExternalSupport()' "$build_task" \
+  || fail 'BuildTask does not recheck persisted external terrain support'
+grep -Fq 'BlockStateResolver.resolve' "$preview_palette" \
+  || fail "$preview_palette does not cache resolved preview block states"
+grep -Fq 'ShapeRenderer.renderLineBox' "$ghost_block_renderer" \
+  || fail "$ghost_block_renderer is missing conflict/fallback wireframes"
+grep -Fq 'RenderType.entityTranslucent(InventoryMenu.BLOCK_ATLAS)' "$ghost_block_renderer" \
+  || fail "$ghost_block_renderer does not use the entity-translucent block-atlas render type"
+for invariant in \
+    'MAX_TRANSFER_CHUNKS_PER_TICK = 8' \
+    'tickTransfers(server)' \
+    'new BuildingPreviewTransfer' \
+    'transfer.complete()'; do
+  grep -Fq "$invariant" "$preview_service" \
+    || fail "$preview_service is missing paced preview transfer invariant: $invariant"
 done
 
 for script in scripts/*.sh scripts/lib/*.sh; do

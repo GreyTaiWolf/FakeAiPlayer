@@ -7,8 +7,10 @@ import io.github.greytaiwolf.fakeaiplayer.craft.RecipeRegistry;
 import io.github.greytaiwolf.fakeaiplayer.craft.SmeltChain;
 import io.github.greytaiwolf.fakeaiplayer.task.BlueprintSchema;
 import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.Items;
@@ -164,6 +166,61 @@ class GoalPlannerBuildingMaterialsTest {
         assertEquals(2, reservations.available(Items.OAK_PLANKS));
         assertEquals(110, reservations.reserved(RecipeRegistry.PLANKS));
         assertEquals(112, counts.get(Items.OAK_PLANKS) + counts.get(Items.BIRCH_PLANKS));
+    }
+
+    @Test
+    void largeBuildMaterialShipmentIsBoundedAndKeepsExecutionOrder() {
+        List<BlueprintSchema.BlockPlacement> placements = new ArrayList<>();
+        for (int index = 0; index < 2_400; index++) {
+            placements.add(placement(
+                    index, "minecraft:oak_planks", CellOperation.PLACE, "", index));
+        }
+        BlueprintSchema schema = new BlueprintSchema(
+                "large", 2_400, 1, 1, placements, List.of());
+        AtomicInteger inspected = new AtomicInteger();
+
+        List<BlueprintSchema.BlockPlacement> batch = GoalPlanner.materialBatchPlacements(
+                schema,
+                ignored -> {
+                    int count = inspected.incrementAndGet();
+                    if (count > GoalPlanner.MAX_BUILD_MATERIAL_CELLS_PER_BATCH) {
+                        throw new AssertionError("material batch scanned beyond its bounded prefix");
+                    }
+                    return false;
+                },
+                GoalPlanner.MAX_BUILD_MATERIAL_CELLS_PER_BATCH);
+
+        assertEquals(GoalPlanner.MAX_BUILD_MATERIAL_CELLS_PER_BATCH, batch.size());
+        assertEquals(GoalPlanner.MAX_BUILD_MATERIAL_CELLS_PER_BATCH, inspected.get());
+        assertEquals(0, batch.get(0).sequence());
+        assertEquals(GoalPlanner.MAX_BUILD_MATERIAL_CELLS_PER_BATCH - 1,
+                batch.get(batch.size() - 1).sequence());
+    }
+
+    @Test
+    void atomicGroupAtBatchBoundaryCountsOnceAndNeverOverflows() {
+        BlueprintSchema.BlockPlacement ordinary = placement(
+                0, "minecraft:oak_planks", CellOperation.PLACE, "", 0);
+        BlueprintSchema.BlockPlacement lowerDoor = placement(
+                1, "minecraft:oak_door", CellOperation.PLACE, "door:edge", 1);
+        BlueprintSchema.BlockPlacement upperDoor = placement(
+                1, "minecraft:oak_door", CellOperation.PLACE, "door:edge", 2);
+        BlueprintSchema.BlockPlacement afterBoundary = placement(
+                2, "minecraft:glass", CellOperation.PLACE, "", 3);
+        BlueprintSchema schema = new BlueprintSchema(
+                "atomic-boundary", 3, 2, 1,
+                List.of(ordinary, lowerDoor, upperDoor, afterBoundary), List.of());
+        AtomicInteger inspected = new AtomicInteger();
+
+        List<BlueprintSchema.BlockPlacement> batch = GoalPlanner.materialBatchPlacements(
+                schema, ignored -> {
+                    inspected.incrementAndGet();
+                    return false;
+                }, 2);
+
+        assertEquals(List.of(ordinary, lowerDoor), batch);
+        assertEquals(2, batch.size());
+        assertEquals(2, inspected.get());
     }
 
     private static void assertWoodRecipe(Item output, Item planks, int outputCount) {

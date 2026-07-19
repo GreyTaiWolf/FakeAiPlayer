@@ -51,9 +51,10 @@ public final class SiteFinder {
                 }
                 int y = maybeY.getAsInt();
                 BlockPos anchor = new BlockPos(x, y, z);
-                if (!isObservableFootprint(bot, anchor, footprintX, footprintZ)) {
-                    continue;
-                }
+                // This branch is entered only after the explicit HIDDEN_BLOCK_SCAN capability
+                // decision above. Requiring every footprint cell to also be visible made large
+                // operator-mode surveys impossible and accidentally reduced this privileged path
+                // to the strict-survival implementation below.
                 if (Math.abs(y - originSurface) > ySpread) {
                     continue;
                 }
@@ -84,9 +85,6 @@ public final class SiteFinder {
                         continue;
                     }
                     BlockPos anchor = new BlockPos(x, my.getAsInt(), z);
-                    if (!isObservableFootprint(bot, anchor, footprintX, footprintZ)) {
-                        continue;
-                    }
                     switch (footprintReject(world, anchor, footprintX, footprintZ, maxRange)) {
                         case 0 -> okFlat++;
                         case 1 -> obstruct++;
@@ -372,10 +370,20 @@ public final class SiteFinder {
     }
 
     private static boolean standableSurface(ServerLevel world, int x, int z) {
-        return standableY(world, x, z, world.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z)).isPresent();
+        BlockPos loadedProbe = new BlockPos(x, world.getMinY(), z);
+        if (!world.hasChunkAt(loadedProbe)) {
+            return false;
+        }
+        return standableY(world, x, z,
+                world.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z)).isPresent();
     }
 
     private static OptionalInt standableY(ServerLevel world, int x, int z, int preferredY) {
+        // getHeight/getBlockState can synchronously load a chunk. Automatic site search is a
+        // loaded-world query even when an operator explicitly grants hidden-block scanning.
+        if (!world.hasChunkAt(new BlockPos(x, preferredY, z))) {
+            return OptionalInt.empty();
+        }
         int heightmapY = world.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
         OptionalInt direct = firstStandable(world, x, z, preferredY, heightmapY, heightmapY + 1, heightmapY - 1);
         if (direct.isPresent()) {

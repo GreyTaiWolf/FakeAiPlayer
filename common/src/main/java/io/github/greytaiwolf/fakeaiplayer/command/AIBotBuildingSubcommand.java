@@ -7,6 +7,9 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import io.github.greytaiwolf.fakeaiplayer.auth.BotAuthorizationGate;
 import io.github.greytaiwolf.fakeaiplayer.auth.BotAuthorizationPolicy;
+import io.github.greytaiwolf.fakeaiplayer.building.catalog.BuildingCatalog;
+import io.github.greytaiwolf.fakeaiplayer.building.catalog.BuildingCatalogEntry;
+import io.github.greytaiwolf.fakeaiplayer.building.catalog.BuildingSeedCode;
 import io.github.greytaiwolf.fakeaiplayer.building.generator.HouseDimensions;
 import io.github.greytaiwolf.fakeaiplayer.building.generator.ModularHouseGenerator;
 import io.github.greytaiwolf.fakeaiplayer.building.generator.ModularHouseRequest;
@@ -15,6 +18,7 @@ import io.github.greytaiwolf.fakeaiplayer.building.plan.PlanTransform;
 import io.github.greytaiwolf.fakeaiplayer.building.preview.BuildingPreviewService;
 import io.github.greytaiwolf.fakeaiplayer.building.style.HouseMaterialStyle;
 import io.github.greytaiwolf.fakeaiplayer.building.style.VanillaHouseStyles;
+import io.github.greytaiwolf.fakeaiplayer.building.workflow.CatalogBuildingDraftService;
 import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import java.util.Locale;
 import java.util.Optional;
@@ -67,6 +71,36 @@ public final class AIBotBuildingSubcommand {
                                                                                 IntegerArgumentType.getInteger(context, "depth"),
                                                                                 IntegerArgumentType.getInteger(context, "wall_height"),
                                                                                 LongArgumentType.getLong(context, "seed"))))))))))
+                .then(literal("catalog")
+                        .then(argument("building_code", StringArgumentType.word())
+                                .executes(AIBotBuildingSubcommand::catalog)))
+                .then(literal("code")
+                        .then(argument("bot", StringArgumentType.word())
+                                .then(argument("building_code", StringArgumentType.word())
+                                        .executes(context -> draftCatalog(
+                                                context,
+                                                CatalogBuildingDraftService.DEFAULT_SEARCH_RADIUS,
+                                                false))
+                                        .then(argument("search_radius", IntegerArgumentType.integer(
+                                                        0, CatalogBuildingDraftService.MAX_SEARCH_RADIUS))
+                                                .executes(context -> draftCatalog(
+                                                        context,
+                                                        IntegerArgumentType.getInteger(
+                                                                context, "search_radius"),
+                                                        false))))))
+                .then(literal("random")
+                        .then(argument("bot", StringArgumentType.word())
+                                .executes(context -> draftCatalog(
+                                        context,
+                                        CatalogBuildingDraftService.DEFAULT_SEARCH_RADIUS,
+                                        true))
+                                .then(argument("search_radius", IntegerArgumentType.integer(
+                                                0, CatalogBuildingDraftService.MAX_SEARCH_RADIUS))
+                                        .executes(context -> draftCatalog(
+                                                context,
+                                                IntegerArgumentType.getInteger(
+                                                        context, "search_radius"),
+                                                true)))))
                 .then(literal("confirm")
                         .executes(AIBotBuildingSubcommand::confirm))
                 .then(literal("cancel")
@@ -107,7 +141,8 @@ public final class AIBotBuildingSubcommand {
             style = style(StringArgumentType.getString(context, "style"));
         } catch (IllegalArgumentException exception) {
             source.sendFailure(Component.literal(
-                    "[FakeAiPlayer] 未知风格；可用 oak_cottage 或 spruce_lodge。"));
+                    "[FakeAiPlayer] 未知风格；可用 oak_cottage、spruce_lodge、"
+                            + "birch_townhouse、dark_oak_manor 或 stone_keep。"));
             return 0;
         }
 
@@ -139,6 +174,97 @@ public final class AIBotBuildingSubcommand {
                         + "，" + result.placementCount() + " 个方案单元。"
                         + " 检查彩色投影后执行 /fakeaiplayer building confirm；"
                         + "取消用 /fakeaiplayer building cancel。"), false);
+        return result.placementCount();
+    }
+
+    private static int catalog(CommandContext<CommandSourceStack> context) {
+        CommandSourceStack source = context.getSource();
+        BuildingCatalogEntry entry;
+        try {
+            entry = BuildingCatalog.resolve(
+                    StringArgumentType.getString(context, "building_code"));
+        } catch (IllegalArgumentException exception) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] 建筑码必须是 4 到 32 位十进制数字。"));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal(
+                "[FakeAiPlayer] 建筑码 " + entry.seedCode().value()
+                        + "：" + entry.archetype().id()
+                        + "，风格=" + entry.styleId()
+                        + "，占地=" + entry.width() + "x" + entry.depth()
+                        + "，楼层=" + entry.floors()
+                        + "，屋顶=" + entry.roofType().id()
+                        + "，catalog=" + entry.catalogVersion()
+                        + "，generator=" + entry.generatorVersion()
+                        + "，entropy=" + Long.toUnsignedString(entry.entropy())), false);
+        return 1;
+    }
+
+    private static int draftCatalog(CommandContext<CommandSourceStack> context,
+                                    int searchRadius,
+                                    boolean randomCode) {
+        CommandSourceStack source = context.getSource();
+        ServerPlayer player = source.getPlayer();
+        if (player == null) {
+            source.sendFailure(Component.literal("[FakeAiPlayer] 建筑投影需要游戏内玩家执行。"));
+            return 0;
+        }
+        String botName = StringArgumentType.getString(context, "bot");
+        Optional<AIPlayerEntity> bot = BotAuthorizationGate.INSTANCE.resolveAuthorized(
+                source, botName, BotAuthorizationPolicy.Operation.COMMAND, "command:building_code_draft");
+        if (bot.isEmpty()) {
+            return 0;
+        }
+
+        BuildingSeedCode code;
+        try {
+            code = randomCode
+                    ? BuildingSeedCode.fourDigit(
+                            player.getRandom().nextInt(BuildingSeedCode.INITIAL_CAPACITY))
+                    : BuildingSeedCode.parse(
+                            StringArgumentType.getString(context, "building_code"));
+        } catch (IllegalArgumentException exception) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] 建筑码必须是 4 到 32 位十进制数字。"));
+            return 0;
+        }
+
+        CatalogBuildingDraftService.PreparedDraft draft;
+        try {
+            draft = CatalogBuildingDraftService.prepare(player, bot.get(), code, searchRadius);
+        } catch (IllegalArgumentException | IllegalStateException exception) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] 多层建筑方案生成失败: " + exception.getMessage()));
+            return 0;
+        }
+        BuildingPreviewService.OpenResult result = BuildingPreviewService.INSTANCE.open(
+                player, bot.get(), draft.plan(), draft.anchor(), draft.transform());
+        if (!result.success()) {
+            source.sendFailure(Component.literal("[FakeAiPlayer] " + result.message()));
+            return 0;
+        }
+
+        BuildingCatalogEntry entry = draft.entry();
+        String site = draft.automaticallySelectedSite()
+                ? "已自动选择可观察地块并使用 " + draft.siteStrategy() + " 地基"
+                : "未找到已加载且可观察的安全地块，当前为未勘测人工投影（"
+                        + draft.fallbackReason() + "）";
+        String review = draft.automaticallySelectedSite()
+                ? "该地形适配投影已锁定位置，请直接检查"
+                : "请检查投影，必要时先用 building move 调整位置";
+        source.sendSuccess(() -> Component.literal(
+                "[FakeAiPlayer] 已生成建筑码 " + entry.seedCode().value()
+                        + " 的 " + entry.archetype().id()
+                        + "：" + entry.width() + "x" + entry.depth()
+                        + "，" + entry.floors() + " 层，风格=" + entry.styleId()
+                        + "，屋顶=" + entry.roofType().id()
+                        + "，" + result.placementCount() + " 个方案单元，"
+                        + site + "，anchor=" + draft.anchor().toShortString()
+                        + "，design=" + draft.designHash().substring(0, 12)
+                        + "，hash=" + result.planHash().substring(0, 12)
+                        + "。AI 不会确认；" + review
+                        + "，然后由玩家执行 /fakeaiplayer building confirm。"), false);
         return result.placementCount();
     }
 
@@ -187,9 +313,12 @@ public final class AIBotBuildingSubcommand {
         BuildingPreviewService.SessionView value = session.get();
         source.sendSuccess(() -> Component.literal(
                 "[FakeAiPlayer] " + value.planName()
+                        + " id=" + value.planId()
                         + " @ " + value.anchor().toShortString()
                         + " size=" + value.width() + "x" + value.height() + "x" + value.depth()
                         + " cells=" + value.placementCount()
+                        + " rotation=" + value.rotation()
+                        + " revision=" + value.transformRevision()
                         + " hash=" + value.planHash().substring(0, 12)), false);
         return 1;
     }
@@ -241,6 +370,9 @@ public final class AIBotBuildingSubcommand {
         return switch (normalized) {
             case "oak", "cottage", "oak_cottage" -> VanillaHouseStyles.OAK_COTTAGE;
             case "spruce", "lodge", "spruce_lodge" -> VanillaHouseStyles.SPRUCE_LODGE;
+            case "birch", "townhouse", "birch_townhouse" -> VanillaHouseStyles.BIRCH_TOWNHOUSE;
+            case "dark_oak", "manor", "dark_oak_manor" -> VanillaHouseStyles.DARK_OAK_MANOR;
+            case "stone", "keep", "stone_keep" -> VanillaHouseStyles.STONE_KEEP;
             default -> throw new IllegalArgumentException("unknown_house_style: " + value);
         };
     }

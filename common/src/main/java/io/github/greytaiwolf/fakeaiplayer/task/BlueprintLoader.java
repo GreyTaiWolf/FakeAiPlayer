@@ -41,10 +41,11 @@ import net.minecraft.world.level.block.state.BlockState;
 
 public final class BlueprintLoader {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
-    private static final int MAX_EXPANDED_BLOCKS = 4096;
+    /** Shared upper bound for a compiled, reviewed building program. */
+    private static final int MAX_EXPANDED_BLOCKS = 65_536;
     private static final long MAX_EXPANSION_WORK = MAX_EXPANDED_BLOCKS * 4L;
     private static final int MAX_BLUEPRINT_DIMENSION = 128;
-    private static final long MAX_BLUEPRINT_FILE_BYTES = 4L * 1024L * 1024L;
+    private static final long MAX_BLUEPRINT_FILE_BYTES = 32L * 1024L * 1024L;
     private static final Pattern GENERATED_BLUEPRINT_NAME =
             Pattern.compile("generated_[a-z0-9][a-z0-9_-]{0,86}");
 
@@ -150,6 +151,11 @@ public final class BlueprintLoader {
                 digestField(digest, Integer.toString(placement.prerequisites().size()));
                 for (Integer prerequisite : placement.prerequisites().stream().sorted().toList()) {
                     digestField(digest, Integer.toString(prerequisite));
+                }
+                // Preserve every legacy digest while binding the new terrain-support contract
+                // whenever a reviewed building actually needs it.
+                if (placement.requiresExternalSupport()) {
+                    digestField(digest, "requires_external_support");
                 }
                 digestField(digest, "end_placement");
             }
@@ -323,6 +329,10 @@ public final class BlueprintLoader {
                 if (expansionWork > MAX_EXPANSION_WORK) {
                     throw new IOException("blueprint_expansion_work_too_large: " + expansionWork);
                 }
+            }
+            // Validate the complete operation budget before allocating any expanded cells. This
+            // keeps a knowingly over-budget, heavily overlapping program cheap to reject.
+            for (BlueprintSchema.Op op : schema.ops()) {
                 for (BlueprintSchema.BlockPlacement placement : expandOp(op)) {
                     put(placements, placement);
                 }
@@ -500,6 +510,10 @@ public final class BlueprintLoader {
         }
         if (placement.sequence() == null && !placement.prerequisites().isEmpty()) {
             throw new IOException("blueprint_prerequisites_require_sequence");
+        }
+        if (placement.requiresExternalSupport()
+                && placement.operation() != CellOperation.PLACE) {
+            throw new IOException("blueprint_external_support_requires_place");
         }
     }
 

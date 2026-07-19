@@ -96,6 +96,8 @@ public final class RecipeRegistry {
         // 确认后应能立即倒推备料，不应依赖索引初始化时序。用量/产量与 vanilla 一致。
         woodenBuildingParts(Items.OAK_PLANKS, Items.OAK_DOOR, Items.OAK_STAIRS);
         woodenBuildingParts(Items.SPRUCE_PLANKS, Items.SPRUCE_DOOR, Items.SPRUCE_STAIRS);
+        woodenBuildingParts(Items.BIRCH_PLANKS, Items.BIRCH_DOOR, Items.BIRCH_STAIRS);
+        woodenBuildingParts(Items.DARK_OAK_PLANKS, Items.DARK_OAK_DOOR, Items.DARK_OAK_STAIRS);
 
         tool(Items.WOODEN_PICKAXE, PLANKS, 3);
         tool(Items.STONE_PICKAXE, STONE_LIKE, 3);

@@ -41,11 +41,12 @@ public final class PayloadLimits {
     public static final int MAX_CAPABILITIES = 64;
     public static final int MAX_INVENTORY_ENTRIES = 64;
     public static final int MAX_EQUIPMENT_ENTRIES = 6;
-    public static final int MAX_PREVIEW_PLACEMENTS = 4_096;
+    /** Matches the validated plan/executor ceiling; transfer is paced in bounded chunks. */
+    public static final int MAX_PREVIEW_PLACEMENTS = 65_536;
     public static final int MAX_PREVIEW_PALETTE = 256;
     public static final int MAX_PREVIEW_PROPERTIES = 16;
     public static final int MAX_PREVIEW_CHUNK_CELLS = 256;
-    public static final int MAX_PREVIEW_CHUNKS = 16;
+    public static final int MAX_PREVIEW_CHUNKS = 256;
     public static final int MAX_PREVIEW_BEGIN_BYTES = 256 * 1_024;
 
     public static final int MAX_COMMAND_COUNT = 4_096;

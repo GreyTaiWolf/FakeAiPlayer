@@ -39,6 +39,13 @@ import net.minecraft.world.level.block.state.BlockState;
 
 public final class GoalPlanner {
 
+    /**
+     * A confirmed structure may be much larger than one player inventory. Plan only the next
+     * construction shipment; BuildTask stops at the first later shortage and the goal resumes
+     * from exact world state with another bounded shipment.
+     */
+    static final int MAX_BUILD_MATERIAL_CELLS_PER_BATCH = 1_792;
+
     private GoalPlanner() {
     }
 
@@ -297,7 +304,15 @@ public final class GoalPlanner {
     static List<BlueprintSchema.BlockPlacement> materialPlacements(
             BlueprintSchema schema,
             Predicate<BlueprintSchema.BlockPlacement> alreadySatisfied) {
-        List<BlueprintSchema.BlockPlacement> result = new ArrayList<>();
+        return materialPlacements(schema, alreadySatisfied, Integer.MAX_VALUE);
+    }
+
+    private static List<BlueprintSchema.BlockPlacement> materialPlacements(
+            BlueprintSchema schema,
+            Predicate<BlueprintSchema.BlockPlacement> alreadySatisfied,
+            int maximumCells) {
+        List<BlueprintSchema.BlockPlacement> result = new ArrayList<>(
+                Math.min(maximumCells, schema.placements().size()));
         Set<String> countedAtomicGroups = new HashSet<>();
         Predicate<BlueprintSchema.BlockPlacement> satisfied = alreadySatisfied == null
                 ? ignored -> false
@@ -317,8 +332,25 @@ public final class GoalPlanner {
                 continue;
             }
             result.add(placement);
+            // An unresolved atomic group is one inventory item, represented by its first
+            // unresolved member. Adding that representative completes the material unit; later
+            // members can neither split the group nor increase its material count. Stopping here
+            // therefore preserves the full-scan prefix without admitting an over-limit group.
+            if (result.size() == maximumCells) {
+                break;
+            }
         }
         return List.copyOf(result);
+    }
+
+    static List<BlueprintSchema.BlockPlacement> materialBatchPlacements(
+            BlueprintSchema schema,
+            Predicate<BlueprintSchema.BlockPlacement> alreadySatisfied,
+            int maximumCells) {
+        if (maximumCells < 1) {
+            throw new IllegalArgumentException("building_material_batch_must_be_positive");
+        }
+        return materialPlacements(schema, alreadySatisfied, maximumCells);
     }
 
     /** Surface block materials that use GatherQuotaTask's observable scan/path/harvest loop. */
@@ -670,10 +702,15 @@ public final class GoalPlanner {
             // 预算(real_build 实测 54/116 超时根因)。修:palette 材料按家族 owned 合计判足,够则不插采料步。
             Map<String, Integer> paletteNeeds = new LinkedHashMap<>();
             Map<Item, Integer> exactNeeds = new LinkedHashMap<>();
-            List<BlueprintSchema.BlockPlacement> materialPlacements = materialPlacements(schema,
-                    placement -> resumeContext != null && resumeContext.buildAnchor() != null
+            Predicate<BlueprintSchema.BlockPlacement> alreadySatisfied = placement ->
+                    resumeContext != null && resumeContext.buildAnchor() != null
                             && StructureVerifier.matches(
-                                    bot.serverLevel(), resumeContext.buildAnchor(), placement));
+                                    bot.serverLevel(), resumeContext.buildAnchor(), placement);
+            List<BlueprintSchema.BlockPlacement> materialPlacements =
+                    usesExactBuildingMaterials(g.blueprint())
+                            ? materialBatchPlacements(
+                                    schema, alreadySatisfied, MAX_BUILD_MATERIAL_CELLS_PER_BATCH)
+                            : materialPlacements(schema, alreadySatisfied);
             for (BlueprintSchema.BlockPlacement placement : materialPlacements) {
                 if (placement.palette() != null && !placement.palette().isBlank()
                         && MaterialPalette.isKnown(placement.palette())) {
