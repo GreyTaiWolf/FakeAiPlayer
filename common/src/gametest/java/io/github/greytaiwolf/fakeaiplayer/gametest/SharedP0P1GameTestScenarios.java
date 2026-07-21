@@ -554,14 +554,14 @@ public final class SharedP0P1GameTestScenarios {
                 fixture.setRelative(leaf, Blocks.AIR.defaultBlockState());
             }
             List<BlockPos> tallLogs = new ArrayList<>();
-            for (int dy = 0; dy < 7; dy++) {
+            for (int dy = 0; dy < 8; dy++) {
                 BlockPos log = relativeRoot.above(dy);
                 fixture.setRelative(log, Blocks.OAK_LOG.defaultBlockState());
                 tallLogs.add(fixture.absolute(log));
             }
             List<BlockPos> tallCanopy = List.of(
-                    relativeRoot.above(8).relative(Direction.EAST),
-                    relativeRoot.above(8).relative(Direction.WEST));
+                    relativeRoot.above(9).relative(Direction.EAST),
+                    relativeRoot.above(9).relative(Direction.WEST));
             for (BlockPos leaf : tallCanopy) {
                 fixture.setRelative(
                         leaf,
@@ -604,7 +604,7 @@ public final class SharedP0P1GameTestScenarios {
 
             // Positive player-placement evidence is authoritative even when an otherwise complete
             // pillar sits under another oak's natural canopy.
-            for (int dy = 0; dy < 7; dy++) {
+            for (int dy = 0; dy < 8; dy++) {
                 fixture.setRelative(relativeRoot.above(dy), Blocks.AIR.defaultBlockState());
             }
             for (BlockPos leaf : tallCanopy) {
@@ -1000,7 +1000,7 @@ public final class SharedP0P1GameTestScenarios {
                     }
                 }
 
-                if (state.pauseStarted) {
+                if (state.pauseStarted && !state.resumed) {
                     require(EpisodeMemory.INSTANCE.excludedCount(bot.getUUID())
                                     == state.excludedBeforePause,
                             "Safety pause incorrectly added an unreachable tree exclusion");

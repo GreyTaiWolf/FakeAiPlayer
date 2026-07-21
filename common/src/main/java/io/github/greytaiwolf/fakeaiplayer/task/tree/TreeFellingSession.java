@@ -195,10 +195,9 @@ public final class TreeFellingSession {
     }
 
     /**
-     * Proves that every log in the intact snapshot has at least one dry, visible, reachable work
-     * pose before the first irreversible block break. Removing wood can only open this reviewed
-     * geometry, so a tall/unsupported tree is rejected whole instead of becoming a floating
-     * remainder after its base is cut.
+     * Proves that every log has a dry, reachable work pose before the first irreversible break.
+     * The line-of-sight proof may pass only through lower committed logs that the bottom-up order
+     * removes first; leaves, terrain and every uncommitted block remain authoritative occluders.
      */
     private void preflight(AIPlayerEntity bot) {
         if (preflightRemaining.isEmpty()) {
@@ -209,8 +208,10 @@ public final class TreeFellingSession {
         BlockPos log = preflightRemaining.stream()
                 .min(logOrder(bot))
                 .orElseThrow();
+        Set<BlockPos> earlierCommittedLogs = earlierCommittedLogs(log);
         if (hasIndependentSupport(bot, bot.blockPosition())
-                && InteractionPosePlanner.canInteractFromCurrent(bot, log)) {
+                && InteractionPosePlanner.canInteractFromCurrent(
+                bot, log, earlierCommittedLogs)) {
             preflightRemaining.remove(log);
             preflightBudgetRetries = 0;
             if (preflightRemaining.isEmpty()) {
@@ -225,11 +226,12 @@ public final class TreeFellingSession {
         Set<BlockPos> excluded = hasIndependentSupport(bot, bot.blockPosition())
                 ? Set.of()
                 : Set.of(bot.blockPosition());
-        Optional<InteractionPose> proof = InteractionPosePlanner.plan(
+        Optional<InteractionPose> proof = InteractionPosePlanner.planWithRemovableOccluders(
                 bot, log, excluded, budget, searchesForTarget,
                 forbiddenSupportFeet,
                 feet -> hasIndependentSupport(bot, feet),
-                pose -> hasIndependentSupport(bot, pose));
+                pose -> hasIndependentSupport(bot, pose),
+                earlierCommittedLogs);
         if (proof.isPresent()) {
             preflightRemaining.remove(log);
             preflightBudgetRetries = 0;
@@ -560,6 +562,14 @@ public final class TreeFellingSession {
         return hasIndependentSupport(bot, pose.stand())
                 && pose.path().stream().allMatch(node ->
                 hasIndependentSupport(bot, node.pos()));
+    }
+
+    private Set<BlockPos> earlierCommittedLogs(BlockPos target) {
+        return tree.logs().stream()
+                .filter(position -> position.getY() < target.getY())
+                .filter(position -> !preflightRemaining.contains(position))
+                .map(BlockPos::immutable)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
     }
 
     private Comparator<BlockPos> logOrder(AIPlayerEntity bot) {
