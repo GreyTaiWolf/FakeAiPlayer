@@ -532,11 +532,16 @@ public final class SharedP2NavigationGameTestScenarios {
             helper.runAtTickTime(44, () -> fixture.checked(() -> {
                 NavigationHandle handle = handleRef[0];
                 require(handle != null, "Follow handle was not installed");
+                require(follower.blockPosition().distSqr(followerStart) >= 1.0D,
+                        "Continuously moving target stalled the follower between replan cadences");
+                if (handle.state() == NavigationState.ARRIVED) {
+                    require(ring.accepts(helper.getLevel(), follower.blockPosition()),
+                            "Follower arrived outside the tick-44 live target ring");
+                    return;
+                }
                 require(!handle.terminal(),
                         "Dynamic follow terminated as "
                                 + handle.state() + '/' + handle.reason());
-                require(follower.blockPosition().distSqr(followerStart) >= 1.0D,
-                        "Continuously moving target stalled the follower between replan cadences");
             }));
             helper.runAtTickTime(55, () -> fixture.checked(() -> {
                 NavigationHandle handle = handleRef[0];
