@@ -54,6 +54,7 @@ public final class PathExecutor {
     private WalkToController subWalker;
     private MiningController subMiner;
     private boolean digWalking;
+    private boolean pillarPlaced;
     private boolean replanTried;
     private final PathProgressTracker progressTracker = new PathProgressTracker();
     private int totalTicks;
@@ -432,6 +433,7 @@ public final class PathExecutor {
         subWalker = null;
         subMiner = null;
         digWalking = false;
+        pillarPlaced = false;
         progressTracker.reset();
         activeWalkTargetIndex = -1;
         nodeRetry = 0;
@@ -532,18 +534,24 @@ public final class PathExecutor {
             advance();
             return ActionResult.IN_PROGRESS;
         }
-        int slot = findPlaceableBlock(player);
-        if (slot < 0) {
-            return handleStuck(pack, "pillar_no_block");
+        if (!pillarPlaced) {
+            int slot = findPlaceableBlock(player);
+            if (slot < 0) {
+                return handleStuck(pack, "pillar_no_block");
+            }
+            InventoryAction.equipFromSlot(player, slot);
         }
-        InventoryAction.equipFromSlot(player, slot);
         LookAction.lookAtBlock(player, placeSlot, Direction.UP);
         pack.setForward(0.0F);
         pack.setJumping(true);
         pack.jumpOnce();
         double rise = player.getY() - placeSlot.getY();
-        if (rise > 0.5D && rise < 1.2D && player.serverLevel().getBlockState(placeSlot).isAir()) {
-            BuildAction.placeBlockAt(player, placeSlot);
+        if (!pillarPlaced && rise > 0.5D && rise < 1.2D
+                && player.serverLevel().getBlockState(placeSlot).isAir()) {
+            ActionResult placement = BuildAction.placeBlockAt(player, placeSlot);
+            if (placement.isSuccess()) {
+                pillarPlaced = true;
+            }
         }
         return ActionResult.IN_PROGRESS;
     }
@@ -636,6 +644,7 @@ public final class PathExecutor {
         subWalker = null;
         subMiner = null;
         digWalking = false;
+        pillarPlaced = false;
         progressTracker.reset();
         activeWalkTargetIndex = -1;
         nodeRetry = 0;
@@ -754,15 +763,44 @@ public final class PathExecutor {
                 return new RouteProblem(candidate.pos(), danger);
             }
             Node previous = path.get(candidateIndex - 1);
-            boolean transitionValid = validator.getNeighbors(previous, world).stream()
+            boolean currentEditCommitted = candidateIndex == index
+                    && ((candidate.moveType() == MoveType.DIG_THROUGH && digWalking)
+                    || (candidate.moveType() == MoveType.PILLAR_UP && pillarPlaced));
+            boolean candidateStandable = Standability.isStandableFresh(
+                    world, candidate.pos(), traversalPolicy);
+            if (currentEditCommitted && !candidateStandable) {
+                return new RouteProblem(candidate.pos(), "committed_edit_invalidated");
+            }
+            boolean committedEditCompletion = currentEditCommitted && candidateStandable
+                    && ((candidate.moveType() == MoveType.DIG_THROUGH
+                    && digWalking
+                    && candidate.pos().equals(previous.pos().below())
+                    && passableColumn(world, previous.pos(), traversalPolicy)
+                    && DangerCheck.scan(world, previous.pos(), traversalPolicy) == null)
+                    || (candidate.moveType() == MoveType.PILLAR_UP && pillarPlaced));
+            if (candidateIndex == index && !committedEditCompletion
+                    && !Standability.isStandableFresh(
+                    world, previous.pos(), traversalPolicy)) {
+                return new RouteProblem(previous.pos(), "source_not_standable");
+            }
+            // The first predecessor has already executed. Revalidate that edge against the live
+            // column so a completed DIG cannot hide a wall placed behind it. Only later path
+            // nodes may rely on the virtual clearing effect of a DIG that is still pending.
+            List<NeighborCandidate> transitions = candidateIndex == index
+                    ? validator.getNeighbors(previous.pos(), world)
+                    : validator.getNeighbors(previous, world);
+            boolean transitionValid = committedEditCompletion || transitions.stream()
                     .anyMatch(neighbor -> neighbor.pos().equals(candidate.pos())
                             && neighbor.moveType() == candidate.moveType());
             if (!transitionValid
                     && (candidate.moveType() == MoveType.DIG_THROUGH
                     || candidate.moveType() == MoveType.PILLAR_UP)) {
                 // A world-edit step that has already finished naturally becomes a normal dry
-                // stand position. Treat that as progress rather than invalidating the route.
-                transitionValid = Standability.isStandable(world, candidate.pos(), traversalPolicy);
+                // transition. Accept the changed move kind only when the live departure geometry
+                // still exposes an actual edge to the same target; standability alone could hide
+                // a wall that was placed back into the already-executed predecessor column.
+                transitionValid = transitions.stream()
+                        .anyMatch(neighbor -> neighbor.pos().equals(candidate.pos()));
             }
             if (!transitionValid) {
                 return new RouteProblem(candidate.pos(), "transition_blocked");
@@ -936,6 +974,7 @@ public final class PathExecutor {
                 subWalker = null;
                 subMiner = null;
                 digWalking = false;
+                pillarPlaced = false;
                 progressTracker.reset();
                 forceSingleStep = false;
                 replanTried = false;
@@ -976,6 +1015,7 @@ public final class PathExecutor {
         }
         subWalker = null;
         digWalking = false;
+        pillarPlaced = false;
         pack.stopMovement();
     }
 

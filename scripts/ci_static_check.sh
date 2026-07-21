@@ -254,6 +254,45 @@ grep -Fq 'record FollowRing' common/src/main/java/io/github/greytaiwolf/fakeaipl
 grep -Fq 'Map<SearchState, Double> gScore' \
     common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/MultiGoalAStarPathfinder.java \
   || fail 'P2 multi-goal A* does not retain heading-aware search state'
+for pathfinder in \
+    common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/AStarPathfinder.java \
+    common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/MultiGoalAStarPathfinder.java; do
+  grep -Fq 'boolean virtuallyClearedColumn' "$pathfinder" \
+    || fail "$pathfinder merges live and virtually cleared DIG columns"
+  grep -Fq 'node.moveType() == MoveType.DIG_THROUGH' "$pathfinder" \
+    || fail "$pathfinder does not derive virtual-column state from the incoming DIG move"
+done
+neighbor_enumerator=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NeighborEnumerator.java
+if ! grep -A1 -F 'if (!currentColumnWillBeCleared) {' "$neighbor_enumerator" \
+    | grep -Fq 'addPillar(current, world, result);'; then
+  fail 'virtual DIG clearance can leak through a PILLAR transition'
+fi
+path_executor=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/PathExecutor.java
+grep -Fq 'candidateIndex == index && !committedEditCompletion' "$path_executor" \
+  || fail 'the first pending route edge does not fail closed when its live source column is blocked'
+grep -Fq 'candidate.pos().equals(previous.pos().below())' "$path_executor" \
+  || fail 'the committed DIG exception is not limited to the expected downward support removal'
+grep -Fq 'candidate.moveType() == MoveType.PILLAR_UP && pillarPlaced' "$path_executor" \
+  || fail 'pillar completion is not tied to an executor-observed successful placement'
+grep -Fq 'currentEditCommitted && !candidateStandable' "$path_executor" \
+  || fail 'a committed DIG/PILLAR edit can continue after its target postcondition is lost'
+grep -Fq 'boolean committedEditCompletion = currentEditCommitted && candidateStandable' \
+    "$path_executor" \
+  || fail 'a committed edit completion exception can leak into future lookahead edges'
+first_edge_revalidation="$(sed -n \
+    '/List<NeighborCandidate> transitions = candidateIndex == index/,/boolean transitionValid/p' \
+    "$path_executor")"
+grep -Fq '? validator.getNeighbors(previous.pos(), world)' <<< "$first_edge_revalidation" \
+  || fail 'the first pending route edge does not revalidate its predecessor against live world state'
+grep -Fq ': validator.getNeighbors(previous, world);' <<< "$first_edge_revalidation" \
+  || fail 'future route edges do not preserve pending DIG virtual-column semantics'
+world_edit_fallback="$(sed -n \
+    '/if (!transitionValid/,/if (!transitionValid) {/p' "$path_executor")"
+grep -Fq 'transitionValid = transitions.stream()' <<< "$world_edit_fallback" \
+  || fail 'a completed world-edit step does not require a live replacement transition'
+if grep -Fq 'Standability.isStandable' <<< "$world_edit_fallback"; then
+  fail 'a completed world-edit step can bypass live transition validation with standability alone'
+fi
 
 [[ ! -e common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotTestSubcommand.java ]] \
   || fail 'test command leaked into production source set'

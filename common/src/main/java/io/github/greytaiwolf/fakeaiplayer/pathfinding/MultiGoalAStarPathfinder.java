@@ -19,8 +19,10 @@ import net.minecraft.server.level.ServerLevel;
  * One-frontier, cost-sensitive A* over a semantic {@link NavGoal}.
  *
  * <p>The search state includes incoming heading because turn penalties make two arrivals at the
- * same block observably different. With heuristic weight {@code 1.0}, the first accepted terminal
- * path is therefore no more expensive than the best equivalent singleton-goal search.</p>
+ * same block observably different. It also distinguishes a pending dig-cleared column because
+ * that virtual execution effect changes the legal outgoing transitions. With heuristic weight
+ * {@code 1.0}, the first accepted terminal path is therefore no more expensive than the best
+ * equivalent singleton-goal search.</p>
  */
 public final class MultiGoalAStarPathfinder {
     private static final int MAX_CACHE_ENTRIES = 256;
@@ -348,7 +350,8 @@ public final class MultiGoalAStarPathfinder {
     }
 
     private static SearchState state(Node node) {
-        return new SearchState(node.pos(), node.heading());
+        return new SearchState(
+                node.pos(), node.heading(), node.moveType() == MoveType.DIG_THROUGH);
     }
 
     private static List<Node> reconstruct(Node end) {
@@ -405,7 +408,9 @@ public final class MultiGoalAStarPathfinder {
         }
     }
 
-    private record SearchState(BlockPos position, Direction heading) {
+    private record SearchState(BlockPos position,
+                               Direction heading,
+                               boolean virtuallyClearedColumn) {
         private SearchState {
             position = position.immutable();
         }
@@ -451,7 +456,9 @@ public final class MultiGoalAStarPathfinder {
                         .thenComparingDouble(Node::gCost)
                         .thenComparingLong(node -> node.pos().asLong())
                         .thenComparingInt(node -> node.heading() == null
-                                ? -1 : node.heading().ordinal()));
+                                ? -1 : node.heading().ordinal())
+                        .thenComparingInt(node ->
+                                node.moveType() == MoveType.DIG_THROUGH ? 1 : 0));
 
         void add(Node node) {
             delegate.add(node);

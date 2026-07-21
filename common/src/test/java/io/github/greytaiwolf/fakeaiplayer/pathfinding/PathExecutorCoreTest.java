@@ -4,6 +4,7 @@ import net.minecraft.core.BlockPos;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class PathExecutorCoreTest {
@@ -27,7 +28,7 @@ final class PathExecutorCoreTest {
     }
 
     @Test
-    void passiveProgressNeverSkipsVerticalWorldEdits() {
+    void passiveProgressNeverSkipsVerticalWorldEdits() throws ReflectiveOperationException {
         BlockPos current = new BlockPos(4, 70, 4);
 
         assertFalse(PathExecutor.canPrecommitMovement(
@@ -40,5 +41,21 @@ final class PathExecutorCoreTest {
                 MoveType.JUMP_UP, current.above(), current.above(), true));
         assertTrue(PathExecutor.canPrecommitMovement(
                 MoveType.WALK, current, current, true));
+
+        assertVirtualDigStateIsDistinct(AStarPathfinder.class, current);
+        assertVirtualDigStateIsDistinct(MultiGoalAStarPathfinder.class, current);
+    }
+
+    private static void assertVirtualDigStateIsDistinct(Class<?> pathfinder,
+                                                         BlockPos position)
+            throws ReflectiveOperationException {
+        var state = pathfinder.getDeclaredMethod("state", Node.class);
+        state.setAccessible(true);
+        Node walk = new Node(position, 1.0D, 0.0D, MoveType.WALK, null);
+        Node dig = new Node(position, 1.0D, 0.0D, MoveType.DIG_THROUGH, null);
+
+        assertNotEquals(state.invoke(null, walk), state.invoke(null, dig),
+                pathfinder.getSimpleName()
+                        + " must not merge an ordinary column with a virtually cleared DIG column");
     }
 }

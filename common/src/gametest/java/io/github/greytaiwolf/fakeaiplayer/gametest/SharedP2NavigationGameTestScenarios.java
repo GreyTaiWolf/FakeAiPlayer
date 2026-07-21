@@ -7,6 +7,7 @@ import io.github.greytaiwolf.fakeaiplayer.pathfinding.InteractionPosePlanner;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.MoveType;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.MultiGoalAStarPathfinder;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavGoal;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.NeighborEnumerator;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationHandle;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationOutcomePolicy;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationPlanner;
@@ -14,6 +15,7 @@ import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationRequest;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationSearchBudget;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationSearchMetrics;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationState;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.Node;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.PathfindingResult;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.Standability;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.TraversalBounds;
@@ -230,6 +232,22 @@ public final class SharedP2NavigationGameTestScenarios {
                 fixture.setAbsolute(gate.above(), Blocks.STONE.defaultBlockState());
                 var gateBefore = helper.getLevel().getBlockState(gate);
                 var headBefore = helper.getLevel().getBlockState(gate.above());
+                NeighborEnumerator virtualDigEnumerator = new NeighborEnumerator(
+                        true, true, TraversalPolicy.TASK_MUTATING_DRY);
+                List<?> liveBlockedTransitions = virtualDigEnumerator.getNeighbors(
+                        gate, helper.getLevel());
+                List<?> virtualDigTransitions = virtualDigEnumerator.getNeighbors(
+                        new Node(gate, 0.0D, 0.0D, MoveType.DIG_THROUGH, null),
+                        helper.getLevel());
+                require(!Standability.isStandableFresh(
+                                helper.getLevel(), gate, TraversalPolicy.TASK_MUTATING_DRY),
+                        "A reblocked executed DIG source must fail live standability");
+                require(!hasMoveType(liveBlockedTransitions, MoveType.WALK),
+                        "A live blocked column unexpectedly exposed a walk exit");
+                require(hasMoveType(virtualDigTransitions, MoveType.WALK),
+                        "A pending DIG column did not expose its post-dig walk exit");
+                require(!hasMoveType(virtualDigTransitions, MoveType.PILLAR_UP),
+                        "A pending DIG column leaked virtual clearance into PILLAR_UP");
                 NavigationRequest dryWall = NavigationRequest.walk(
                         NavGoal.exact(goal), "p2_dry_wall")
                         .withConstraint(Set.of(), corridor, "p2_policy_corridor");
@@ -688,6 +706,23 @@ public final class SharedP2NavigationGameTestScenarios {
         if (!condition) {
             throw new IllegalStateException(message);
         }
+    }
+
+    private static boolean hasMoveType(List<?> candidates, MoveType expected) {
+        // NeighborCandidate is deliberately package-private; keep the production API closed and
+        // inspect only its stable record accessor from this loader-neutral regression scenario.
+        for (Object candidate : candidates) {
+            try {
+                var accessor = candidate.getClass().getDeclaredMethod("moveType");
+                accessor.setAccessible(true);
+                if (accessor.invoke(candidate) == expected) {
+                    return true;
+                }
+            } catch (ReflectiveOperationException exception) {
+                throw new IllegalStateException("Cannot inspect navigation candidate", exception);
+            }
+        }
+        return false;
     }
 
     private static double horizontalDistance(BlockPos first, BlockPos second) {

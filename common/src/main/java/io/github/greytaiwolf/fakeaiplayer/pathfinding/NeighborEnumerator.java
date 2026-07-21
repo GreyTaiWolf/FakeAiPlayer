@@ -130,7 +130,13 @@ public final class NeighborEnumerator {
             }
         }
         addDiagonals(current, world, result, currentColumnWillBeCleared);
-        addPillar(current, world, result, currentColumnWillBeCleared);
+        // A pillar entered directly from a virtual DIG column would stand in the old head block.
+        // That block is clear at execution time but still solid in the search snapshot, so the
+        // virtual state would have to survive beyond the PILLAR node. Keep that unsupported
+        // transition out of the graph instead of merging it with an ordinary pillar state.
+        if (!currentColumnWillBeCleared) {
+            addPillar(current, world, result);
+        }
         return result;
     }
 
@@ -177,15 +183,14 @@ public final class NeighborEnumerator {
     // NAV-9:垫方块上升一格(原地)。bot 会在脚下放方块并跳上去。需要头顶两格净空。
     private void addPillar(BlockPos current,
                            ServerLevel world,
-                           List<NeighborCandidate> result,
-                           boolean currentColumnWillBeCleared) {
+                           List<NeighborCandidate> result) {
         if (!canPillar) {
             return;
         }
         BlockPos up1 = current.above();
         BlockPos up2 = current.above(2);
         // up1 = 新脚位(当前头位,应为空);up2 = 新头位,需净空
-        if ((currentColumnWillBeCleared || collisionEmpty(world, up1))
+        if (collisionEmpty(world, up1)
                 && collisionEmpty(world, up2)
                 && !Standability.isDangerous(world.getBlockState(up1))) {
             result.add(new NeighborCandidate(up1, MoveType.PILLAR_UP, 0));

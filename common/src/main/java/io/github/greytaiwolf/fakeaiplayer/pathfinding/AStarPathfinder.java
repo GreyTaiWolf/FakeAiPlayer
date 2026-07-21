@@ -237,13 +237,14 @@ public final class AStarPathfinder {
                 .thenComparingDouble(Node::gCost)
                 .thenComparingLong(node -> node.pos().asLong())
                 .thenComparingInt(node -> node.heading() == null
-                        ? -1 : node.heading().ordinal()));
+                        ? -1 : node.heading().ordinal())
+                .thenComparingInt(node -> node.moveType() == MoveType.DIG_THROUGH ? 1 : 0));
         Map<SearchState, Double> gScore = new HashMap<>();
         Set<SearchState> closed = new HashSet<>();
 
         Node startNode = new Node(effectiveStart, 0.0D, CostModel.heuristic(effectiveStart, effectiveGoal) * heuristicWeight, MoveType.WALK, null);
         open.add(startNode);
-        gScore.put(new SearchState(effectiveStart, null), 0.0D);
+        gScore.put(state(startNode), 0.0D);
 
         int explored = 0;
         while (!open.isEmpty()) {
@@ -258,7 +259,7 @@ public final class AStarPathfinder {
             }
 
             Node current = open.poll();
-            SearchState currentState = new SearchState(current.pos(), current.heading());
+            SearchState currentState = state(current);
             if (current.gCost() > gScore.getOrDefault(currentState, Double.POSITIVE_INFINITY)
                     + 1.0E-9D || !closed.add(currentState)) {
                 continue;
@@ -282,14 +283,14 @@ public final class AStarPathfinder {
                         CostModel.heuristic(neighbor.pos(), effectiveGoal) * heuristicWeight,
                         neighbor.moveType(),
                         current);
-                SearchState candidateState = new SearchState(candidate.pos(), candidate.heading());
+                SearchState candidateState = state(candidate);
                 double knownG = gScore.getOrDefault(candidateState, Double.POSITIVE_INFINITY);
                 if (knownG <= tentativeG) {
                     continue;
                 }
                 gScore.put(candidateState, tentativeG);
                 // The vertical lower bound is admissible but can be inconsistent when a useful
-                // route initially drops away from an elevated goal. Reopen a closed heading-state
+                // route initially drops away from an elevated goal. Reopen a closed search state
                 // when a cheaper arrival is found so weight=1 retains the optimality contract.
                 closed.remove(candidateState);
                 open.add(candidate);
@@ -452,7 +453,14 @@ public final class AStarPathfinder {
         return Set.copyOf(copy);
     }
 
-    private record SearchState(BlockPos position, net.minecraft.core.Direction heading) {
+    private static SearchState state(Node node) {
+        return new SearchState(
+                node.pos(), node.heading(), node.moveType() == MoveType.DIG_THROUGH);
+    }
+
+    private record SearchState(BlockPos position,
+                               net.minecraft.core.Direction heading,
+                               boolean virtuallyClearedColumn) {
         private SearchState {
             position = position.immutable();
         }
