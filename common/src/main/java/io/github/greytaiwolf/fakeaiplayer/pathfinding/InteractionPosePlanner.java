@@ -62,9 +62,9 @@ public final class InteractionPosePlanner {
     }
 
     /**
-     * Plans while retaining only poses whose complete reviewed path satisfies a caller-specific
-     * invariant. Tree felling uses this to continue past a cheap canopy-supported route and still
-     * consider a slightly longer ground-supported alternative.
+     * Plans while retaining only poses that satisfy a caller-specific endpoint invariant. Any
+     * invariant that applies to the complete route must also be supplied through the
+     * {@code pathPositionConstraint} overload so it is enforced during every graph expansion.
      */
     public static Optional<InteractionPose> plan(
             AIPlayerEntity bot,
@@ -141,7 +141,6 @@ public final class InteractionPosePlanner {
             boolean requireTargetHit) {
         BlockPos immutableTarget = target.immutable();
         BlockPos current = bot.blockPosition();
-        int targetSearchLimit = Math.max(1, maxSearchesForTarget);
         double reach = bot.getAttributeValue(Attributes.BLOCK_INTERACTION_RANGE) + 0.5D;
         Standability.clearCache();
         if (!Standability.isStandable(
@@ -176,8 +175,7 @@ public final class InteractionPosePlanner {
             }
         }
 
-        List<InteractionPose> candidates = new ArrayList<>();
-        int searchesForTarget = 0;
+        List<BlockPos> legalStands = new ArrayList<>();
         for (BlockPos stand : candidateStands(immutableTarget, current, reach)) {
             if (excludedStands.contains(stand)
                     || pathExclusions.contains(stand)
@@ -189,58 +187,79 @@ public final class InteractionPosePlanner {
                     requireTargetHit)) {
                 continue;
             }
-            if (searchesForTarget >= targetSearchLimit) {
-                budget.markInconclusive();
-                break;
-            }
-            if (!budget.tryAcquireSearch()) {
-                break;
-            }
-            searchesForTarget++;
-            PathfindingResult path = new AStarPathfinder(
-                    bot.serverLevel(),
-                    current,
-                    stand,
-                    POSE_MAX_NODES,
-                    Math.min(POSE_MAX_MILLIS, budget.remainingMillis()),
-                    false,
-                    false,
-                    TraversalPolicy.TASK_WALK_DRY,
-                    1.0D,
-                    pathExclusions,
-                    TraversalBounds.unbounded(),
-                    pathPositionConstraint).findPath();
-            if (!path.success() || path.path().isEmpty()) {
-                if (path.reason() == FailureReason.TIMEOUT
-                        || path.reason() == FailureReason.SEARCH_LIMIT) {
-                    budget.markInconclusive();
-                }
+            InteractionPose standOnly = new InteractionPose(
+                    immutableTarget, stand, faceFrom(stand, immutableTarget),
+                    false, List.of(), 0.0D, 0);
+            if (!poseConstraint.test(standOnly)) {
                 continue;
             }
-            if (!path.path().get(0).pos().equals(current)
-                    || !path.path().get(path.path().size() - 1).pos().equals(stand)) {
-                // A work pose is an exact reviewed stance. Endpoint snapping is appropriate for
-                // generic movement but cannot be relabeled as this candidate pose.
-                budget.markInconclusive();
-                continue;
-            }
-            double cost = path.path().get(path.path().size() - 1).gCost();
-            InteractionPose candidate = new InteractionPose(
-                    immutableTarget,
-                    stand,
-                    faceFrom(stand, immutableTarget),
-                    false,
-                    path.path(),
-                    cost,
-                    path.nodesExplored());
-            if (poseConstraint.test(candidate)) {
-                candidates.add(candidate);
-            }
+            legalStands.add(stand.immutable());
         }
-        return candidates.stream()
-                .min(Comparator.comparingDouble(InteractionPose::pathCost)
-                        .thenComparingDouble(pose -> pose.stand().distSqr(current))
-                        .thenComparingLong(pose -> pose.stand().asLong()));
+        if (legalStands.isEmpty()) {
+            return Optional.empty();
+        }
+        // P2: one semantic interaction goal creates exactly one A* frontier. The historical
+        // maxSearchesForTarget parameter remains source-compatible, but now only validates that
+        // this caller allocated at least one search instead of truncating the candidate set.
+        if (maxSearchesForTarget <= 0 || !budget.tryAcquireSearch()) {
+            budget.markInconclusive();
+            return Optional.empty();
+        }
+        NavigationSearchBudget.Permit serverPermit = NavigationSearchBudget.acquire(
+                bot.getServer(), bot.getUUID(), POSE_MAX_NODES,
+                Math.min(POSE_MAX_MILLIS, budget.remainingMillis()));
+        if (!serverPermit.granted()) {
+            budget.markInconclusive();
+            return Optional.empty();
+        }
+        NavGoal.Interaction interactionGoal = new NavGoal.Interaction(
+                immutableTarget, Set.copyOf(legalStands),
+                bot.serverLevel().getBlockState(immutableTarget).toString());
+        PathfindingResult path = new MultiGoalAStarPathfinder(
+                bot.serverLevel(),
+                current,
+                interactionGoal,
+                serverPermit.maxNodes(),
+                serverPermit.maxMillis(),
+                false,
+                false,
+                TraversalPolicy.TASK_WALK_DRY,
+                1.0D,
+                pathExclusions,
+                TraversalBounds.unbounded(),
+                pathPositionConstraint,
+                "opaque",
+                budget.searchMetrics).findPath();
+        serverPermit.complete(path.nodesExplored(), path.elapsedMs());
+        FailureReason classified = serverPermit.classifyExhaustion(path.reason());
+        if (!path.success() && classified != path.reason()) {
+            path = PathfindingResult.failure(
+                    classified, path.nodesExplored(), path.elapsedMs(),
+                    path.worldVersion(), path.goalFingerprint());
+        }
+        if (!path.success() || path.path().isEmpty() || path.resolvedGoal() == null) {
+            if (path.reason() == FailureReason.TIMEOUT
+                    || path.reason() == FailureReason.SEARCH_LIMIT
+                    || path.reason() == FailureReason.SEARCH_BUDGET) {
+                budget.markInconclusive();
+            }
+            return Optional.empty();
+        }
+        if (!path.path().get(0).pos().equals(current)
+                || !interactionGoal.accepts(bot.serverLevel(), path.resolvedGoal())) {
+            budget.markInconclusive();
+            return Optional.empty();
+        }
+        BlockPos stand = path.resolvedGoal();
+        InteractionPose selected = new InteractionPose(
+                immutableTarget,
+                stand,
+                faceFrom(stand, immutableTarget),
+                false,
+                path.path(),
+                path.pathCost(),
+                path.nodesExplored());
+        return poseConstraint.test(selected) ? Optional.of(selected) : Optional.empty();
     }
 
     private static List<BlockPos> candidateStands(
@@ -281,6 +300,7 @@ public final class InteractionPosePlanner {
         private final long deadlineNanos;
         private int remainingSearches;
         private boolean inconclusive;
+        private final NavigationSearchMetrics searchMetrics = new NavigationSearchMetrics();
 
         private PlanningBudget(int maxSearches, long maxMillis) {
             remainingSearches = Math.max(0, maxSearches);
@@ -312,6 +332,11 @@ public final class InteractionPosePlanner {
         /** True when a candidate was skipped or a bounded A* ended before proving reachability. */
         public boolean inconclusive() {
             return inconclusive;
+        }
+
+        /** Request-local proof that a pose decision did not hide per-candidate A* loops. */
+        public NavigationSearchMetrics.Snapshot searchMetrics() {
+            return searchMetrics.snapshot();
         }
     }
 

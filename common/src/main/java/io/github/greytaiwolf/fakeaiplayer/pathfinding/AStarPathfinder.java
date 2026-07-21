@@ -166,12 +166,31 @@ public final class AStarPathfinder {
     }
 
     public static void invalidateCache(String reason) {
+        long version = invalidateWorldRevision();
+        BotLog.path(null, "findpath_cache_invalidated", "reason", reason, "version", version);
+    }
+
+    /**
+     * Advances the shared terrain revision and drops every navigation-derived cache without
+     * producing a log entry. Server world mutation hooks use this path because block updates can
+     * be frequent and are already observable through the revision itself.
+     *
+     * @return the new monotonically increasing world revision
+     */
+    public static long invalidateWorldRevision() {
+        long version;
         synchronized (RESULT_CACHE) {
-            cacheVersion++;
+            version = ++cacheVersion;
             RESULT_CACHE.clear();
         }
+        MultiGoalAStarPathfinder.clearCache();
         Standability.invalidateAll();
-        BotLog.path(null, "findpath_cache_invalidated", "reason", reason, "version", cacheVersion);
+        return version;
+    }
+
+    /** Monotonic runtime terrain revision shared by legacy and formal navigation planners. */
+    public static long worldVersion() {
+        return cacheVersion;
     }
 
     public PathfindingResult findPath() {
@@ -197,8 +216,9 @@ public final class AStarPathfinder {
         }
         enumerator.setPathGoal(effectiveGoal);
         CacheKey cacheKey = new CacheKey(
+                Integer.toHexString(System.identityHashCode(world.getServer())),
                 world.dimension().location().toString(), effectiveStart, effectiveGoal,
-                (int) (maxNodes + heuristicWeight * 1000), maxMillis,
+                maxNodes, maxMillis, heuristicWeight,
                 canPillar, allowDig, policy, excludedPositions, bounds, cacheVersion);
         if (!bypassCache && cacheableConstraint) {
             PathfindingResult cached = cached(cacheKey, startTime);
@@ -213,13 +233,17 @@ public final class AStarPathfinder {
 
         PriorityQueue<Node> open = new PriorityQueue<>(Comparator
                 .comparingDouble(Node::fCost)
-                .thenComparingDouble(Node::hCost));
-        Map<BlockPos, Double> gScore = new HashMap<>();
-        Set<BlockPos> closed = new HashSet<>();
+                .thenComparingDouble(Node::hCost)
+                .thenComparingDouble(Node::gCost)
+                .thenComparingLong(node -> node.pos().asLong())
+                .thenComparingInt(node -> node.heading() == null
+                        ? -1 : node.heading().ordinal()));
+        Map<SearchState, Double> gScore = new HashMap<>();
+        Set<SearchState> closed = new HashSet<>();
 
         Node startNode = new Node(effectiveStart, 0.0D, CostModel.heuristic(effectiveStart, effectiveGoal) * heuristicWeight, MoveType.WALK, null);
         open.add(startNode);
-        gScore.put(effectiveStart, 0.0D);
+        gScore.put(new SearchState(effectiveStart, null), 0.0D);
 
         int explored = 0;
         while (!open.isEmpty()) {
@@ -234,7 +258,9 @@ public final class AStarPathfinder {
             }
 
             Node current = open.poll();
-            if (!closed.add(current.pos())) {
+            SearchState currentState = new SearchState(current.pos(), current.heading());
+            if (current.gCost() > gScore.getOrDefault(currentState, Double.POSITIVE_INFINITY)
+                    + 1.0E-9D || !closed.add(currentState)) {
                 continue;
             }
             explored++;
@@ -249,21 +275,24 @@ public final class AStarPathfinder {
                         || !positionConstraint.test(neighbor.pos())) {
                     continue;
                 }
-                if (closed.contains(neighbor.pos())) {
-                    continue;
-                }
                 double tentativeG = current.gCost() + CostModel.stepCost(current, neighbor, world);
-                double knownG = gScore.getOrDefault(neighbor.pos(), Double.POSITIVE_INFINITY);
-                if (knownG <= tentativeG) {
-                    continue;
-                }
-                gScore.put(neighbor.pos(), tentativeG);
-                open.add(new Node(
+                Node candidate = new Node(
                         neighbor.pos(),
                         tentativeG,
                         CostModel.heuristic(neighbor.pos(), effectiveGoal) * heuristicWeight,
                         neighbor.moveType(),
-                        current));
+                        current);
+                SearchState candidateState = new SearchState(candidate.pos(), candidate.heading());
+                double knownG = gScore.getOrDefault(candidateState, Double.POSITIVE_INFINITY);
+                if (knownG <= tentativeG) {
+                    continue;
+                }
+                gScore.put(candidateState, tentativeG);
+                // The vertical lower bound is admissible but can be inconsistent when a useful
+                // route initially drops away from an elevated goal. Reopen a closed heading-state
+                // when a cheaper arrival is found so weight=1 retains the optimality contract.
+                closed.remove(candidateState);
+                open.add(candidate);
             }
         }
         return done(cacheIfAllowed(cacheKey, PathfindingResult.failure(
@@ -423,11 +452,19 @@ public final class AStarPathfinder {
         return Set.copyOf(copy);
     }
 
-    private record CacheKey(String dimension,
+    private record SearchState(BlockPos position, net.minecraft.core.Direction heading) {
+        private SearchState {
+            position = position.immutable();
+        }
+    }
+
+    private record CacheKey(String runtimeSession,
+                            String dimension,
                             BlockPos start,
                             BlockPos goal,
                             int maxNodes,
                             long maxMillis,
+                            double heuristicWeight,
                             boolean canPillar,
                             boolean allowDig,
                             TraversalPolicy policy,
@@ -449,9 +486,9 @@ public final class AStarPathfinder {
 
         private PathfindingResult toResult() {
             if (success) {
-                return PathfindingResult.success(path, nodesExplored, 0L);
+                return PathfindingResult.success(path, 0, 0L);
             }
-            return PathfindingResult.failure(reason, nodesExplored, 0L);
+            return PathfindingResult.failure(reason, 0, 0L);
         }
     }
 }

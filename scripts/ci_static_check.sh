@@ -43,15 +43,21 @@ required_files=(
   neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/client/NeoForgeBuildingPreviewRenderer.java
   common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedGameTestFixture.java
   common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedP0P1GameTestScenarios.java
+  common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedP2NavigationGameTestScenarios.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NavGoal.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NavigationHandle.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/MultiGoalAStarPathfinder.java
   common/src/main/java/io/github/greytaiwolf/fakeaiplayer/mixin/BlockItemPlacementMixin.java
   common/src/main/java/io/github/greytaiwolf/fakeaiplayer/task/tree/PlayerPlacedLogLedger.java
   fabric/src/gametest/resources/fabric.mod.json
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerDeterministicGameTests.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP0P1GameTests.java
+  fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP2GameTests.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerHarnessTestMod.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotTestSubcommand.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotVerifySubcommand.java
   neoforge/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP0P1GameTests.java
+  neoforge/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP2GameTests.java
   scripts/evidence_run.sh
   scripts/evidence_batch.sh
   scripts/evidence_validate.sh
@@ -82,6 +88,8 @@ grep -Fq 'must be a project-relative child directory' fabric/build.gradle \
   || fail 'harness run directory traversal guard is missing'
 grep -Fq '"fabric-gametest"' fabric/src/gametest/resources/fabric.mod.json \
   || fail 'GameTest entrypoint is not registered'
+grep -Fq 'FakeAiPlayerSharedP2GameTests' fabric/src/gametest/resources/fabric.mod.json \
+  || fail 'P2 shared GameTest entrypoint is not registered'
 
 for mixin_config in fabric/src/main/resources/fakeaiplayer.mixins.json \
     neoforge/src/main/resources/fakeaiplayer.mixins.json; do
@@ -195,6 +203,57 @@ for shared_wrapper in "$fabric_shared_tests" "$neoforge_shared_tests"; do
     fail "$shared_wrapper enables retries without isolating the monotonic provenance ledger"
   fi
 done
+
+p2_scenarios=common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedP2NavigationGameTestScenarios.java
+fabric_p2_tests=fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP2GameTests.java
+neoforge_p2_tests=neoforge/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP2GameTests.java
+grep -Fq '@GameTestHolder(FakeAiPlayer.MOD_ID)' "$neoforge_p2_tests" \
+  || fail 'NeoForge P2 scenarios are missing @GameTestHolder'
+grep -Fq '@PrefixGameTestTemplate(false)' "$neoforge_p2_tests" \
+  || fail 'NeoForge P2 template id would be rewritten by the holder prefix'
+fabric_p2_contracts="$(grep -oE 'batch = "[^"]+", timeoutTicks = [0-9]+' \
+    "$fabric_p2_tests" | sort)"
+neoforge_p2_contracts="$(grep -oE 'batch = "[^"]+", timeoutTicks = [0-9]+' \
+    "$neoforge_p2_tests" | sort)"
+[[ -n "$fabric_p2_contracts" && "$fabric_p2_contracts" == "$neoforge_p2_contracts" ]] \
+  || fail 'Fabric and NeoForge P2 GameTest ids/timeouts differ'
+fabric_p2_scenarios="$(grep -oE 'SharedP2NavigationGameTestScenarios\.[A-Za-z0-9_]+' \
+    "$fabric_p2_tests" | sort)"
+neoforge_p2_scenarios="$(grep -oE 'SharedP2NavigationGameTestScenarios\.[A-Za-z0-9_]+' \
+    "$neoforge_p2_tests" | sort)"
+[[ "$fabric_p2_scenarios" == "$neoforge_p2_scenarios" ]] \
+  || fail 'Fabric and NeoForge P2 wrappers do not delegate to the same scenarios'
+shared_p2_scenarios="$(grep -oE 'public static void [A-Za-z0-9_]+' \
+    "$p2_scenarios" | awk '{print $4}' | sort)"
+fabric_p2_delegates="$(printf '%s\n' "$fabric_p2_scenarios" \
+    | sed 's/^SharedP2NavigationGameTestScenarios\.//' | sort)"
+neoforge_p2_delegates="$(printf '%s\n' "$neoforge_p2_scenarios" \
+    | sed 's/^SharedP2NavigationGameTestScenarios\.//' | sort)"
+[[ "$shared_p2_scenarios" == "$fabric_p2_delegates"
+    && "$shared_p2_scenarios" == "$neoforge_p2_delegates" ]] \
+  || fail 'A shared P2 scenario is missing or duplicated in a loader wrapper'
+grep -Fq 'implements FabricGameTest' "$fabric_p2_tests" \
+  || fail 'Fabric P2 wrapper is not registered through FabricGameTest'
+for shared_wrapper in "$fabric_p2_tests" "$neoforge_p2_tests"; do
+  duplicate_batch="$(grep -oE 'batch = "[^"]+"' "$shared_wrapper" \
+      | sort | uniq -d | head -1)"
+  [[ -z "$duplicate_batch" ]] \
+    || fail "$shared_wrapper contains duplicate P2 batch id $duplicate_batch"
+done
+for shared_wrapper in "$fabric_p2_tests" "$neoforge_p2_tests"; do
+  if grep -Eq 'attempts[[:space:]]*=|requiredSuccesses[[:space:]]*=' "$shared_wrapper"; then
+    fail "$shared_wrapper enables retries without isolated P2 fixtures"
+  fi
+done
+grep -Fq 'frontiersStarted() == 1' "$p2_scenarios" \
+  || fail 'P2 single-search scenario does not assert a request-owned frontier count'
+grep -Fq 'record Exact' common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NavGoal.java \
+  || fail 'P2 NavGoal.Exact contract is missing'
+grep -Fq 'record FollowRing' common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NavGoal.java \
+  || fail 'P2 NavGoal.FollowRing contract is missing'
+grep -Fq 'Map<SearchState, Double> gScore' \
+    common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/MultiGoalAStarPathfinder.java \
+  || fail 'P2 multi-goal A* does not retain heading-aware search state'
 
 [[ ! -e common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotTestSubcommand.java ]] \
   || fail 'test command leaked into production source set'

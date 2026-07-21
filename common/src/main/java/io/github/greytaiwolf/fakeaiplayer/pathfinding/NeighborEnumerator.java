@@ -3,6 +3,7 @@ package io.github.greytaiwolf.fakeaiplayer.pathfinding;
 import io.github.greytaiwolf.fakeaiplayer.AIBotConfig;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Predicate;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -22,7 +23,9 @@ public final class NeighborEnumerator {
     private final boolean canPillar;
     private final boolean allowDig;
     private final TraversalPolicy policy;
-    private BlockPos pathGoal; // 终点格:岩浆预检豁免用(终点贴岩浆由任务层封堵处理,不该让唯一入口无解)
+    // 终点格:岩浆预检豁免用(终点贴岩浆由任务层封堵处理,不该让唯一入口无解)。P2 使用
+    // predicate 保留多终点语义；旧单目标入口仍由 setPathGoal 适配。
+    private Predicate<BlockPos> pathGoalPredicate = ignored -> false;
 
     public NeighborEnumerator() {
         this(false, true, TraversalPolicy.TASK_MUTATING_DRY);
@@ -57,7 +60,11 @@ public final class NeighborEnumerator {
     }
 
     public void setPathGoal(BlockPos goal) {
-        this.pathGoal = goal;
+        this.pathGoalPredicate = goal == null ? ignored -> false : goal::equals;
+    }
+
+    public void setPathGoalPredicate(Predicate<BlockPos> goalPredicate) {
+        this.pathGoalPredicate = goalPredicate == null ? ignored -> false : goalPredicate;
     }
 
     public List<NeighborCandidate> getNeighbors(BlockPos current, ServerLevel world) {
@@ -224,7 +231,7 @@ public final class NeighborEnumerator {
         }
         // P0 安全预检(深层挖矿头号死因):挖开这两格后侧面/上方岩浆会涌入——-59 钻石层就是岩浆层,
         // 实操挖钻石最常见死法。脚/头任一格暴露面贴岩浆 → 这条路不挖,A* 自然绕行。
-        boolean isGoal = pathGoal != null && (target.equals(pathGoal) || head.equals(pathGoal));
+        boolean isGoal = pathGoalPredicate.test(target) || pathGoalPredicate.test(head);
         if (!isGoal && (adjacentLava(world, target) || adjacentLava(world, head))) {
             return false; // 终点格豁免:贴岩浆的矿仍可达,挖前由任务层先封岩浆(ore_dig_lava_seal)
         }

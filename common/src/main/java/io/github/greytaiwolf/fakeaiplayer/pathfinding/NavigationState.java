@@ -11,11 +11,14 @@ public enum NavigationState {
     PLANNING,
     FOLLOWING,
     ARRIVED,
+    BLOCKED,
+    STALE_WORLD,
     PREEMPTED,
     CANCELLED,
     FAILED;
 
     public boolean terminal() {
-        return this == ARRIVED || this == PREEMPTED || this == CANCELLED || this == FAILED;
+        return this == ARRIVED || this == BLOCKED || this == STALE_WORLD
+                || this == PREEMPTED || this == CANCELLED || this == FAILED;
     }
 }

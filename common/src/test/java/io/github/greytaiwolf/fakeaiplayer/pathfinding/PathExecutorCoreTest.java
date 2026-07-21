@@ -25,4 +25,20 @@ final class PathExecutorCoreTest {
         assertFalse(PathExecutor.hasReachedNode(target.below(2), target),
                 "vertical tolerance must not turn a multi-block drop into arrival");
     }
+
+    @Test
+    void passiveProgressNeverSkipsVerticalWorldEdits() {
+        BlockPos current = new BlockPos(4, 70, 4);
+
+        assertFalse(PathExecutor.canPrecommitMovement(
+                MoveType.PILLAR_UP, current, current.above(), true));
+        assertFalse(PathExecutor.canPrecommitMovement(
+                MoveType.DIG_THROUGH, current, current.below(), true));
+        assertFalse(PathExecutor.canPrecommitMovement(
+                MoveType.JUMP_UP, current, current.above(), true));
+        assertTrue(PathExecutor.canPrecommitMovement(
+                MoveType.JUMP_UP, current.above(), current.above(), true));
+        assertTrue(PathExecutor.canPrecommitMovement(
+                MoveType.WALK, current, current, true));
+    }
 }

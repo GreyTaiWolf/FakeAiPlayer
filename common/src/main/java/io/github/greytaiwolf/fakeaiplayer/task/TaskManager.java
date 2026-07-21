@@ -38,6 +38,10 @@ public final class TaskManager {
         }
         io.github.greytaiwolf.fakeaiplayer.coordination.IdleCoordinator.INSTANCE
                 .cancelAmbient(bot, "task_assigned");
+        if (origin.safety()) {
+            bot.getActionPack().cancelActivePathForSafety(
+                    "safety_task_assign:" + origin.reason());
+        }
         abort(bot);
         bot.getActionPack().stopAll();
         UUID uuid = bot.getUUID();
@@ -213,6 +217,13 @@ public final class TaskManager {
     public boolean pauseFor(AIPlayerEntity bot, PauseOwner pauseOwner, String why) {
         UUID uuid = bot.getUUID();
         boolean changed = acquirePauseLock(uuid, pauseOwner);
+        if (pauseOwner.automaticResumeAllowed()) {
+            // Every safety producer must publish PREEMPTED before Task.pause reaches
+            // AbstractTask.onPause/stopAll. Keeping this at the common ownership boundary covers
+            // DangerWatcher, NavSafetyNet, and future safety callers uniformly.
+            bot.getActionPack().cancelActivePathForSafety(
+                    "automatic_pause:" + pauseOwner + ':' + why);
+        }
         Task current = active.remove(uuid);
         TaskOrigin origin = activeOrigins.remove(uuid);
         if (current == null) {
