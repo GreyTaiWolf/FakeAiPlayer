@@ -4,6 +4,9 @@ import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.log.LogCategory;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.AStarPathfinder;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationSnapshot;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationState;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.Node;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.PathExecutor;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.PathfindingResult;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.Standability;
@@ -12,7 +15,10 @@ import io.github.greytaiwolf.fakeaiplayer.pathfinding.TraversalBounds;
 import io.github.greytaiwolf.fakeaiplayer.runtime.PauseOwner;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.function.Predicate;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -26,7 +32,7 @@ public final class ActionPack {
     private static final int DIG_MAX_NODES = 4_000;
     private static final int AMBIENT_MAX_NODES = 2_000;
     // 接近原语专用大预算:接近被包裹的矿必然要挖,直接 DIG 且预算放大(挖掘邻居分支因子小,
-    // 24k 节点覆盖 ~40 格穿山直达;普通 startPathTo 的小预算 DIG 仅作走路兜底,语义不变)。
+    // 24k 节点覆盖 ~40 格穿山直达;普通 startPathTo 保持纯步行，破障必须走显式入口)。
     private static final int DIG_APPROACH_MAX_NODES = 24_000;
     private static final long PATHFIND_MAX_MILLIS = 50L;
     private static final long AMBIENT_PATHFIND_MAX_MILLIS = 8L;
@@ -48,6 +54,8 @@ public final class ActionPack {
     private BlockPos lastPathGoal;
     private BlockPos activePathGoal;
     private int nextPathfindTick;
+    private long navigationRequestId;
+    private NavigationSnapshot navigationSnapshot = NavigationSnapshot.idle();
     private final EnumSet<PauseOwner> suspensionOwners = EnumSet.noneOf(PauseOwner.class);
     private final EnumSet<PauseOwner> controllerFreezeOwners = EnumSet.noneOf(PauseOwner.class);
 
@@ -92,24 +100,33 @@ public final class ActionPack {
     }
 
     public ActionResult startWalkTo(Vec3 target) {
+        cancelPathNavigation(NavigationState.CANCELLED, "replaced_by_direct_walk");
+        stopMining();
         this.walkTo = new WalkToController(target);
-        this.mining = null;
-        this.pathExecutor = null;
         return ActionResult.IN_PROGRESS;
     }
 
     // 统一接近原语入口:挖掘感知寻路(大预算 DIG 直达,目标可为"挖开即站"的实心格——见
     // AStarPathfinder.resolveEndpoint 的挖掘终点豁免)。接近被包裹的矿/穿山直达用这个;
-    // 普通走路仍用 startPathTo(先 WALK 后小预算 DIG)。
+    // 普通走路始终走纯步行路径；需要破障的任务必须显式调用这个入口。
     public ActionResult startDigPathTo(BlockPos goal) {
         int now = player.getServer().getTickCount();
         BlockPos immutableGoal = goal.immutable();
         if (lastPathGoal != null && lastPathGoal.equals(immutableGoal) && now < nextPathfindTick) {
-            return ActionResult.failed("pathfinding_throttled");
+            return rejectNavigation(immutableGoal, "pathfinding_throttled");
+        }
+        Standability.clearCache();
+        if (hasActiveActions()
+                && !Standability.isStandable(
+                player.serverLevel(), player.blockPosition(), TraversalPolicy.TASK_MUTATING_DRY)) {
+            // A replacement request is speculative until its A* succeeds. Never teleport the bot
+            // out from under a still-valid path/walk/mining/item controller merely to obtain a
+            // planning start.
+            return rejectNavigation(immutableGoal, "replacement_path_start_invalid");
         }
         if (!snapPlayerToNearestStandable("path_start_invalid", TraversalPolicy.TASK_MUTATING_DRY)) {
             nextPathfindTick = now + PATHFIND_FAILURE_COOLDOWN_TICKS;
-            return ActionResult.failed("pathfinding_failed: NO_START");
+            return rejectNavigation(immutableGoal, "pathfinding_failed: NO_START");
         }
         boolean canPillar = PathExecutor.hasPlaceableBlock(player);
         PathfindingResult result = new AStarPathfinder(
@@ -118,23 +135,29 @@ public final class ActionPack {
                 canPillar, true, TraversalPolicy.TASK_MUTATING_DRY, 10.0D, java.util.Set.of()).findPath();
         if (!result.success()) {
             lastPathGoal = immutableGoal;
-            activePathGoal = null;
             nextPathfindTick = now + PATHFIND_FAILURE_COOLDOWN_TICKS;
-            return ActionResult.failed("pathfinding_failed: " + result.reason());
+            return rejectNavigation(
+                    immutableGoal, "pathfinding_failed: " + result.reason());
         }
         lastPathGoal = immutableGoal;
         nextPathfindTick = now + PATHFIND_SUCCESS_COOLDOWN_TICKS;
         BlockPos resolvedGoal = result.resolvedGoal() == null ? immutableGoal : result.resolvedGoal();
-        activePathGoal = resolvedGoal;
-        this.pathExecutor = new PathExecutor(
+        PathExecutor executor = new PathExecutor(
                 result.path(), resolvedGoal, false, canPillar, true,
                 TraversalPolicy.TASK_MUTATING_DRY);
+        beginNavigation(immutableGoal, TraversalPolicy.TASK_MUTATING_DRY);
         this.walkTo = null;
-        this.mining = null;
+        stopMining();
+        activateNavigation(immutableGoal, resolvedGoal, executor);
         return ActionResult.IN_PROGRESS;
     }
 
     public ActionResult startPathTo(BlockPos goal) {
+        return startPathTo(goal, false, false, false, TraversalPolicy.TASK_WALK_DRY);
+    }
+
+    /** Explicit world-mutating navigation for reviewed skills that may dig or pillar. */
+    public ActionResult startMutatingPathTo(BlockPos goal) {
         return startPathTo(
                 goal, PathExecutor.hasPlaceableBlock(player), true, false,
                 TraversalPolicy.TASK_MUTATING_DRY);
@@ -146,6 +169,83 @@ public final class ActionPack {
      */
     public ActionResult startNonMutatingPathTo(BlockPos goal) {
         return startPathTo(goal, false, false, true);
+    }
+
+    /**
+     * Starts an already-reviewed dry walking path without running A* a second time. Interaction
+     * pose selection uses this to preserve the exact route whose cost was compared against other
+     * poses. The path is rejected if the bot moved since planning or if it contains a world edit.
+     */
+    public ActionResult startPlannedNonMutatingPath(BlockPos goal, List<Node> plannedPath) {
+        return startPlannedNonMutatingPath(
+                goal, plannedPath, Set.of(), ignored -> true);
+    }
+
+    /**
+     * Starts a reviewed route while retaining the skill's exclusions and world-sensitive feet
+     * invariant for route revalidation and any later local replan.
+     */
+    public ActionResult startPlannedNonMutatingPath(
+            BlockPos goal,
+            List<Node> plannedPath,
+            Set<BlockPos> pathExclusions,
+            Predicate<BlockPos> positionConstraint) {
+        BlockPos immutableGoal = goal.immutable();
+        if (plannedPath == null || plannedPath.isEmpty()) {
+            return rejectNavigation(immutableGoal, "planned_path_empty");
+        }
+        List<Node> path = List.copyOf(plannedPath);
+        Set<BlockPos> exclusions = pathExclusions == null
+                ? Set.of()
+                : pathExclusions.stream()
+                .map(BlockPos::immutable)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        Predicate<BlockPos> constraint = positionConstraint == null
+                ? ignored -> true : positionConstraint;
+        BlockPos current = player.blockPosition();
+        BlockPos plannedStart = path.get(0).pos();
+        if (!sameArrivalColumn(current, plannedStart)) {
+            return rejectNavigation(immutableGoal, "planned_path_stale_start");
+        }
+        if (exclusions.contains(current)
+                || !constraint.test(current)
+                || path.stream().anyMatch(node -> exclusions.contains(node.pos())
+                || !constraint.test(node.pos()))) {
+            return rejectNavigation(immutableGoal, "planned_path_violates_skill_constraint");
+        }
+        if (path.stream().anyMatch(node -> node.moveType()
+                == io.github.greytaiwolf.fakeaiplayer.pathfinding.MoveType.DIG_THROUGH
+                || node.moveType()
+                == io.github.greytaiwolf.fakeaiplayer.pathfinding.MoveType.PILLAR_UP)) {
+            return rejectNavigation(immutableGoal, "planned_path_contains_world_edit");
+        }
+        BlockPos resolvedGoal = path.get(path.size() - 1).pos();
+        if (!resolvedGoal.equals(immutableGoal)) {
+            return rejectNavigation(immutableGoal, "planned_path_wrong_goal");
+        }
+        lastPathGoal = immutableGoal;
+        // Planned routes are exempt from the ordinary debounce; do not let a previous request's
+        // expiry accidentally throttle a later normal route to this goal.
+        nextPathfindTick = player.getServer().getTickCount();
+        beginNavigation(immutableGoal, TraversalPolicy.TASK_WALK_DRY);
+        this.walkTo = null;
+        stopMining();
+        if (sameArrivalColumn(current, resolvedGoal)) {
+            navigationSnapshot = new NavigationSnapshot(
+                    navigationRequestId, NavigationState.ARRIVED,
+                    current, immutableGoal, resolvedGoal, resolvedGoal,
+                    TraversalPolicy.TASK_WALK_DRY,
+                    path.size(), 0,
+                    Math.max(0.0D, path.get(path.size() - 1).gCost()),
+                    0.0D, 0, 0, 0.0D, 0, 0, "", "");
+            activePathGoal = null;
+            return ActionResult.SUCCESS;
+        }
+        PathExecutor executor = new PathExecutor(
+                path, resolvedGoal, true, false, false, TraversalPolicy.TASK_WALK_DRY,
+                TraversalBounds.unbounded(), exclusions, constraint);
+        activateNavigation(immutableGoal, resolvedGoal, executor);
+        return ActionResult.IN_PROGRESS;
     }
 
     /** Ambient movement is walk-only and rejects enclosed terminal cells. */
@@ -191,19 +291,27 @@ public final class ActionPack {
         int now = player.getServer().getTickCount();
         BlockPos immutableGoal = goal.immutable();
         if (lastPathGoal != null && lastPathGoal.equals(immutableGoal) && now < nextPathfindTick) {
-            return ActionResult.failed("pathfinding_throttled");
+            return rejectNavigation(immutableGoal, "pathfinding_throttled");
         }
         Standability.clearCache();
+        boolean currentStartStandable = Standability.isStandable(
+                player.serverLevel(), player.blockPosition(), traversalPolicy);
         boolean validAmbientStart = traversalPolicy != TraversalPolicy.AMBIENT_DRY_OPEN
-                || (bounds.contains(player.blockPosition())
-                && Standability.isStandable(
-                player.serverLevel(), player.blockPosition(), traversalPolicy));
+                || (bounds.contains(player.blockPosition()) && currentStartStandable);
+        if (traversalPolicy != TraversalPolicy.AMBIENT_DRY_OPEN
+                && !currentStartStandable
+                && hasActiveActions()) {
+            // rejectNavigation deliberately retains any active controller. Keeping the position
+            // unchanged is equally important: otherwise that controller would resume from a
+            // location outside the movement/mining action it reviewed.
+            return rejectNavigation(immutableGoal, "replacement_path_start_invalid");
+        }
         if (!validAmbientStart || (traversalPolicy != TraversalPolicy.AMBIENT_DRY_OPEN
+                && !currentStartStandable
                 && !snapPlayerToNearestStandable("path_start_invalid", traversalPolicy))) {
             lastPathGoal = immutableGoal;
-            activePathGoal = null;
             nextPathfindTick = now + PATHFIND_FAILURE_COOLDOWN_TICKS;
-            return ActionResult.failed("pathfinding_failed: NO_START");
+            return rejectNavigation(immutableGoal, "pathfinding_failed: NO_START");
         }
         ServerLevel world = player.serverLevel();
         BlockPos from = player.blockPosition();
@@ -226,24 +334,30 @@ public final class ActionPack {
         }
         if (!result.success()) {
             lastPathGoal = immutableGoal;
-            activePathGoal = null;
             nextPathfindTick = now + PATHFIND_FAILURE_COOLDOWN_TICKS;
-            return ActionResult.failed("pathfinding_failed: " + result.reason());
+            return rejectNavigation(
+                    immutableGoal, "pathfinding_failed: " + result.reason());
         }
         lastPathGoal = immutableGoal;
         nextPathfindTick = now + PATHFIND_SUCCESS_COOLDOWN_TICKS;
         BlockPos resolvedGoal = result.resolvedGoal() == null ? immutableGoal : result.resolvedGoal();
-        activePathGoal = resolvedGoal;
-        this.pathExecutor = new PathExecutor(
+        PathExecutor executor = new PathExecutor(
                 result.path(), resolvedGoal, exactGoal, canPillar, allowDigFallback,
                 traversalPolicy, bounds);
+        beginNavigation(immutableGoal, traversalPolicy);
         this.walkTo = null;
-        this.mining = null;
+        stopMining();
+        activateNavigation(immutableGoal, resolvedGoal, executor);
         return ActionResult.IN_PROGRESS;
     }
 
     public BlockPos activePathGoal() {
         return activePathGoal;
+    }
+
+    /** Latest lifecycle state, retained after the executor becomes idle for task recovery/tests. */
+    public NavigationSnapshot navigationSnapshot() {
+        return navigationSnapshot;
     }
 
     public boolean snapPlayerToNearestStandable(String reason) {
@@ -309,8 +423,10 @@ public final class ActionPack {
     }
 
     public ActionResult startMining(BlockPos pos, Direction face) {
+        cancelPathNavigation(NavigationState.CANCELLED, "replaced_by_mining");
+        this.walkTo = null;
+        stopMovement();
         this.mining = new MiningController(pos, face);
-        this.pathExecutor = null;
         this.forward = 0.0F;
         this.strafing = 0.0F;
         return ActionResult.IN_PROGRESS;
@@ -334,11 +450,7 @@ public final class ActionPack {
     }
 
     public void stopAll() {
-        if (pathExecutor != null) {
-            pathExecutor.abort(this);
-            pathExecutor = null;
-        }
-        activePathGoal = null;
+        cancelPathNavigation(NavigationState.CANCELLED, "stop_all");
         stopMining();
         this.walkTo = null;
         stopMovement();
@@ -428,9 +540,7 @@ public final class ActionPack {
         if (pathExecutor == null) {
             return false;
         }
-        pathExecutor.abort(this);
-        pathExecutor = null;
-        activePathGoal = null;
+        cancelPathNavigation(NavigationState.PREEMPTED, reason);
         BotLog.path(player, "path_cancelled_for_safety", "reason", reason);
         return true;
     }
@@ -518,13 +628,16 @@ public final class ActionPack {
 
         ActionResult result = pathExecutor.tick(this);
         if (result.isInProgress()) {
+            navigationSnapshot = snapshotFromExecutor(NavigationState.FOLLOWING, "");
             return;
         }
 
         if (result.isSuccess()) {
             BotLog.path(player, "path_complete", "ticks", pathExecutor.totalTicks());
+            navigationSnapshot = snapshotFromExecutor(NavigationState.ARRIVED, "");
         } else {
             BotLog.warn(LogCategory.ERROR, player, "path_failed", "reason", result.reason());
+            navigationSnapshot = snapshotFromExecutor(NavigationState.FAILED, result.reason());
         }
         pathExecutor = null;
         activePathGoal = null;
@@ -550,6 +663,124 @@ public final class ActionPack {
             BotLog.warn(LogCategory.ERROR, player, "mine_failed", "reason", result.reason());
         }
         mining = null;
+    }
+
+    private void beginNavigation(BlockPos requestedGoal, TraversalPolicy traversalPolicy) {
+        cancelPathNavigation(NavigationState.CANCELLED, "replaced_by_new_navigation");
+        navigationRequestId++;
+        navigationSnapshot = new NavigationSnapshot(
+                navigationRequestId,
+                NavigationState.PLANNING,
+                player.blockPosition(),
+                requestedGoal,
+                null,
+                null,
+                traversalPolicy,
+                0,
+                0,
+                0.0D,
+                0.0D,
+                0,
+                0,
+                Double.POSITIVE_INFINITY,
+                0,
+                0,
+                "",
+                "");
+    }
+
+    private void activateNavigation(
+            BlockPos requestedGoal, BlockPos resolvedGoal, PathExecutor executor) {
+        this.pathExecutor = executor;
+        this.activePathGoal = resolvedGoal.immutable();
+        navigationSnapshot = new NavigationSnapshot(
+                navigationRequestId,
+                NavigationState.FOLLOWING,
+                player.blockPosition(),
+                requestedGoal,
+                resolvedGoal,
+                executor.currentNode(),
+                executor.traversalPolicy(),
+                executor.pathLength(),
+                executor.remainingNodes(),
+                executor.pathCost(),
+                executor.remainingPathCost(),
+                executor.totalTicks(),
+                executor.replanCount(),
+                executor.bestNodeDistance(),
+                executor.noProgressEvents(),
+                executor.oscillationEvents(),
+                executor.lastReplanReason(),
+                "");
+    }
+
+    private ActionResult rejectNavigation(BlockPos requestedGoal, String reason) {
+        if (pathExecutor != null) {
+            // Planning is synchronous: a rejected replacement must leave the previously valid
+            // executor and its request snapshot untouched.
+            return ActionResult.failed(reason);
+        }
+        navigationRequestId++;
+        activePathGoal = null;
+        navigationSnapshot = new NavigationSnapshot(
+                navigationRequestId,
+                NavigationState.FAILED,
+                player.blockPosition(),
+                requestedGoal,
+                null,
+                null,
+                null,
+                0,
+                0,
+                0.0D,
+                0.0D,
+                0,
+                0,
+                Double.POSITIVE_INFINITY,
+                0,
+                0,
+                "",
+                reason);
+        return ActionResult.failed(reason);
+    }
+
+    private void cancelPathNavigation(NavigationState state, String reason) {
+        if (pathExecutor == null) {
+            return;
+        }
+        NavigationSnapshot terminal = snapshotFromExecutor(state, reason);
+        pathExecutor.abort(this);
+        pathExecutor = null;
+        activePathGoal = null;
+        navigationSnapshot = terminal;
+    }
+
+    private NavigationSnapshot snapshotFromExecutor(NavigationState state, String reason) {
+        return new NavigationSnapshot(
+                navigationRequestId,
+                state,
+                navigationSnapshot.start(),
+                navigationSnapshot.requestedGoal(),
+                activePathGoal,
+                pathExecutor.currentNode(),
+                pathExecutor.traversalPolicy(),
+                pathExecutor.pathLength(),
+                pathExecutor.remainingNodes(),
+                pathExecutor.pathCost(),
+                pathExecutor.remainingPathCost(),
+                pathExecutor.totalTicks(),
+                pathExecutor.replanCount(),
+                pathExecutor.bestNodeDistance(),
+                pathExecutor.noProgressEvents(),
+                pathExecutor.oscillationEvents(),
+                pathExecutor.lastReplanReason(),
+                reason);
+    }
+
+    private static boolean sameArrivalColumn(BlockPos first, BlockPos second) {
+        return first.getX() == second.getX()
+                && first.getZ() == second.getZ()
+                && Math.abs(first.getY() - second.getY()) <= 1;
     }
 
     private static float clampInput(float value) {

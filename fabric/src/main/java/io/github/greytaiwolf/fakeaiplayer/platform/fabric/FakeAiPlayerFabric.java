@@ -21,6 +21,7 @@ public final class FakeAiPlayerFabric implements ModInitializer {
 
         ServerLifecycleEvents.SERVER_STARTED.register(FakeAiPlayer::onServerStarted);
         ServerLifecycleEvents.SERVER_STOPPING.register(FakeAiPlayer::onServerStopping);
+        ServerLifecycleEvents.SERVER_STOPPED.register(FakeAiPlayer::onServerStopped);
         ServerTickEvents.END_SERVER_TICK.register(FakeAiPlayer::onServerTick);
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
                 FakeAiPlayer.registerCommands(dispatcher, registryAccess));

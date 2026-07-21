@@ -6,6 +6,7 @@
   "refmap": "fakeaiplayer.refmap.json",
   "mixins": [
     "BaseContainerBlockEntityAccessorMixin",
+    "BlockItemPlacementMixin",
     "ClientConnectionAccessorMixin",
     "PlayerManagerFakePlayerMixin",
     "MerchantEntityInvokerMixin"

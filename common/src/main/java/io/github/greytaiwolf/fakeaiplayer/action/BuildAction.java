@@ -281,6 +281,10 @@ public final class BuildAction {
         if (!matchesExpectedState(placementState, expectedBlockId, expectedPalette, expectedProperties)) {
             return ActionResult.failed("held_block_not_expected_by_plan");
         }
+        if (!io.github.greytaiwolf.fakeaiplayer.task.tree.PlayerPlacedLogLedger.INSTANCE
+                .allowsTrackedPlacement(placementState)) {
+            return ActionResult.failed("log_provenance_unavailable");
+        }
         if (!placementState.canSurvive(player.serverLevel(), pos)
                 || !player.serverLevel().isUnobstructed(placementState, pos, CollisionContext.of(player))) {
             return ActionResult.failed("target_blocked_or_unsupported");
@@ -288,6 +292,8 @@ public final class BuildAction {
         if (!player.serverLevel().setBlock(pos, placementState, 3)) {
             return ActionResult.failed("world_mutation_rejected");
         }
+        io.github.greytaiwolf.fakeaiplayer.task.tree.PlayerPlacedLogLedger.INSTANCE.record(
+                player.serverLevel(), pos, placementState);
         if (!player.getAbilities().instabuild) {
             stack.shrink(1);
         }

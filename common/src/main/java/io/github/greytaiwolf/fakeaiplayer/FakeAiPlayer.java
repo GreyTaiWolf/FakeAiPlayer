@@ -19,6 +19,7 @@ import io.github.greytaiwolf.fakeaiplayer.platform.PlatformServices;
 import io.github.greytaiwolf.fakeaiplayer.runtime.RuntimeLifecycleCoordinator;
 import io.github.greytaiwolf.fakeaiplayer.task.BotTickCoordinator;
 import io.github.greytaiwolf.fakeaiplayer.task.TaskManager;
+import io.github.greytaiwolf.fakeaiplayer.task.tree.PlayerPlacedLogLedger;
 import net.minecraft.commands.CommandBuildContext;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.server.MinecraftServer;
@@ -79,6 +80,7 @@ public final class FakeAiPlayer {
 
     public static void onServerStarted(MinecraftServer server) {
         requireInitialized();
+        PlayerPlacedLogLedger.INSTANCE.onServerStarted(server);
         BotLog.lifecycle("server_started", "motd", server.getMotd());
         RuntimeLifecycleCoordinator.INSTANCE.onServerStarted(server, config);
     }
@@ -88,6 +90,13 @@ public final class FakeAiPlayer {
             BotInventorySessionManager.INSTANCE.clear(server);
             BuildingPreviewService.INSTANCE.clear(server);
             RuntimeLifecycleCoordinator.INSTANCE.onServerStopping(server);
+            PlayerPlacedLogLedger.INSTANCE.onServerStopping(server);
+        }
+    }
+
+    public static void onServerStopped(MinecraftServer server) {
+        if (initialized) {
+            PlayerPlacedLogLedger.INSTANCE.onServerStopped(server);
         }
     }
 
@@ -100,6 +109,7 @@ public final class FakeAiPlayer {
         AIBotServerNetworking.INSTANCE.tick(server);
         BuildingPreviewService.INSTANCE.tick(server);
         BotInventorySessionManager.INSTANCE.tick(server);
+        PlayerPlacedLogLedger.INSTANCE.tick(server);
         io.github.greytaiwolf.fakeaiplayer.log.DiagnosticLogger.INSTANCE.tick(server);
         if (server.getTickCount() > 0 && server.getTickCount() % 6000 == 0) {
             BotPersistence.INSTANCE.saveAllAsync(server);

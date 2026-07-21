@@ -7,11 +7,19 @@ import io.github.greytaiwolf.fakeaiplayer.craft.RecipeRegistry;
 import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.mining.OreProspector;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationSnapshot;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationState;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.Standability;
+import io.github.greytaiwolf.fakeaiplayer.task.tree.TreeDetector;
+import io.github.greytaiwolf.fakeaiplayer.task.tree.TreeFellingSession;
+import io.github.greytaiwolf.fakeaiplayer.task.tree.TreeSnapshot;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.Items;
@@ -49,11 +57,14 @@ public final class GatherQuotaTask extends AbstractTask {
     private static final int KNOWN_RESOURCE_RANGE = 192; // 知识库记忆点导向的最大距离
     private static final int GOTO_FAIL_EXCLUDE = 2;      // 同一目标 GOTO 连续走崩 N 次 → 工作记忆拉黑
     private static final int GOTO_STUCK_LIMIT = 80;      // R1:GOTO 朝树寻路时坐标连续这么久(4s)不动 → 判悬空/卡死,强制脱困
+    private static final int TREE_PLANNING_BACKOFF_TICKS = 200;
+    private static final int TREE_DROP_PICKUP_GRACE_TICKS = 20;
 
     private enum Phase {
         SURVEY,
         GOTO,
         HARVEST,
+        FELL_TREE,
         PICKUP,
         DEPOSIT,
         ROAM,
@@ -76,6 +87,8 @@ public final class GatherQuotaTask extends AbstractTask {
     private int pickupTicks;
     private int pickupMisses; // 连续"砍了但没捡到掉落物"的次数,超限才判 pickup_timeout(避免一棵没捡到就整个采集失败)
     private boolean pickupSweepAttempted;
+    private boolean batchTreePickup;
+    private int treeDropPickupGraceTicks;
     private StockpileTask stockpileTask;
     private int searchRadius = SEARCH_RADIUS;
     private int lastScanTick = -100;
@@ -103,9 +116,12 @@ public final class GatherQuotaTask extends AbstractTask {
     private int lastExploreScanTick = -100;
     private BlockPos lastGotoTarget;
     private int gotoFailStreak;
-    private boolean treeDigTried; // 当前目标是否已升级过挖掘接近(崖壁/下方树走不到时下沉掘进)
+    private boolean treeDigTried; // 当前目标是否已评估过显式破障；原木目标会按非破坏策略拒绝
     private BlockPos gotoStuckPos; // R1:GOTO 上次记录的坐标(久不动判悬空死锁)
     private int gotoStuckTick;
+    private long gotoNavigationRequestId;
+    private TreeFellingSession treeFellingSession;
+    private final Map<BlockPos, Integer> deferredTreeLogExpiries = new HashMap<>();
 
     public GatherQuotaTask(Item targetItem, int targetCount) {
         this(targetItem, targetCount, false);
@@ -159,6 +175,9 @@ public final class GatherQuotaTask extends AbstractTask {
         countSoFar = progressCount(bot);
         phase = countSoFar >= targetCount ? Phase.DONE : Phase.SURVEY;
         stockpileTask = null;
+        treeFellingSession = null;
+        batchTreePickup = false;
+        treeDropPickupGraceTicks = 0;
     }
 
     @Override
@@ -166,16 +185,29 @@ public final class GatherQuotaTask extends AbstractTask {
         // 工作记忆:记录走过的轨迹(4 格去抖),roam 选点避开已搜过的区域(不再盲目转圈)。
         EpisodeMemory.INSTANCE.recordTrail(bot.getUUID(), bot.blockPosition());
         countSoFar = progressCount(bot);
-        if (countSoFar >= targetCount) {
+        // A natural tree is one committed work unit. An early pickup can satisfy the quota, but
+        // stopping here would leave the rest of the trunk floating.
+        if (countSoFar >= targetCount
+                && treeFellingSession == null
+                && phase != Phase.PICKUP) {
             phase = Phase.DONE;
         }
         if (elapsed > 6000) {
+            if (treeFellingSession != null) {
+                treeFellingSession.cancel(bot);
+                treeFellingSession = null;
+            }
+            if (stockpileTask != null) {
+                stockpileTask.cancel(bot, "parent_gather_timeout");
+                stockpileTask = null;
+            }
+            bot.getActionPack().stopAll();
             fail("gather_timeout");
             return;
         }
         // A:采集自愈——只看"是否采到新木"(count 是否增长),不看位置。GOTO 缓慢挪动但久采不到(走不到树/
         // 砍不动)也算卡 → 及时漫游换片,而非缓慢耗到 gather_timeout(实测:采到 5 根后走不到剩下的、5min 超时被秒)。
-        if (phase != Phase.ROAM && phase != Phase.EXPLORE) {
+        if (phase != Phase.ROAM && phase != Phase.EXPLORE && phase != Phase.FELL_TREE) {
             if (countSoFar != selfStuckCount) {
                 selfStuckCount = countSoFar;
                 selfStuckTick = elapsed;
@@ -189,6 +221,7 @@ public final class GatherQuotaTask extends AbstractTask {
             case SURVEY -> survey(bot);
             case GOTO -> goToTarget(bot);
             case HARVEST -> harvest(bot);
+            case FELL_TREE -> fellTree(bot);
             case PICKUP -> pickup(bot);
             case DEPOSIT -> deposit(bot);
             case ROAM -> roamMove(bot);
@@ -245,7 +278,8 @@ public final class GatherQuotaTask extends AbstractTask {
         var world = bot.serverLevel();
         BlockPos found = OreProspector.nearest(bot, PROSPECT_RANGE,
                 state -> harvestBlocks.contains(state.getBlock()),
-                pos -> !EpisodeMemory.INSTANCE.isExcluded(botId, pos, now));
+                pos -> !EpisodeMemory.INSTANCE.isExcluded(botId, pos, now)
+                        && !isTreePlanningDeferred(pos, now));
         if (found == null) {
             // 观测:静默 false 无法区分"96 格内真没该资源"和"扫描/黑名单 bug"(实测 21t 速死无从取证)。
             BotLog.action(bot, "gather_prospect_empty",
@@ -257,8 +291,7 @@ public final class GatherQuotaTask extends AbstractTask {
         // 与目标差几十格高度,走过去也够不到(实测 found=y66 to=y86 死循环)。A* 自己解决下坡路线。
         BlockPos ground = standNearTarget(world, found);
         if (ground == null) {
-            // 崖壁/高差树周边无可站点:纯步行无解,但挖掘接近能下沉/掘进过去(钻石 67% 失败的崖壁采木真因——
-            // 实测 GOAL_UNREACHABLE×3 却从不触发兜底,因兜底原先只在 goToTarget,而崖壁失败走这条 prospect 路)。
+            // 周边无可站点时，非树资源仍可进入显式破障；原木目标会安全拒绝并换目标。
             if (tryDigApproach(bot, found, "no_stand")) {
                 return true;
             }
@@ -268,7 +301,7 @@ public final class GatherQuotaTask extends AbstractTask {
             return false;
         }
         bot.getActionPack().stopAll();
-        // 步行被拒 → 先升级挖掘接近(崖下/崖壁树掘进过去);挖掘也不通才拉黑换下一个。
+        // 步行被拒 → 仅非树资源可显式升级破障；原木保持非破坏并换下一个。
         var pathResult = bot.getActionPack().startPathTo(ground);
         if (pathResult.isFailed()) {
             if (tryDigApproach(bot, found, pathResult.reason())) {
@@ -279,6 +312,7 @@ public final class GatherQuotaTask extends AbstractTask {
             EpisodeMemory.INSTANCE.exclude(botId, found, now, EpisodeMemory.TTL_UNREACHABLE);
             return false;
         }
+        gotoNavigationRequestId = bot.getActionPack().navigationSnapshot().requestId();
         lastProspectFound = found.immutable();
         // 直接锁定这棵树走 GOTO,由 goToTarget 统一驱动"到达→采集"(含 dig-approach 崖壁/高差 + R1 悬空脱困)。
         // 不再走 ROAM-到落脚点-再重扫:重扫常丢这棵树(实测 555 elevated 云杉 prospected dist4 却回 SURVEY 扫不到
@@ -292,7 +326,6 @@ public final class GatherQuotaTask extends AbstractTask {
         pickupMisses = 0;
         selfStuckTick = elapsed;
         phase = Phase.GOTO;
-        bot.getActionPack().startPathTo(ground);
         BotLog.action(bot, "gather_prospected",
                 "found", found.getX() + "," + found.getY() + "," + found.getZ(),
                 "to", ground.getX() + "," + ground.getY() + "," + ground.getZ(),
@@ -596,6 +629,7 @@ public final class GatherQuotaTask extends AbstractTask {
         }
         // F1:大半径扫描限频,避免每 tick 扫 48 格立方体拖 TPS。
         int now = bot.getServer().getTickCount();
+        deferredTreeLogExpiries.entrySet().removeIf(entry -> entry.getValue() <= now);
         if (searchRadius > SEARCH_RADIUS && now - lastScanTick < LARGE_SCAN_THROTTLE_TICKS) {
             return;
         }
@@ -604,7 +638,8 @@ public final class GatherQuotaTask extends AbstractTask {
         // 反复重锁同一棵不可达的树(real_wood 实测:重锁→GOTO 崩→重锁 乒乓到 6001t 超时)。
         java.util.UUID botId = bot.getUUID();
         HarvestCore.TargetChoice choice = HarvestCore.nearestReachableBlock(bot, harvestBlocks, searchRadius, SEARCH_DOWN, SEARCH_UP,
-                pos -> !EpisodeMemory.INSTANCE.isExcluded(botId, pos, now));
+                pos -> !EpisodeMemory.INSTANCE.isExcluded(botId, pos, now)
+                        && !isTreePlanningDeferred(pos, now));
         if (choice == null) {
             // F1:近处没有 → 自动扩大半径走远找,而不是立刻失败交还大脑乱试/空手挖/求助。
             if (searchRadius < MAX_SEARCH_RADIUS) {
@@ -649,22 +684,37 @@ public final class GatherQuotaTask extends AbstractTask {
                     "pos", targetPos.getX() + "," + targetPos.getY() + "," + targetPos.getZ(),
                     "hops", exploreHops);
         }
+        if (handleLogCandidate(bot, targetPos)) {
+            return;
+        }
         if (choice.direct()) {
             startHarvest(bot);
             return;
         }
         phase = Phase.GOTO;
-        bot.getActionPack().startPathTo(choice.stand());
+        ActionResult approach = HarvestCore.startApproach(bot, choice);
+        gotoNavigationRequestId = bot.getActionPack().navigationSnapshot().requestId();
+        if (approach.isFailed()) {
+            phase = Phase.SURVEY;
+        }
     }
 
-    // 挖掘接近:崖壁/高差树纯步行 GOAL_UNREACHABLE 时,改用 startDigPathTo 下沉/掘进过去(与挖矿够
-    // 埋藏矿同一原语)。成功发起 → 设 targetPos=树、转 GOTO,由 goToTarget 统一驱动"到达→采集";
-    // treeDigTried=true 防 goToTarget 立刻重发。挖掘也不通(罕见:基岩封死/越界)→ false,调用方拉黑换树。
+    // 显式挖掘接近只保留给确实需要破障的非树资源。树木属于普通交互任务：若纯步行不可达，
+    // 应换树或报告阻塞，绝不能为了接近树而静默拆墙。成功发起后仍由 GOTO 驱动后续采集。
     private boolean tryDigApproach(AIPlayerEntity bot, BlockPos tree, String why) {
+        if (bot.serverLevel().getBlockState(tree).is(BlockTags.LOGS)) {
+            // A tree interaction is ordinary work, not an authorization to tunnel through a
+            // house, cliff or retaining wall. P1 tree felling only uses reviewed dry work poses;
+            // terrain-changing navigation remains an explicit mining capability.
+            BotLog.action(bot, "gather_tree_mutating_approach_refused",
+                    "to", tree.toShortString(), "why", why);
+            return false;
+        }
         ActionResult dig = bot.getActionPack().startDigPathTo(tree);
         if (dig.isFailed()) {
             return false;
         }
+        gotoNavigationRequestId = bot.getActionPack().navigationSnapshot().requestId();
         BotLog.action(bot, "gather_dig_approach",
                 "to", tree.getX() + "," + tree.getY() + "," + tree.getZ(), "why", why);
         targetPos = tree.immutable();
@@ -694,6 +744,10 @@ public final class GatherQuotaTask extends AbstractTask {
             phase = Phase.SURVEY;
             return;
         }
+        if (bot.blockPosition().distSqr(targetPos) <= 256.0D
+                && handleLogCandidate(bot, targetPos)) {
+            return;
+        }
         if (HarvestCore.canReach(bot, targetPos)) {
             bot.getActionPack().stopAll();
             startHarvest(bot);
@@ -720,25 +774,39 @@ public final class GatherQuotaTask extends AbstractTask {
             gotoStuckTick = elapsed;
         }
         if (bot.getActionPack().isPathExecutorIdle()) {
+            NavigationSnapshot navigation = bot.getActionPack().navigationSnapshot();
+            if (gotoNavigationRequestId != 0L
+                    && navigation.requestId() != gotoNavigationRequestId) {
+                // Another action owner replaced this request. Re-observe without poisoning the
+                // target's reachability memory.
+                phase = Phase.SURVEY;
+                return;
+            }
+            if (gotoNavigationRequestId != 0L
+                    && (navigation.state() == NavigationState.PREEMPTED
+                    || navigation.state() == NavigationState.CANCELLED)) {
+                phase = Phase.SURVEY;
+                return;
+            }
+            if (gotoNavigationRequestId != 0L
+                    && (navigation.state() == NavigationState.PLANNING
+                    || navigation.state() == NavigationState.FOLLOWING)) {
+                return;
+            }
             if (!targetPos.equals(lastGotoTarget)) {
                 gotoFailStreak = 0; // 换了新目标,失败计数重开
                 treeDigTried = false;
                 lastGotoTarget = targetPos;
             }
-            // 崖壁/下方树走不到(纯步行 GOAL_UNREACHABLE,real 钻石 67% 失败的头号坎):升级挖掘接近——
-            // 像挖矿够埋藏矿一样 startDigPathTo 下沉/掘进过去,而非直接拉黑换树(全是崖壁树时换无可换)。
-            // 每个目标只升级一次;挖掘接近也到不了才拉黑(TTL 后复活)。这是"任何地形都能采到木"的关键。
+            // 非树资源可显式升级为挖掘接近；原木会被 tryDigApproach 拒绝，保持工作导航非破坏性。
+            // 每个目标只尝试一次，随后才按真实失败语义排除并重选。
             if (!treeDigTried) {
                 treeDigTried = true;
-                ActionResult dig = bot.getActionPack().startDigPathTo(targetPos);
-                BotLog.action(bot, "gather_dig_approach",
-                        "to", targetPos.getX() + "," + targetPos.getY() + "," + targetPos.getZ(),
-                        "ok", !dig.isFailed());
-                if (!dig.isFailed()) {
+                if (tryDigApproach(bot, targetPos, "walk_path_exhausted")) {
                     return; // 挖掘接近已发起,留在 GOTO 等它掘过去
                 }
             }
-            // 步行+挖掘接近都到不了 → 拉黑换树(survey posFilter 不再重锁;治乒乓死循环)。
+            // 纯步行以及允许的显式破障均不可用 → 排除当前目标，避免 survey 乒乓重锁。
             if (++gotoFailStreak >= GOTO_FAIL_EXCLUDE) {
                 EpisodeMemory.INSTANCE.exclude(bot.getUUID(), targetPos, bot.getServer().getTickCount(), EpisodeMemory.TTL_UNREACHABLE);
                 BotLog.action(bot, "gather_target_excluded",
@@ -746,6 +814,122 @@ public final class GatherQuotaTask extends AbstractTask {
                         "fails", gotoFailStreak);
             }
             phase = Phase.SURVEY;
+        }
+    }
+
+    /**
+     * Commits a natural tree or safely skips a placed/truncated log component. Returning true
+     * means the candidate was a log and this method fully selected the next phase.
+     */
+    private boolean handleLogCandidate(AIPlayerEntity bot, BlockPos seed) {
+        var seedState = bot.serverLevel().getBlockState(seed);
+        if (!seedState.is(BlockTags.LOGS)) {
+            return false;
+        }
+        if (!TreeDetector.supportsWholeTreeDetection(seedState)) {
+            // Crimson/warped stems, bamboo blocks and stripped wood do not share the overworld
+            // root+leaf topology. Preserve their legacy single-block gathering until each family
+            // has a real, separately tested component model.
+            return false;
+        }
+        TreeSnapshot snapshot = TreeDetector.detect(bot.serverLevel(), seed, harvestBlocks);
+        var session = TreeFellingSession.fromSnapshot(bot, snapshot, harvestBlocks);
+        bot.getActionPack().stopAll();
+        if (session.isPresent()) {
+            treeFellingSession = session.get();
+            // A successfully consumed prospect target must not later be classified as a failed
+            // long-range approach merely because its tree session asked for a transient retry.
+            lastProspectFound = null;
+            targetPos = treeFellingSession.committedTree().id().root();
+            countBeforeHarvest = progressCount(bot);
+            pickupSweepAttempted = false;
+            phase = Phase.FELL_TREE;
+            BotLog.action(bot, "tree_felling_committed",
+                    "root", targetPos.toShortString(),
+                    "logs", treeFellingSession.committedTree().logs().size());
+            return true;
+        }
+
+        int now = bot.getServer().getTickCount();
+        Set<BlockPos> rejected = snapshot.logs().isEmpty() ? Set.of(seed) : snapshot.logs();
+        for (BlockPos log : rejected) {
+            EpisodeMemory.INSTANCE.exclude(
+                    bot.getUUID(), log, now, EpisodeMemory.TTL_UNREACHABLE);
+        }
+        BotLog.action(bot, "tree_candidate_rejected",
+                "seed", seed.toShortString(),
+                "logs", snapshot.logs().size(),
+                "natural", snapshot.natural(),
+                "truncated", snapshot.truncated());
+        targetPos = null;
+        phase = Phase.SURVEY;
+        return true;
+    }
+
+    private void fellTree(AIPlayerEntity bot) {
+        if (treeFellingSession == null) {
+            phase = Phase.SURVEY;
+            return;
+        }
+        TreeFellingSession.Status result = treeFellingSession.tick(bot);
+        if (result == TreeFellingSession.Status.RUNNING) {
+            return;
+        }
+
+        TreeFellingSession finished = treeFellingSession;
+        treeFellingSession = null;
+        switch (result) {
+            case SUCCEEDED -> {
+                bot.getActionPack().stopAll();
+                pickupTicks = 160;
+                pickupSweepAttempted = false;
+                batchTreePickup = true;
+                treeDropPickupGraceTicks = TREE_DROP_PICKUP_GRACE_TICKS;
+                phase = Phase.PICKUP;
+                BotLog.action(bot, "tree_felling_complete",
+                        "root", finished.committedTree().id().root().toShortString(),
+                        "logs", finished.diagnostic().logsBroken());
+            }
+            case PLANNING_BUDGET_EXHAUSTED -> {
+                int now = bot.getServer().getTickCount();
+                int deferUntil = now + TREE_PLANNING_BACKOFF_TICKS;
+                for (BlockPos log : finished.committedTree().logs()) {
+                    deferredTreeLogExpiries.merge(log, deferUntil, Math::max);
+                }
+                BotLog.action(bot, "tree_planning_deferred",
+                        "root", finished.committedTree().id().root().toShortString(),
+                        "until", deferUntil,
+                        "reason", finished.diagnostic().reason());
+                targetPos = null;
+                phase = Phase.SURVEY;
+            }
+            case STALE_TREE -> {
+                targetPos = null;
+                if (finished.diagnostic().logsBroken() > 0) {
+                    bot.getActionPack().stopAll();
+                    fail("tree_changed_after_partial_felling:" + finished.diagnostic().reason());
+                } else {
+                    phase = Phase.SURVEY;
+                }
+            }
+            case CANCELLED -> {
+                targetPos = null;
+                phase = Phase.SURVEY;
+            }
+            case RETRYABLE_BLOCKED, NEEDS_VERTICAL_ACCESS -> {
+                int now = bot.getServer().getTickCount();
+                for (BlockPos remaining : finished.remainingLogs()) {
+                    EpisodeMemory.INSTANCE.exclude(
+                            bot.getUUID(), remaining, now, EpisodeMemory.TTL_UNREACHABLE);
+                }
+                BotLog.action(bot, "tree_felling_blocked",
+                        "root", finished.committedTree().id().root().toShortString(),
+                        "reason", finished.diagnostic().reason(),
+                        "remaining", finished.remainingLogs().size());
+                targetPos = null;
+                phase = Phase.SURVEY;
+            }
+            case RUNNING -> throw new IllegalStateException("handled above");
         }
     }
 
@@ -764,11 +948,39 @@ public final class GatherQuotaTask extends AbstractTask {
     private void pickup(AIPlayerEntity bot) {
         HarvestCore.forcePickupNearbyAnyOf(bot, acceptItems);
         countSoFar = progressCount(bot);
-        if (countSoFar > countBeforeHarvest) {
-            phase = countSoFar >= targetCount ? Phase.DONE : Phase.SURVEY;
+        pickupTicks--;
+        if (batchTreePickup && treeDropPickupGraceTicks > 0) {
+            treeDropPickupGraceTicks--;
+        }
+        boolean remainingDrop = HarvestCore.nearestDropAnyOf(bot, acceptItems, 8.0D).isPresent();
+        if (batchTreePickup && remainingDrop && pickupTicks > 0) {
+            // Finishing the committed tree is followed by one bounded collection sweep. Reaching
+            // the quota early must not immediately abandon the other logs dropped by that tree.
+            HarvestCore.chaseDropAnyOf(bot, acceptItems, 8.0D);
             return;
         }
-        pickupTicks--;
+        if (batchTreePickup && treeDropPickupGraceTicks > 0) {
+            // The final BlockMiner completion and the spawned ItemEntity can straddle a server
+            // tick, and vanilla drops retain a short pickup delay. Keep the committed-tree batch
+            // open long enough to observe and naturally collect that last drop even if the quota
+            // was already satisfied by an earlier log.
+            bot.getActionPack().stopMovement();
+            return;
+        }
+        if (countSoFar >= targetCount) {
+            pickupMisses = 0;
+            batchTreePickup = false;
+            treeDropPickupGraceTicks = 0;
+            phase = Phase.DONE;
+            return;
+        }
+        if (countSoFar > countBeforeHarvest) {
+            pickupMisses = 0;
+            batchTreePickup = false;
+            treeDropPickupGraceTicks = 0;
+            phase = Phase.SURVEY;
+            return;
+        }
         HarvestCore.chaseDropAnyOf(bot, acceptItems, 8.0D);
         if (pickupTicks <= 0) {
             if (!pickupSweepAttempted && HarvestCore.nearestDropAnyOf(bot, acceptItems, 8.0D).isPresent()) {
@@ -780,6 +992,8 @@ public final class GatherQuotaTask extends AbstractTask {
             countSoFar = progressCount(bot);
             if (countSoFar > countBeforeHarvest) {
                 pickupMisses = 0;
+                batchTreePickup = false;
+                treeDropPickupGraceTicks = 0;
                 phase = countSoFar >= targetCount ? Phase.DONE : Phase.SURVEY;
             } else if (probabilisticDrop) {
                 // 概率掉落(割草取种子/采浆果丛):这次破坏没掉是常态,不算"采不到",回 SURVEY 继续采下一个;
@@ -821,8 +1035,40 @@ public final class GatherQuotaTask extends AbstractTask {
     private void startHarvest(AIPlayerEntity bot) {
         countBeforeHarvest = progressCount(bot);
         pickupSweepAttempted = false;
+        batchTreePickup = false;
         HarvestCore.startMining(bot, targetPos);
         phase = Phase.HARVEST;
+    }
+
+    /** Read-only session diagnostics used by the shared Fabric/NeoForge GameTest scenarios. */
+    public TreeFellingSession.Diagnostic treeFellingDiagnostic() {
+        return treeFellingSession == null ? null : treeFellingSession.diagnostic();
+    }
+
+    @Override
+    protected void onPause(AIPlayerEntity bot) {
+        if (treeFellingSession != null && !bot.getActionPack().isSuspended()) {
+            treeFellingSession.prepareForResume(bot);
+        }
+        super.onPause(bot);
+    }
+
+    @Override
+    protected void onResume(AIPlayerEntity bot) {
+        if (treeFellingSession != null
+                && bot.getActionPack().isPathExecutorIdle()
+                && bot.getActionPack().isMiningIdle()) {
+            treeFellingSession.prepareForResume(bot);
+        }
+    }
+
+    @Override
+    protected void onAbort(AIPlayerEntity bot) {
+        if (treeFellingSession != null) {
+            treeFellingSession.cancel(bot);
+            treeFellingSession = null;
+        }
+        super.onAbort(bot);
     }
 
     private int countAccepted(AIPlayerEntity bot) {
@@ -839,6 +1085,11 @@ public final class GatherQuotaTask extends AbstractTask {
 
     private boolean isHarvestBlock(AIPlayerEntity bot, BlockPos pos) {
         return harvestBlocks.contains(bot.serverLevel().getBlockState(pos).getBlock());
+    }
+
+    private boolean isTreePlanningDeferred(BlockPos pos, int now) {
+        Integer expiry = deferredTreeLogExpiries.get(pos);
+        return expiry != null && expiry > now;
     }
 
     // 觅食野食族:浆果 / 西瓜片(都是野生即取、可直接吃);采任一凑数(哪个近采哪个)。

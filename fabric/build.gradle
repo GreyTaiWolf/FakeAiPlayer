@@ -16,6 +16,9 @@ dependencies {
 
 sourceSets {
     gametest {
+        java.srcDir rootProject.file('common/src/gametest/java')
+        resources.srcDir project(':common').layout.buildDirectory.dir(
+                'generated/gametest/resources')
         compileClasspath += sourceSets.main.output
         runtimeClasspath += sourceSets.main.output
     }
@@ -74,11 +77,19 @@ def prepareGameTestRun = tasks.register('prepareGameTestRun') {
         new File(directory, 'eula.txt').setText('eula=true\n', 'UTF-8')
         new File(directory, 'server.properties').setText(
                 'online-mode=false\nlevel-name=world\nlevel-seed=0\n', 'UTF-8')
+        def ledgerDirectory = new File(directory, 'world/fakeaiplayer')
+        ledgerDirectory.mkdirs()
+        new File(ledgerDirectory, 'player_placed_logs.json').setText(
+                '{\n  "schemaVersion": 1,\n  "dimensions": {}\n}\n', 'UTF-8')
     }
 }
 
 tasks.named('runGameTest') {
     dependsOn prepareGameTestRun
+}
+
+tasks.named('processGametestResources') {
+    dependsOn ':common:generateGameTestStructures'
 }
 
 // Interactive command-driven verification server. The isolated gametest source set and its

@@ -58,6 +58,15 @@ class PrivilegedBoundarySourceTest {
                 "ordinary pathfinding from a valid start must run before the emergency-teleport gate");
         assertTrue(actionPack.contains("return startPathTo(goal, false, false, true);"),
                 "construction-safe navigation must disable both pillar placement and dig fallback");
+        assertTrue(actionPack.contains(
+                        "return startPathTo(goal, false, false, false, TraversalPolicy.TASK_WALK_DRY);"),
+                "ordinary navigation must be dry and non-mutating by default");
+        assertTrue(actionPack.contains("public ActionResult startMutatingPathTo"),
+                "world-mutating navigation must remain an explicit reviewed API");
+        assertTrue(actionPack.contains("!currentStartStandable\n                && hasActiveActions()"),
+                "an invalid-start replacement must not teleport an existing controller");
+        assertTrue(occurrences(actionPack, "replacement_path_start_invalid") >= 2,
+                "walk-only and explicit mutating navigation must share the atomic start guard");
 
         String pathExecutor = read("pathfinding/PathExecutor.java");
         assertTrue(pathExecutor.contains("allowPillarOnReplan && hasPlaceableBlock"));
@@ -76,6 +85,10 @@ class PrivilegedBoundarySourceTest {
         assertTrue(goalExecutor.contains(
                         "case MOVE_NON_MUTATING -> Optional.of(MoveTask.nonMutating"),
                 "confirmed staging must retain its non-mutating policy at task dispatch");
+        String gather = read("task/GatherQuotaTask.java");
+        assertTrue(gather.contains("getBlockState(tree).is(BlockTags.LOGS)"));
+        assertTrue(gather.contains("gather_tree_mutating_approach_refused"),
+                "tree gathering must not silently promote a blocked work route into wall digging");
     }
 
     @Test

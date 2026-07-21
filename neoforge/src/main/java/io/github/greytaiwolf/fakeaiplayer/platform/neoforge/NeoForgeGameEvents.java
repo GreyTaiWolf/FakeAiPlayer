@@ -12,6 +12,7 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.ServerChatEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
+import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
@@ -33,6 +34,11 @@ public final class NeoForgeGameEvents {
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
         FakeAiPlayer.onServerStopping(event.getServer());
+    }
+
+    @SubscribeEvent
+    public static void onServerStopped(ServerStoppedEvent event) {
+        FakeAiPlayer.onServerStopped(event.getServer());
     }
 
     @SubscribeEvent

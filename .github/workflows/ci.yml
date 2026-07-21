@@ -42,7 +42,8 @@ jobs:
       - name: Run unit tests, headless GameTests and production build
         run: >-
           ./gradlew --no-daemon --console=plain --stacktrace
-          clean :common:test :fabric:runGameTest :fabric:build :neoforge:build
+          clean :common:test :fabric:runGameTest :neoforge:runGameTestServer
+          :fabric:build :neoforge:build
 
       - name: Inspect production artifacts
         run: CI_STATIC_CHECK_ARTIFACTS=1 bash scripts/ci_static_check.sh
@@ -83,6 +84,8 @@ jobs:
             fabric/build/test-results/**
             fabric/build/run/gameTest/logs/**
             fabric/build/run/gameTest/crash-reports/**
+            neoforge/build/run/gameTest/logs/**
+            neoforge/build/run/gameTest/crash-reports/**
             fabric/build/persistence-restart/**
             fabric/build/run/restart-*/logs/**
             fabric/build/run/restart-*/crash-reports/**
