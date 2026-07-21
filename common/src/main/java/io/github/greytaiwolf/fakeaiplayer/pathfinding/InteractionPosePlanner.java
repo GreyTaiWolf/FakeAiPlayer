@@ -373,6 +373,12 @@ public final class InteractionPosePlanner {
             double reach,
             Set<BlockPos> removableOccluders,
             boolean requireTargetHit) {
+        // Callers already add the half-block tolerance needed for a center-based block range.
+        // Keep that authoritative gate so testing multiple visible faces cannot spend the same
+        // tolerance twice and turn a five-cell approach into an in-place interaction.
+        if (eye.distanceTo(target.getCenter()) > reach) {
+            return false;
+        }
         for (Vec3 sample : interactionSamples(target)) {
             if (eye.distanceTo(sample) <= reach
                     && hasReviewedLineOfSight(
