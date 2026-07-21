@@ -18,6 +18,7 @@ import io.github.greytaiwolf.fakeaiplayer.pathfinding.PathfindingResult;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.Standability;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.TraversalBounds;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.TraversalPolicy;
+import io.github.greytaiwolf.fakeaiplayer.task.TaskManager;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -190,7 +191,7 @@ public final class SharedP2NavigationGameTestScenarios {
     }
 
     public static void traversalPoliciesPreservePermissions(GameTestHelper helper) {
-        run(helper, fixture -> {
+        runAsync(helper, fixture -> {
             fixture.prepareFlat(FEET_Y, 2, 18, 7, 13);
             AIPlayerEntity bot = fixture.spawnBot("P2Policy", new BlockPos(3, FEET_Y, 10));
             BlockPos start = bot.blockPosition();
@@ -201,48 +202,58 @@ public final class SharedP2NavigationGameTestScenarios {
                     && position.getX() >= start.getX()
                     && position.getX() <= goal.getX();
 
-            fixture.setAbsolute(gate, Blocks.WATER.defaultBlockState());
-            NavigationRequest dryWater = NavigationRequest.walk(
-                    NavGoal.exact(goal), "p2_dry_water")
-                    .withConstraint(Set.of(), corridor, "p2_policy_corridor");
-            NavigationRequest wet = NavigationRequest.water(
-                    NavGoal.exact(goal), "p2_water")
-                    .withConstraint(Set.of(), corridor, "p2_policy_corridor");
-            PathfindingResult dryWaterPlan = NavigationPlanner.plan(bot, dryWater, true).result();
-            PathfindingResult wetPlan = NavigationPlanner.plan(bot, wet, true).result();
-            require(!dryWaterPlan.success()
-                            && dryWaterPlan.reason() == FailureReason.GOAL_UNREACHABLE,
-                    "Dry policy crossed water or misclassified it: " + dryWaterPlan.reason());
-            require(wetPlan.success()
-                            && wetPlan.path().stream().anyMatch(node -> node.pos().equals(gate)),
-                    "Water-capable policy did not use the only water corridor");
-            require(wetPlan.path().stream().noneMatch(node ->
-                            node.moveType() == MoveType.DIG_THROUGH
-                                    || node.moveType() == MoveType.PILLAR_UP),
-                    "Water policy gained a world-edit move");
+            helper.runAtTickTime(1, () -> fixture.checked(() -> {
+                fixture.setAbsolute(gate, Blocks.WATER.defaultBlockState());
+                NavigationRequest dryWater = NavigationRequest.walk(
+                        NavGoal.exact(goal), "p2_dry_water")
+                        .withConstraint(Set.of(), corridor, "p2_policy_corridor");
+                NavigationRequest wet = NavigationRequest.water(
+                        NavGoal.exact(goal), "p2_water")
+                        .withConstraint(Set.of(), corridor, "p2_policy_corridor");
+                PathfindingResult dryWaterPlan = NavigationPlanner.plan(
+                        bot, dryWater, true).result();
+                PathfindingResult wetPlan = NavigationPlanner.plan(bot, wet, true).result();
+                require(!dryWaterPlan.success()
+                                && dryWaterPlan.reason() == FailureReason.GOAL_UNREACHABLE,
+                        "Dry policy crossed water or misclassified it: "
+                                + dryWaterPlan.reason());
+                require(wetPlan.success()
+                                && wetPlan.path().stream().anyMatch(
+                                node -> node.pos().equals(gate)),
+                        "Water-capable policy did not use the only water corridor");
+                require(wetPlan.path().stream().noneMatch(node ->
+                                node.moveType() == MoveType.DIG_THROUGH
+                                        || node.moveType() == MoveType.PILLAR_UP),
+                        "Water policy gained a world-edit move");
 
-            fixture.setAbsolute(gate, Blocks.STONE.defaultBlockState());
-            fixture.setAbsolute(gate.above(), Blocks.STONE.defaultBlockState());
-            var gateBefore = helper.getLevel().getBlockState(gate);
-            var headBefore = helper.getLevel().getBlockState(gate.above());
-            NavigationRequest dryWall = NavigationRequest.walk(
-                    NavGoal.exact(goal), "p2_dry_wall")
-                    .withConstraint(Set.of(), corridor, "p2_policy_corridor");
-            NavigationRequest mutating = NavigationRequest.mutating(
-                    NavGoal.exact(goal), false, "p2_mutating_wall")
-                    .withConstraint(Set.of(), corridor, "p2_policy_corridor");
-            PathfindingResult dryWallPlan = NavigationPlanner.plan(bot, dryWall, true).result();
-            PathfindingResult mutatingPlan = NavigationPlanner.plan(bot, mutating, true).result();
-            require(!dryWallPlan.success()
-                            && dryWallPlan.reason() == FailureReason.GOAL_UNREACHABLE,
-                    "Walk-only policy crossed a solid wall: " + dryWallPlan.reason());
-            require(mutatingPlan.success()
-                            && mutatingPlan.path().stream().anyMatch(
-                            node -> node.moveType() == MoveType.DIG_THROUGH),
-                    "Mutating policy did not plan a reviewed DIG_THROUGH step");
-            require(helper.getLevel().getBlockState(gate).equals(gateBefore)
-                            && helper.getLevel().getBlockState(gate.above()).equals(headBefore),
-                    "Planning mutated the world before execution");
+                fixture.setAbsolute(gate, Blocks.STONE.defaultBlockState());
+                fixture.setAbsolute(gate.above(), Blocks.STONE.defaultBlockState());
+                var gateBefore = helper.getLevel().getBlockState(gate);
+                var headBefore = helper.getLevel().getBlockState(gate.above());
+                NavigationRequest dryWall = NavigationRequest.walk(
+                        NavGoal.exact(goal), "p2_dry_wall")
+                        .withConstraint(Set.of(), corridor, "p2_policy_corridor");
+                NavigationRequest mutating = NavigationRequest.mutating(
+                        NavGoal.exact(goal), false, "p2_mutating_wall")
+                        .withConstraint(Set.of(), corridor, "p2_policy_corridor");
+                PathfindingResult dryWallPlan = NavigationPlanner.plan(
+                        bot, dryWall, true).result();
+                PathfindingResult mutatingPlan = NavigationPlanner.plan(
+                        bot, mutating, true).result();
+                require(!dryWallPlan.success()
+                                && dryWallPlan.reason() == FailureReason.GOAL_UNREACHABLE,
+                        "Walk-only policy crossed a solid wall: " + dryWallPlan.reason());
+                require(mutatingPlan.success()
+                                && mutatingPlan.path().stream().anyMatch(
+                                node -> node.moveType() == MoveType.DIG_THROUGH),
+                        "Mutating policy ended as " + mutatingPlan.reason()
+                                + " with moves " + mutatingPlan.path().stream()
+                                .map(node -> node.moveType()).toList());
+                require(helper.getLevel().getBlockState(gate).equals(gateBefore)
+                                && helper.getLevel().getBlockState(gate.above()).equals(headBefore),
+                        "Planning mutated the world before execution");
+                fixture.succeed();
+            }));
         });
     }
 
@@ -373,28 +384,43 @@ public final class SharedP2NavigationGameTestScenarios {
             BlockPos standB = fixture.absolute(new BlockPos(15, FEET_Y, 15));
             NavGoal.Interaction goal = new NavGoal.Interaction(
                     fixture.absolute(new BlockPos(17, FEET_Y, 12)), Set.of(standA, standB));
-            NavigationHandle handle = bot.getActionPack().navigate(
-                    NavigationRequest.walk(goal, "p2_alternate_goal"));
-            require(handle.state() == NavigationState.FOLLOWING,
-                    "Alternate-goal request did not start");
-            BlockPos initiallyResolved = handle.resolvedGoal();
-            long requestId = handle.requestId();
+            NavigationHandle[] handleRef = new NavigationHandle[1];
+            BlockPos[] initiallyResolved = new BlockPos[1];
+            long[] requestId = new long[1];
 
-            helper.runAtTickTime(4, () -> fixture.checked(() -> {
-                fixture.setAbsolute(initiallyResolved, Blocks.STONE.defaultBlockState());
-                fixture.setAbsolute(initiallyResolved.above(), Blocks.STONE.defaultBlockState());
+            helper.runAtTickTime(1, () -> fixture.checked(() -> {
+                NavigationHandle handle = bot.getActionPack().navigate(
+                        NavigationRequest.walk(goal, "p2_alternate_goal"));
+                require(handle.state() == NavigationState.FOLLOWING,
+                        "Alternate-goal request did not start: "
+                                + handle.state() + '/' + handle.reason());
+                handleRef[0] = handle;
+                initiallyResolved[0] = handle.resolvedGoal();
+                requestId[0] = handle.requestId();
+            }));
+            helper.runAtTickTime(5, () -> fixture.checked(() -> {
+                require(initiallyResolved[0] != null,
+                        "Alternate-goal endpoint was not published");
+                fixture.setAbsolute(initiallyResolved[0], Blocks.STONE.defaultBlockState());
+                fixture.setAbsolute(
+                        initiallyResolved[0].above(), Blocks.STONE.defaultBlockState());
             }));
             helper.onEachTick(() -> fixture.checked(() -> {
-                require(!bot.blockPosition().equals(initiallyResolved),
+                NavigationHandle handle = handleRef[0];
+                if (handle == null || initiallyResolved[0] == null) {
+                    return;
+                }
+                require(!bot.blockPosition().equals(initiallyResolved[0]),
                         "Bot entered the dynamically blocked endpoint");
-                require(helper.getLevel().getBlockState(initiallyResolved).is(Blocks.STONE),
+                require(helper.getLevel().getBlockState(
+                                initiallyResolved[0]).is(Blocks.STONE),
                         "Dynamic obstacle was unexpectedly mutated");
                 if (handle.state() == NavigationState.ARRIVED) {
-                    require(handle.requestId() == requestId,
+                    require(handle.requestId() == requestId[0],
                             "Dynamic replan changed logical request id");
                     require(handle.routeRevision() >= 1,
                             "Dynamic obstacle did not increment route revision");
-                    require(!initiallyResolved.equals(handle.resolvedGoal()),
+                    require(!initiallyResolved[0].equals(handle.resolvedGoal()),
                             "Dynamic obstacle did not select alternate endpoint");
                     require(goal.accepts(helper.getLevel(), bot.blockPosition()),
                             "Bot arrived outside interaction goal");
@@ -441,15 +467,26 @@ public final class SharedP2NavigationGameTestScenarios {
             fixture.prepareFlat(FEET_Y, 2, 18, 2, 18);
             AIPlayerEntity follower = fixture.spawnBot("P2Follower", new BlockPos(3, FEET_Y, 10));
             AIPlayerEntity target = fixture.spawnBot("P2Target", new BlockPos(16, FEET_Y, 10));
+            TaskManager.INSTANCE.pauseUserIntent(follower, "p2_follow_fixture");
+            TaskManager.INSTANCE.pauseUserIntent(target, "p2_follow_fixture");
             NavGoal.FollowRing ring = new NavGoal.FollowRing(
                     target.getUUID(), target.blockPosition(), 0, 1);
-            NavigationHandle handle = follower.getActionPack().navigate(
-                    NavigationRequest.walk(ring, "p2_follow_ring").withSegmentation(8));
-            long requestId = handle.requestId();
-            require(handle.resolvedGoal() != null
-                            && !ring.accepts(helper.getLevel(), handle.resolvedGoal()),
-                    "Long dynamic follow request did not begin with a relay");
+            NavigationHandle[] handleRef = new NavigationHandle[1];
+            long[] requestId = new long[1];
             BlockPos followerStart = follower.blockPosition();
+            helper.runAtTickTime(1, () -> fixture.checked(() -> {
+                NavigationHandle handle = follower.getActionPack().navigate(
+                        NavigationRequest.walk(
+                                ring, "p2_follow_ring").withSegmentation(8));
+                require(handle.state() == NavigationState.FOLLOWING,
+                        "Follow request did not start: "
+                                + handle.state() + '/' + handle.reason());
+                require(handle.resolvedGoal() != null
+                                && !ring.accepts(helper.getLevel(), handle.resolvedGoal()),
+                        "Long dynamic follow request did not begin with a relay");
+                handleRef[0] = handle;
+                requestId[0] = handle.requestId();
+            }));
             for (int tick = 5; tick <= 54; tick++) {
                 int scheduledTick = tick;
                 helper.runAtTickTime(scheduledTick, () -> fixture.checked(() -> {
@@ -462,8 +499,11 @@ public final class SharedP2NavigationGameTestScenarios {
                 }));
             }
             helper.runAtTickTime(44, () -> fixture.checked(() -> {
+                NavigationHandle handle = handleRef[0];
+                require(handle != null, "Follow handle was not installed");
                 require(!handle.terminal(),
-                        "Expected dynamic refreshes exhausted the failure-replan budget");
+                        "Dynamic follow terminated as "
+                                + handle.state() + '/' + handle.reason());
                 require(follower.blockPosition().distSqr(followerStart) >= 1.0D,
                         "Continuously moving target stalled the follower between replan cadences");
             }));
@@ -475,8 +515,12 @@ public final class SharedP2NavigationGameTestScenarios {
                         target.getYRot(), target.getXRot(), true);
             }));
             helper.onEachTick(() -> fixture.checked(() -> {
+                NavigationHandle handle = handleRef[0];
+                if (handle == null) {
+                    return;
+                }
                 if (handle.state() == NavigationState.ARRIVED) {
-                    require(handle.requestId() == requestId,
+                    require(handle.requestId() == requestId[0],
                             "Follow movement created a new logical request");
                     require(ring.accepts(helper.getLevel(), follower.blockPosition()),
                             "Follower arrived outside live target ring");
