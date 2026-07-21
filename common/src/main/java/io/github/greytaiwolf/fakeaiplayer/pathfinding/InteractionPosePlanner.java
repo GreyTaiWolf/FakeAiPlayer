@@ -348,11 +348,22 @@ public final class InteractionPosePlanner {
             BlockPos target,
             double reach,
             Set<BlockPos> removableOccluders) {
+        return canInteractFrom(bot, stand, target, reach, removableOccluders, true);
+    }
+
+    private static boolean canInteractFrom(
+            AIPlayerEntity bot,
+            BlockPos stand,
+            BlockPos target,
+            double reach,
+            Set<BlockPos> removableOccluders,
+            boolean requireTargetHit) {
         Vec3 eye = new Vec3(
                 stand.getX() + 0.5D,
                 stand.getY() + bot.getEyeHeight(),
                 stand.getZ() + 0.5D);
-        return canInteract(bot, eye, target, reach, removableOccluders, true);
+        return canInteract(
+                bot, eye, target, reach, removableOccluders, requireTargetHit);
     }
 
     private static boolean canInteract(
