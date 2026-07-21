@@ -58,6 +58,7 @@ public final class GatherQuotaTask extends AbstractTask {
     private static final int GOTO_FAIL_EXCLUDE = 2;      // 同一目标 GOTO 连续走崩 N 次 → 工作记忆拉黑
     private static final int GOTO_STUCK_LIMIT = 80;      // R1:GOTO 朝树寻路时坐标连续这么久(4s)不动 → 判悬空/卡死,强制脱困
     private static final int TREE_PLANNING_BACKOFF_TICKS = 200;
+    private static final int TREE_DROP_PICKUP_GRACE_TICKS = 20;
 
     private enum Phase {
         SURVEY,
@@ -87,6 +88,7 @@ public final class GatherQuotaTask extends AbstractTask {
     private int pickupMisses; // 连续"砍了但没捡到掉落物"的次数,超限才判 pickup_timeout(避免一棵没捡到就整个采集失败)
     private boolean pickupSweepAttempted;
     private boolean batchTreePickup;
+    private int treeDropPickupGraceTicks;
     private StockpileTask stockpileTask;
     private int searchRadius = SEARCH_RADIUS;
     private int lastScanTick = -100;
@@ -174,6 +176,8 @@ public final class GatherQuotaTask extends AbstractTask {
         phase = countSoFar >= targetCount ? Phase.DONE : Phase.SURVEY;
         stockpileTask = null;
         treeFellingSession = null;
+        batchTreePickup = false;
+        treeDropPickupGraceTicks = 0;
     }
 
     @Override
@@ -880,6 +884,7 @@ public final class GatherQuotaTask extends AbstractTask {
                 pickupTicks = 160;
                 pickupSweepAttempted = false;
                 batchTreePickup = true;
+                treeDropPickupGraceTicks = TREE_DROP_PICKUP_GRACE_TICKS;
                 phase = Phase.PICKUP;
                 BotLog.action(bot, "tree_felling_complete",
                         "root", finished.committedTree().id().root().toShortString(),
@@ -944,6 +949,9 @@ public final class GatherQuotaTask extends AbstractTask {
         HarvestCore.forcePickupNearbyAnyOf(bot, acceptItems);
         countSoFar = progressCount(bot);
         pickupTicks--;
+        if (batchTreePickup && treeDropPickupGraceTicks > 0) {
+            treeDropPickupGraceTicks--;
+        }
         boolean remainingDrop = HarvestCore.nearestDropAnyOf(bot, acceptItems, 8.0D).isPresent();
         if (batchTreePickup && remainingDrop && pickupTicks > 0) {
             // Finishing the committed tree is followed by one bounded collection sweep. Reaching
@@ -951,15 +959,25 @@ public final class GatherQuotaTask extends AbstractTask {
             HarvestCore.chaseDropAnyOf(bot, acceptItems, 8.0D);
             return;
         }
+        if (batchTreePickup && treeDropPickupGraceTicks > 0) {
+            // The final BlockMiner completion and the spawned ItemEntity can straddle a server
+            // tick, and vanilla drops retain a short pickup delay. Keep the committed-tree batch
+            // open long enough to observe and naturally collect that last drop even if the quota
+            // was already satisfied by an earlier log.
+            bot.getActionPack().stopMovement();
+            return;
+        }
         if (countSoFar >= targetCount) {
             pickupMisses = 0;
             batchTreePickup = false;
+            treeDropPickupGraceTicks = 0;
             phase = Phase.DONE;
             return;
         }
         if (countSoFar > countBeforeHarvest) {
             pickupMisses = 0;
             batchTreePickup = false;
+            treeDropPickupGraceTicks = 0;
             phase = Phase.SURVEY;
             return;
         }
@@ -975,6 +993,7 @@ public final class GatherQuotaTask extends AbstractTask {
             if (countSoFar > countBeforeHarvest) {
                 pickupMisses = 0;
                 batchTreePickup = false;
+                treeDropPickupGraceTicks = 0;
                 phase = countSoFar >= targetCount ? Phase.DONE : Phase.SURVEY;
             } else if (probabilisticDrop) {
                 // 概率掉落(割草取种子/采浆果丛):这次破坏没掉是常态,不算"采不到",回 SURVEY 继续采下一个;
