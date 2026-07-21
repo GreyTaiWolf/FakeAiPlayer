@@ -216,7 +216,7 @@ public final class MultiGoalAStarPathfinder {
                 return finish(result, startedNanos);
             }
 
-            for (NeighborCandidate neighbor : enumerator.getNeighbors(current.pos(), world)) {
+            for (NeighborCandidate neighbor : enumerator.getNeighbors(current, world)) {
                 if (!validPosition(neighbor.pos())) {
                     continue;
                 }
@@ -332,7 +332,7 @@ public final class MultiGoalAStarPathfinder {
             if (!validPosition(expected.pos())) {
                 return false;
             }
-            boolean transition = enumerator.getNeighbors(previous.pos(), world).stream()
+            boolean transition = enumerator.getNeighbors(previous, world).stream()
                     .anyMatch(candidate -> candidate.pos().equals(expected.pos())
                             && candidate.moveType() == expected.moveType());
             if (!transition) {

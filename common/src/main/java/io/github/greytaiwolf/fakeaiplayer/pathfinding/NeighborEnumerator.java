@@ -68,17 +68,37 @@ public final class NeighborEnumerator {
     }
 
     public List<NeighborCandidate> getNeighbors(BlockPos current, ServerLevel world) {
+        return getNeighbors(current, world, false);
+    }
+
+    /**
+     * Expands a search node while preserving the virtual effect of a preceding dig step.
+     * A {@link MoveType#DIG_THROUGH} node represents a feet/head column that execution will clear;
+     * without this distinction A* can enter the first wall block but can never leave it.
+     */
+    public List<NeighborCandidate> getNeighbors(Node current, ServerLevel world) {
+        if (current == null) {
+            return List.of();
+        }
+        return getNeighbors(
+                current.pos(), world, current.moveType() == MoveType.DIG_THROUGH);
+    }
+
+    private List<NeighborCandidate> getNeighbors(BlockPos current,
+                                                 ServerLevel world,
+                                                 boolean currentColumnWillBeCleared) {
         List<NeighborCandidate> result = new ArrayList<>(HORIZONTAL.length);
         for (Direction direction : HORIZONTAL) {
             BlockPos target = current.relative(direction);
             if (Standability.isStandable(world, target, policy)
-                    && walkTransitionClear(world, current, target)) {
+                    && (currentColumnWillBeCleared
+                    || walkTransitionClear(world, current, target))) {
                 result.add(new NeighborCandidate(target, MoveType.WALK, 0));
                 continue;
             }
 
             BlockPos jumpTarget = target.above();
-            if (canJumpOnto(world, current, target)
+            if (canJumpOnto(world, current, target, currentColumnWillBeCleared)
                     && Standability.isStandable(world, jumpTarget, policy)) {
                 result.add(new NeighborCandidate(jumpTarget, MoveType.JUMP_UP, 0));
                 continue;
@@ -109,8 +129,8 @@ public final class NeighborEnumerator {
                 result.add(new NeighborCandidate(below, MoveType.DIG_THROUGH, 0));
             }
         }
-        addDiagonals(current, world, result);
-        addPillar(current, world, result);
+        addDiagonals(current, world, result, currentColumnWillBeCleared);
+        addPillar(current, world, result, currentColumnWillBeCleared);
         return result;
     }
 
@@ -125,7 +145,10 @@ public final class NeighborEnumerator {
     }
 
     // NAV-3:同高对角移动。仅当目标格可站、且两个正交相邻格都"可穿过"(不切墙角)时才允许。
-    private void addDiagonals(BlockPos current, ServerLevel world, List<NeighborCandidate> result) {
+    private void addDiagonals(BlockPos current,
+                              ServerLevel world,
+                              List<NeighborCandidate> result,
+                              boolean currentColumnWillBeCleared) {
         Direction[][] pairs = {
                 {Direction.NORTH, Direction.EAST},
                 {Direction.NORTH, Direction.WEST},
@@ -143,7 +166,8 @@ public final class NeighborEnumerator {
             if (!passableColumn(world, current.relative(pair[0])) || !passableColumn(world, current.relative(pair[1]))) {
                 continue;
             }
-            if (!walkTransitionClear(world, current, diag)) {
+            if (!currentColumnWillBeCleared
+                    && !walkTransitionClear(world, current, diag)) {
                 continue;
             }
             result.add(new NeighborCandidate(diag, MoveType.DIAGONAL, 0));
@@ -151,14 +175,19 @@ public final class NeighborEnumerator {
     }
 
     // NAV-9:垫方块上升一格(原地)。bot 会在脚下放方块并跳上去。需要头顶两格净空。
-    private void addPillar(BlockPos current, ServerLevel world, List<NeighborCandidate> result) {
+    private void addPillar(BlockPos current,
+                           ServerLevel world,
+                           List<NeighborCandidate> result,
+                           boolean currentColumnWillBeCleared) {
         if (!canPillar) {
             return;
         }
         BlockPos up1 = current.above();
         BlockPos up2 = current.above(2);
         // up1 = 新脚位(当前头位,应为空);up2 = 新头位,需净空
-        if (collisionEmpty(world, up1) && collisionEmpty(world, up2) && !Standability.isDangerous(world.getBlockState(up1))) {
+        if ((currentColumnWillBeCleared || collisionEmpty(world, up1))
+                && collisionEmpty(world, up2)
+                && !Standability.isDangerous(world.getBlockState(up1))) {
             result.add(new NeighborCandidate(up1, MoveType.PILLAR_UP, 0));
         }
     }
@@ -180,8 +209,14 @@ public final class NeighborEnumerator {
         return collisionEmpty(world, current.above()) && collisionEmpty(world, current.above(2));
     }
 
-    private static boolean canJumpOnto(ServerLevel world, BlockPos current, BlockPos front) {
-        if (!canJumpFrom(world, current)) {
+    private static boolean canJumpOnto(ServerLevel world,
+                                       BlockPos current,
+                                       BlockPos front,
+                                       boolean currentColumnWillBeCleared) {
+        boolean jumpSpace = currentColumnWillBeCleared
+                ? collisionEmpty(world, current.above(2))
+                : canJumpFrom(world, current);
+        if (!jumpSpace) {
             return false;
         }
         BlockState frontState = world.getBlockState(front);

@@ -387,6 +387,7 @@ public final class SharedP2NavigationGameTestScenarios {
             NavigationHandle[] handleRef = new NavigationHandle[1];
             BlockPos[] initiallyResolved = new BlockPos[1];
             long[] requestId = new long[1];
+            boolean[] blocked = new boolean[1];
 
             helper.runAtTickTime(1, () -> fixture.checked(() -> {
                 NavigationHandle handle = bot.getActionPack().navigate(
@@ -404,10 +405,14 @@ public final class SharedP2NavigationGameTestScenarios {
                 fixture.setAbsolute(initiallyResolved[0], Blocks.STONE.defaultBlockState());
                 fixture.setAbsolute(
                         initiallyResolved[0].above(), Blocks.STONE.defaultBlockState());
+                blocked[0] = true;
             }));
             helper.onEachTick(() -> fixture.checked(() -> {
                 NavigationHandle handle = handleRef[0];
                 if (handle == null || initiallyResolved[0] == null) {
+                    return;
+                }
+                if (!blocked[0]) {
                     return;
                 }
                 require(!bot.blockPosition().equals(initiallyResolved[0]),

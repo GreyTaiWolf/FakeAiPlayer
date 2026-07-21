@@ -269,7 +269,7 @@ public final class AStarPathfinder {
                         reconstruct(current), explored, elapsed(startTime)), startTime));
             }
 
-            for (NeighborCandidate neighbor : enumerator.getNeighbors(current.pos(), world)) {
+            for (NeighborCandidate neighbor : enumerator.getNeighbors(current, world)) {
                 if (excludedPositions.contains(neighbor.pos())
                         || !bounds.contains(neighbor.pos())
                         || !positionConstraint.test(neighbor.pos())) {
@@ -354,7 +354,7 @@ public final class AStarPathfinder {
                     || !positionConstraint.test(expected.pos())) {
                 return false;
             }
-            boolean stillReachable = enumerator.getNeighbors(previous.pos(), world).stream()
+            boolean stillReachable = enumerator.getNeighbors(previous, world).stream()
                     .anyMatch(candidate -> candidate.pos().equals(expected.pos())
                             && candidate.moveType() == expected.moveType());
             if (!stillReachable) {

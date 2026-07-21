@@ -754,7 +754,7 @@ public final class PathExecutor {
                 return new RouteProblem(candidate.pos(), danger);
             }
             Node previous = path.get(candidateIndex - 1);
-            boolean transitionValid = validator.getNeighbors(previous.pos(), world).stream()
+            boolean transitionValid = validator.getNeighbors(previous, world).stream()
                     .anyMatch(neighbor -> neighbor.pos().equals(candidate.pos())
                             && neighbor.moveType() == candidate.moveType());
             if (!transitionValid
