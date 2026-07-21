@@ -28,6 +28,7 @@ import java.util.function.Predicate;
 import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.phys.Vec3;
 
 /** Loader-neutral P2 navigation contract scenarios. */
 public final class SharedP2NavigationGameTestScenarios {
@@ -496,6 +497,7 @@ public final class SharedP2NavigationGameTestScenarios {
                     target.getUUID(), target.blockPosition(), 0, 1);
             NavigationHandle[] handleRef = new NavigationHandle[1];
             long[] requestId = new long[1];
+            BlockPos[] settledTarget = new BlockPos[1];
             BlockPos followerStart = follower.blockPosition();
             helper.runAtTickTime(1, () -> fixture.checked(() -> {
                 NavigationHandle handle = follower.getActionPack().navigate(
@@ -541,12 +543,25 @@ public final class SharedP2NavigationGameTestScenarios {
                     return;
                 }
                 BlockPos settled = fixture.absolute(new BlockPos(3, FEET_Y, 15));
+                settledTarget[0] = settled;
+                target.setDeltaMovement(Vec3.ZERO);
                 target.teleportTo(
                         helper.getLevel(), settled.getX() + 0.5D, settled.getY(),
                         settled.getZ() + 0.5D, java.util.Collections.emptySet(),
                         target.getYRot(), target.getXRot(), true);
             }));
             helper.onEachTick(() -> fixture.checked(() -> {
+                if (settledTarget[0] != null) {
+                    // ServerPlayer physics runs before GameTest callbacks. Pin the intentionally
+                    // settled target so residual teleport/gravity motion cannot move the live ring
+                    // between the follower's authoritative arrival check and this assertion.
+                    BlockPos settled = settledTarget[0];
+                    target.setDeltaMovement(Vec3.ZERO);
+                    target.teleportTo(
+                            helper.getLevel(), settled.getX() + 0.5D, settled.getY(),
+                            settled.getZ() + 0.5D, java.util.Collections.emptySet(),
+                            target.getYRot(), target.getXRot(), true);
+                }
                 NavigationHandle handle = handleRef[0];
                 if (handle == null) {
                     return;
