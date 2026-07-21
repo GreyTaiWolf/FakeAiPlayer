@@ -563,7 +563,7 @@ public final class TreeFellingSession {
     }
 
     private Comparator<BlockPos> logOrder(AIPlayerEntity bot) {
-        return Comparator.comparingInt(BlockPos::getY)
+        return Comparator.<BlockPos>comparingInt(BlockPos::getY)
                 .thenComparingDouble(pos -> pos.distSqr(bot.blockPosition()))
                 .thenComparingLong(BlockPos::asLong);
     }

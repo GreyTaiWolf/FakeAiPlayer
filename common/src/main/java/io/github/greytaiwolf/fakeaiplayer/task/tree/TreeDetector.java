@@ -106,7 +106,7 @@ public final class TreeDetector {
             truncated = true;
         }
         BlockPos root = discovered.stream()
-                .min(Comparator.comparingInt(BlockPos::getY)
+                .min(Comparator.<BlockPos>comparingInt(BlockPos::getY)
                         .thenComparingInt(BlockPos::getX)
                         .thenComparingInt(BlockPos::getZ))
                 .orElse(immutableSeed);
