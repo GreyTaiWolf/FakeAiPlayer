@@ -1009,9 +1009,13 @@ public final class SharedP0P1GameTestScenarios {
                     require(diagnostic != null
                                     && state.committedTreeId.equals(diagnostic.tree()),
                             "Committed TreeId disappeared while the task was safety-paused");
+                    // Automatic owners such as SAFETY live on the execution-stack frame;
+                    // isPausedBy() intentionally reports only persistent USER/INVENTORY locks.
+                    // The later resumeSafetyPause() call proves that this frame has SAFETY
+                    // ownership instead of merely observing an implementation-private lock.
                     require(task.state() == TaskState.PAUSED
-                                    && TaskManager.INSTANCE.isPausedBy(bot, PauseOwner.SAFETY),
-                            "SAFETY no longer owned the expected paused task");
+                                    && TaskManager.INSTANCE.pausedDepth(bot) == 1,
+                            "Committed gather lost its expected SAFETY pause frame");
                     require(TaskManager.INSTANCE.getActive(bot).orElse(null) == safetyHold
                                     && TaskManager.INSTANCE.activeOrigin(bot)
                                     .map(TaskOrigin::safety)
