@@ -515,6 +515,12 @@ public final class SharedP2NavigationGameTestScenarios {
             for (int tick = 5; tick <= 54; tick++) {
                 int scheduledTick = tick;
                 helper.runAtTickTime(scheduledTick, () -> fixture.checked(() -> {
+                    NavigationHandle handle = handleRef[0];
+                    if (handle != null && handle.state() == NavigationState.ARRIVED) {
+                        require(ring.accepts(helper.getLevel(), follower.blockPosition()),
+                                "Follower arrived outside the pre-move live target ring");
+                        return;
+                    }
                     int z = 7 + ((scheduledTick - 5) % 8);
                     BlockPos moving = fixture.absolute(new BlockPos(16, FEET_Y, z));
                     target.teleportTo(
