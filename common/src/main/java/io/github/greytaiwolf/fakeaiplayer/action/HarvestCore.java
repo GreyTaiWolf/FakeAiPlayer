@@ -6,7 +6,9 @@ import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.mode.CapabilityRuntime;
 import io.github.greytaiwolf.fakeaiplayer.mode.ObservableWorldQuery;
 import io.github.greytaiwolf.fakeaiplayer.mode.PrivilegedCapability;
-import io.github.greytaiwolf.fakeaiplayer.pathfinding.AStarPathfinder;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.InteractionPosePlanner;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.InteractionPosePlanner.InteractionPose;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.InteractionPosePlanner.PlanningBudget;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.Standability;
 import java.util.Comparator;
 import java.util.List;
@@ -26,22 +28,17 @@ import net.minecraft.world.phys.AABB;
 public final class HarvestCore {
     // NAV-OPT(第0层B):可达性"名副其实"——只验证最近 N 个候选,用纯步行小预算 A*,兼顾准确与性能。
     private static final int REACH_VERIFY_LIMIT = 8;
-    private static final int REACH_MAX_NODES = 3_000;
-    private static final long REACH_MAX_MILLIS = 30L;
-
     private HarvestCore() {
     }
 
     public static TargetChoice nearestReachableBlock(AIPlayerEntity bot, Block targetBlock, int horizontalRadius, int down, int up) {
         CapabilityRuntime.decide(bot, PrivilegedCapability.HIDDEN_BLOCK_SCAN, "harvest_nearest_block");
         BlockPos origin = bot.blockPosition();
-        return firstWalkReachable(bot, origin,
+        return bestReachableTarget(bot, origin,
                 BlockPos.betweenClosedStream(origin.offset(-horizontalRadius, -down, -horizontalRadius), origin.offset(horizontalRadius, up, horizontalRadius))
                         .filter(pos -> ObservableWorldQuery.canObserveBlock(bot, pos))
                         .filter(pos -> bot.serverLevel().getBlockState(pos).is(targetBlock))
-                        .map(BlockPos::immutable)
-                        .map(pos -> targetChoice(bot, pos))
-                        .filter(choice -> choice != null));
+                        .map(BlockPos::immutable));
     }
 
     // MINE-DIG/Fix C:在一组候选方块里找最近可达的(如"任意原木"),供 GatherQuotaTask 跨树种采集。
@@ -55,14 +52,12 @@ public final class HarvestCore {
                                                      Predicate<BlockPos> posFilter) {
         CapabilityRuntime.decide(bot, PrivilegedCapability.HIDDEN_BLOCK_SCAN, "harvest_nearest_blocks");
         BlockPos origin = bot.blockPosition();
-        return firstWalkReachable(bot, origin,
+        return bestReachableTarget(bot, origin,
                 BlockPos.betweenClosedStream(origin.offset(-horizontalRadius, -down, -horizontalRadius), origin.offset(horizontalRadius, up, horizontalRadius))
                         .filter(pos -> ObservableWorldQuery.canObserveBlock(bot, pos))
                         .filter(pos -> targetBlocks.contains(bot.serverLevel().getBlockState(pos).getBlock()))
                         .filter(pos -> posFilter == null || posFilter.test(pos))
-                        .map(BlockPos::immutable)
-                        .map(pos -> targetChoice(bot, pos))
-                        .filter(choice -> choice != null));
+                        .map(BlockPos::immutable));
     }
 
     public static void startMining(AIPlayerEntity bot, BlockPos targetPos) {
@@ -296,7 +291,7 @@ public final class HarvestCore {
     }
 
     public static boolean canReach(AIPlayerEntity bot, BlockPos target) {
-        return bot.getEyePosition().distanceTo(target.getCenter()) <= 4.5D;
+        return InteractionPosePlanner.canInteractFromCurrent(bot, target);
     }
 
     public static boolean canDirectMine(AIPlayerEntity bot, BlockPos target) {
@@ -306,44 +301,57 @@ public final class HarvestCore {
 
     // NAV-OPT(第0层B):候选按距离近→远,返回第一个**纯步行真能走到**的;只验证最近 REACH_VERIFY_LIMIT 个
     // (纯步行小预算 A*),兼顾准确与性能。旧逻辑只看"目标相邻有空格"却不验证 bot 走得到,导致 GOTO 反复失败 stuck。
-    private static TargetChoice firstWalkReachable(AIPlayerEntity bot, BlockPos origin, java.util.stream.Stream<TargetChoice> candidates) {
+    private static TargetChoice bestReachableTarget(
+            AIPlayerEntity bot,
+            BlockPos origin,
+            java.util.stream.Stream<BlockPos> candidates) {
+        PlanningBudget budget = PlanningBudget.bounded(REACH_VERIFY_LIMIT * 8, 40L);
         return candidates
-                .sorted(Comparator.comparingDouble(choice -> choice.pos().distSqr(origin)))
+                // Bound the synchronous A* work before pose planning. Mapping every block in a
+                // 48-block cube first would turn target selection into a server-thread spike.
+                .sorted(Comparator.comparingDouble(pos -> pos.distSqr(origin)))
                 .limit(REACH_VERIFY_LIMIT)
-                .filter(choice -> isWalkReachable(bot, choice))
-                .findFirst()
+                .map(pos -> targetChoice(bot, pos, budget))
+                .filter(java.util.Objects::nonNull)
+                .min(Comparator
+                        .comparingDouble((TargetChoice choice) -> choice.pose().pathCost())
+                        .thenComparingDouble(choice -> choice.pos().distSqr(origin))
+                        .thenComparingLong(choice -> choice.pos().asLong()))
                 .orElse(null);
     }
 
     public static boolean isWalkReachable(AIPlayerEntity bot, TargetChoice choice) {
-        BlockPos stand = choice.stand();
-        if (stand == null || bot.blockPosition().equals(stand)) {
-            return true; // 够得着直接挖 / 已在站位,无需寻路
-        }
-        return new AStarPathfinder(bot.serverLevel(), bot.blockPosition(), stand,
-                REACH_MAX_NODES, REACH_MAX_MILLIS, false, false).findPath().success();
+        return choice != null && choice.pose() != null;
     }
 
     public static TargetChoice targetChoice(AIPlayerEntity bot, BlockPos target) {
-        // 不再因方块低于自己而拒绝:够得着就直接挖(挖脚下→下落→继续往下挖,掉落物随之落到脚边便于拾取)。
-        if (canDirectMine(bot, target)) {
-            return new TargetChoice(target, null, true);
-        }
-        BlockPos stand = adjacentStandPos(bot, target);
-        if (stand == null) {
-            return null;
-        }
-        return new TargetChoice(target, stand, false);
+        return targetChoice(bot, target, PlanningBudget.bounded(8, 30L));
     }
 
-    private static BlockPos adjacentStandPos(AIPlayerEntity bot, BlockPos target) {
-        for (Direction direction : Direction.Plane.HORIZONTAL) {
-            BlockPos candidate = target.relative(direction);
-            if (Standability.isStandable(bot.serverLevel(), candidate)) {
-                return candidate;
-            }
+    private static TargetChoice targetChoice(
+            AIPlayerEntity bot, BlockPos target, PlanningBudget budget) {
+        return InteractionPosePlanner.plan(bot, target, Set.of(), budget)
+                .map(pose -> new TargetChoice(
+                        target,
+                        pose.currentPosition() ? null : pose.stand(),
+                        pose.currentPosition(),
+                        pose))
+                .orElse(null);
+    }
+
+    /** Starts the exact dry route that won pose selection; never digs or pillars as a fallback. */
+    public static ActionResult startApproach(AIPlayerEntity bot, TargetChoice choice) {
+        if (choice == null) {
+            return ActionResult.failed("missing_interaction_pose");
         }
-        return null;
+        if (choice.direct()) {
+            return ActionResult.SUCCESS;
+        }
+        InteractionPose pose = choice.pose();
+        if (pose == null || choice.stand() == null) {
+            return ActionResult.failed("invalid_interaction_pose");
+        }
+        return bot.getActionPack().startPlannedNonMutatingPath(choice.stand(), pose.path());
     }
 
     private static boolean canForcePickup(AIPlayerEntity bot, ItemEntity drop, double maxH, double maxV) {
@@ -362,6 +370,15 @@ public final class HarvestCore {
         return items.contains(stack.getItem());
     }
 
-    public record TargetChoice(BlockPos pos, BlockPos stand, boolean direct) {
+    public record TargetChoice(
+            BlockPos pos,
+            BlockPos stand,
+            boolean direct,
+            InteractionPose pose
+    ) {
+        public TargetChoice {
+            pos = pos.immutable();
+            stand = stand == null ? null : stand.immutable();
+        }
     }
 }

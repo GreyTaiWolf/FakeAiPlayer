@@ -41,11 +41,17 @@ required_files=(
   neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgeGameEvents.java
   neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/client/NeoForgeClientSetup.java
   neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/client/NeoForgeBuildingPreviewRenderer.java
+  common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedGameTestFixture.java
+  common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedP0P1GameTestScenarios.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/mixin/BlockItemPlacementMixin.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/task/tree/PlayerPlacedLogLedger.java
   fabric/src/gametest/resources/fabric.mod.json
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerDeterministicGameTests.java
+  fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP0P1GameTests.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerHarnessTestMod.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotTestSubcommand.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotVerifySubcommand.java
+  neoforge/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP0P1GameTests.java
   scripts/evidence_run.sh
   scripts/evidence_batch.sh
   scripts/evidence_validate.sh
@@ -76,6 +82,119 @@ grep -Fq 'must be a project-relative child directory' fabric/build.gradle \
   || fail 'harness run directory traversal guard is missing'
 grep -Fq '"fabric-gametest"' fabric/src/gametest/resources/fabric.mod.json \
   || fail 'GameTest entrypoint is not registered'
+
+for mixin_config in fabric/src/main/resources/fakeaiplayer.mixins.json \
+    neoforge/src/main/resources/fakeaiplayer.mixins.json; do
+  grep -Fq '"BlockItemPlacementMixin"' "$mixin_config" \
+    || fail "$mixin_config does not record player BlockItem placements"
+  if grep -Fq '"ServerPlayerGameModeMixin"' "$mixin_config"; then
+    fail "$mixin_config reintroduces non-transactional provenance deletion"
+  fi
+done
+
+[[ ! -e common/src/main/java/io/github/greytaiwolf/fakeaiplayer/mixin/ServerPlayerGameModeMixin.java ]] \
+  || fail 'P1 must not delete monotonic placement evidence on block destruction'
+
+ledger=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/task/tree/PlayerPlacedLogLedger.java
+placement_mixin=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/mixin/BlockItemPlacementMixin.java
+build_action=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/action/BuildAction.java
+grep -Fq 'loadIntegrityTrusted = false' "$ledger" \
+  || fail 'placement ledger does not latch failed load integrity'
+grep -Fq '!sessionMarkerActive' "$ledger" \
+  || fail 'placement ledger writes are not guarded by a trusted active-session marker'
+grep -Fq 'player_placed_log_ledger_baseline_required' "$ledger" \
+  || fail 'worlds without a placement baseline do not fail closed'
+grep -Fq 'player_placed_log_ledger_unclean_session' "$ledger" \
+  || fail 'unclean ledger sessions cannot fail closed across restart'
+grep -Fq 'closeSessionMarkerAfterCleanFlush' "$ledger" \
+  || fail 'placement ledger does not retain its session marker until a clean final flush'
+grep -Fq 'onServerStopped' "$ledger" \
+  || fail 'placement ledger can clear its session marker before the terminal stopped boundary'
+if grep -Fq 'positions.remove' "$ledger"; then
+  fail 'P1 placement evidence must remain monotonic until a transactional compactor exists'
+fi
+grep -Fq 'SERVER_STOPPED.register(FakeAiPlayer::onServerStopped)' \
+    fabric/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/fabric/FakeAiPlayerFabric.java \
+  || fail 'Fabric does not finalize placement provenance after world shutdown'
+grep -Fq 'ServerStoppedEvent' \
+    neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgeGameEvents.java \
+  || fail 'NeoForge does not finalize placement provenance after world shutdown'
+grep -Fq 'FakeAiPlayer.onServerStopped(event.getServer())' \
+    neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/NeoForgeGameEvents.java \
+  || fail 'NeoForge stopped event is not wired to placement provenance finalization'
+grep -Fq 'trust-empty-log-baseline' \
+    common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotPersistSubcommand.java \
+  || fail 'missing explicit administrator command for an audited empty log baseline'
+grep -Fq '@At("HEAD"), cancellable = true' "$placement_mixin" \
+  || fail 'BlockItem log placement is not cancellable before an untracked world mutation'
+grep -Fq 'allowsTrackedPlacement(state)' "$placement_mixin" \
+  || fail 'BlockItem placement does not fail closed when provenance is unavailable'
+grep -Fq 'allowsTrackedPlacement(placementState)' "$build_action" \
+  || fail 'direct Bot placement does not fail closed when provenance is unavailable'
+
+pose_planner=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/InteractionPosePlanner.java
+path_executor=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/PathExecutor.java
+tree_session=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/task/tree/TreeFellingSession.java
+shared_scenarios=common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedP0P1GameTestScenarios.java
+grep -Fq 'Predicate<BlockPos> pathPositionConstraint' "$pose_planner" \
+  || fail 'interaction pose A* is missing the skill-owned feet constraint'
+grep -Fq 'Set<BlockPos> persistentExclusions' "$path_executor" \
+  || fail 'path executor cannot retain skill exclusions across replans'
+grep -Fq 'positionConstraint' "$path_executor" \
+  || fail 'path executor cannot retain skill constraints across replans'
+grep -Fq 'feet -> hasIndependentSupport(bot, feet)' "$tree_session" \
+  || fail 'tree felling does not apply independent support to the full route lifecycle'
+grep -Fq 'BuildAction.placeBlock(' "$shared_scenarios" \
+  || fail 'shared GameTest does not exercise the real BlockItem placement chain'
+grep -Fq 'isKnownPlayerPlaced' "$shared_scenarios" \
+  || fail 'shared GameTest does not verify loader placement provenance'
+
+grep -Fq 'gametest {' neoforge/build.gradle \
+  || fail 'NeoForge GameTest must use an isolated source set'
+grep -Fq "java.srcDir rootProject.file('common/src/gametest/java')" neoforge/build.gradle \
+  || fail 'NeoForge GameTest does not compile the shared scenarios'
+grep -Fq 'addModdingDependenciesTo sourceSets.gametest' neoforge/build.gradle \
+  || fail 'NeoForge GameTest source set is missing modding dependencies'
+grep -Fq "type = 'gameTestServer'" neoforge/build.gradle \
+  || fail 'NeoForge is missing the official GameTest server run type'
+grep -Fq "systemProperty 'neoforge.enabledGameTestNamespaces', mod_id" neoforge/build.gradle \
+  || fail 'NeoForge GameTest namespace is not pinned to the production mod id'
+grep -Fq "tasks.named('runGameTestServer')" neoforge/build.gradle \
+  || fail 'NeoForge GameTest server task is not prepared for headless execution'
+grep -Fq 'player_placed_logs.json' fabric/build.gradle \
+  || fail 'Fabric isolated GameTest world is missing its explicit trusted log baseline'
+grep -Fq 'player_placed_logs.json' neoforge/build.gradle \
+  || fail 'NeoForge isolated GameTest world is missing its explicit trusted log baseline'
+
+fabric_shared_tests=fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP0P1GameTests.java
+neoforge_shared_tests=neoforge/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP0P1GameTests.java
+grep -Fq '@GameTestHolder(FakeAiPlayer.MOD_ID)' "$neoforge_shared_tests" \
+  || fail 'NeoForge shared scenarios are missing @GameTestHolder with the production namespace'
+grep -Fq '@PrefixGameTestTemplate(false)' "$neoforge_shared_tests" \
+  || fail 'NeoForge shared template id would be rewritten by the holder prefix'
+
+fabric_batches="$(grep -oE 'batch = "[^"]+"' "$fabric_shared_tests" | sort)"
+neoforge_batches="$(grep -oE 'batch = "[^"]+"' "$neoforge_shared_tests" | sort)"
+[[ -n "$fabric_batches" ]] || fail 'Fabric shared GameTest wrapper has no scenario ids'
+[[ "$fabric_batches" == "$neoforge_batches" ]] \
+  || fail 'Fabric and NeoForge shared GameTest scenario ids differ'
+fabric_contracts="$(grep -oE 'batch = "[^"]+", timeoutTicks = [0-9]+' \
+    "$fabric_shared_tests" | sort)"
+neoforge_contracts="$(grep -oE 'batch = "[^"]+", timeoutTicks = [0-9]+' \
+    "$neoforge_shared_tests" | sort)"
+[[ "$fabric_contracts" == "$neoforge_contracts" ]] \
+  || fail 'Fabric and NeoForge shared GameTest ids/timeouts differ'
+fabric_scenarios="$(grep -oE 'SharedP0P1GameTestScenarios\.[A-Za-z0-9_]+' \
+    "$fabric_shared_tests" | sort)"
+neoforge_scenarios="$(grep -oE 'SharedP0P1GameTestScenarios\.[A-Za-z0-9_]+' \
+    "$neoforge_shared_tests" | sort)"
+[[ "$fabric_scenarios" == "$neoforge_scenarios" ]] \
+  || fail 'Fabric and NeoForge wrappers do not delegate to the same shared scenarios'
+for shared_wrapper in "$fabric_shared_tests" "$neoforge_shared_tests"; do
+  if grep -Eq 'attempts[[:space:]]*=|requiredSuccesses[[:space:]]*=' "$shared_wrapper"; then
+    fail "$shared_wrapper enables retries without isolating the monotonic provenance ledger"
+  fi
+done
 
 [[ ! -e common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotTestSubcommand.java ]] \
   || fail 'test command leaked into production source set'
@@ -367,13 +486,20 @@ for workflow in .github/workflows/ci.yml .github/workflows/nightly.yml .github/w
     || fail "$workflow does not upload diagnostics"
   grep -Fq 'if: always()' "$workflow" \
     || fail "$workflow may discard diagnostics after a failure"
+  grep -Fq ':fabric:runGameTest' "$workflow" \
+    || fail "$workflow does not execute the Fabric GameTest server"
+  grep -Fq ':neoforge:runGameTestServer' "$workflow" \
+    || fail "$workflow does not execute the NeoForge GameTest server"
+  grep -Fq 'neoforge/build/run/gameTest/logs/**' "$workflow" \
+    || fail "$workflow does not upload NeoForge GameTest logs"
+  grep -Fq 'neoforge/build/run/gameTest/crash-reports/**' "$workflow" \
+    || fail "$workflow does not upload NeoForge GameTest crash reports"
   if grep -Fq 'scripts/food_test.sh' "$workflow"; then
     fail "$workflow still invokes the legacy shared-run wrapper"
   fi
 done
 
 for workflow in .github/workflows/ci.yml .github/workflows/nightly.yml; do
-  grep -Fq 'runGameTest' "$workflow" || fail "$workflow does not execute runGameTest"
   if grep -Fq 'DEEPSEEK_API_KEY' "$workflow"; then
     fail "$workflow must not have access to the billed LLM secret"
   fi
@@ -413,9 +539,9 @@ if [[ "${CI_STATIC_CHECK_ARTIFACTS:-0}" == 1 ]]; then
     if ! jar_listing="$(jar tf "$jar_file")"; then
       fail "invalid or truncated jar: $jar_file"
     fi
-    if grep -Eq 'io/github/greytaiwolf/fakeaiplayer/(gametest/|command/AIBot(Test|Verify)Subcommand)' \
+    if grep -Eq 'io/github/greytaiwolf/fakeaiplayer/(gametest/|command/AIBot(Test|Verify)Subcommand)|data/fakeaiplayer/structure/p0_arena\.nbt' \
         <<< "$jar_listing"; then
-      fail "verification harness leaked into jar: $jar_file"
+      fail "verification harness or test structure leaked into jar: $jar_file"
     fi
   done < <(find common/build/libs fabric/build/libs neoforge/build/libs \
     -maxdepth 1 -type f -name '*.jar' -print0)

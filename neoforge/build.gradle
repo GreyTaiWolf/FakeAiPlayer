@@ -3,8 +3,24 @@ plugins {
     id 'net.neoforged.moddev'
 }
 
+sourceSets {
+    gametest {
+        java.srcDir rootProject.file('common/src/gametest/java')
+        resources.srcDir project(':common').layout.buildDirectory.dir(
+                'generated/gametest/resources')
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+
+configurations {
+    gametestCompileClasspath.extendsFrom compileClasspath
+    gametestRuntimeClasspath.extendsFrom runtimeClasspath
+}
+
 neoForge {
     version = neoforge_version
+    addModdingDependenciesTo sourceSets.gametest
     parchment {
         minecraftVersion = parchment_minecraft
         mappingsVersion = parchment_version
@@ -12,6 +28,7 @@ neoForge {
     mods {
         register(mod_id) {
             sourceSet sourceSets.main
+            sourceSet sourceSets.gametest
         }
     }
     runs {
@@ -24,6 +41,13 @@ neoForge {
             server()
             loadedMods = mods
             gameDirectory = file('run/server')
+        }
+        gameTestServer {
+            type = 'gameTestServer'
+            sourceSet = sourceSets.gametest
+            loadedMods = mods
+            gameDirectory = file('build/run/gameTest')
+            systemProperty 'neoforge.enabledGameTestNamespaces', mod_id
         }
     }
 }
@@ -52,4 +76,32 @@ def prepareNeoForgeServerRun = tasks.register('prepareNeoForgeServerRun') {
 tasks.named('runServer') {
     dependsOn prepareNeoForgeServerRun
     standardInput = System.in
+}
+
+def neoForgeGameTestRunDir = file('build/run/gameTest')
+def prepareNeoForgeGameTestRun = tasks.register('prepareNeoForgeGameTestRun') {
+    group = 'verification'
+    description = 'Creates a clean, deterministic headless NeoForge GameTest run directory.'
+    outputs.upToDateWhen { false }
+
+    doLast {
+        delete neoForgeGameTestRunDir
+        neoForgeGameTestRunDir.mkdirs()
+        new File(neoForgeGameTestRunDir, 'eula.txt').setText('eula=true\n', 'UTF-8')
+        new File(neoForgeGameTestRunDir, 'server.properties').setText(
+                'online-mode=false\nlevel-name=world\nlevel-seed=0\n', 'UTF-8')
+        def ledgerDirectory = new File(
+                neoForgeGameTestRunDir, 'world/fakeaiplayer')
+        ledgerDirectory.mkdirs()
+        new File(ledgerDirectory, 'player_placed_logs.json').setText(
+                '{\n  "schemaVersion": 1,\n  "dimensions": {}\n}\n', 'UTF-8')
+    }
+}
+
+tasks.named('processGametestResources') {
+    dependsOn ':common:generateGameTestStructures'
+}
+
+tasks.named('runGameTestServer') {
+    dependsOn prepareNeoForgeGameTestRun
 }

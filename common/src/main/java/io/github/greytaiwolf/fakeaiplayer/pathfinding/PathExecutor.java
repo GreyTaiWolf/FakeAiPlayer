@@ -16,6 +16,7 @@ import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Predicate;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.item.BlockItem;
@@ -25,7 +26,6 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 public final class PathExecutor {
-    private static final int STUCK_TICKS_LIMIT = 60;
     private static final int REPLAN_COOLDOWN_TICKS = 40;
     private static final int ROUTE_REVALIDATE_LOOKAHEAD = 3;
     private static final int MAX_TRANSIENT_EXCLUSIONS = 8;
@@ -38,17 +38,24 @@ public final class PathExecutor {
     private final boolean allowDigOnReplan;
     private final TraversalPolicy traversalPolicy;
     private final TraversalBounds bounds;
+    private final Set<BlockPos> persistentExclusions;
+    private final Predicate<BlockPos> positionConstraint;
     private final Set<BlockPos> transientExclusions = new LinkedHashSet<>();
     private WalkToController subWalker;
     private MiningController subMiner;
     private boolean digWalking;
     private boolean replanTried;
-    private Vec3 lastPos;
-    private int stuckTicks;
+    private final PathProgressTracker progressTracker = new PathProgressTracker();
     private int totalTicks;
+    private int replanCount;
     private int lastReplanTick = -REPLAN_COOLDOWN_TICKS;
     private int activeWalkTargetIndex = -1;
     private int nodeRetry;
+    private boolean forceSingleStep;
+    private boolean advancedThisTick;
+    private int noProgressEvents;
+    private int oscillationEvents;
+    private String lastReplanReason = "";
 
     public PathExecutor(List<Node> path, BlockPos originalGoal) {
         this(path, originalGoal, false, true, true, TraversalPolicy.TASK_MUTATING_DRY);
@@ -84,6 +91,19 @@ public final class PathExecutor {
                         boolean allowDigOnReplan,
                         TraversalPolicy traversalPolicy,
                         TraversalBounds bounds) {
+        this(path, originalGoal, exactGoal, allowPillarOnReplan, allowDigOnReplan,
+                traversalPolicy, bounds, Set.of(), ignored -> true);
+    }
+
+    public PathExecutor(List<Node> path,
+                        BlockPos originalGoal,
+                        boolean exactGoal,
+                        boolean allowPillarOnReplan,
+                        boolean allowDigOnReplan,
+                        TraversalPolicy traversalPolicy,
+                        TraversalBounds bounds,
+                        Set<BlockPos> persistentExclusions,
+                        Predicate<BlockPos> positionConstraint) {
         this.path = List.copyOf(path);
         this.originalGoal = originalGoal.immutable();
         this.exactGoal = exactGoal;
@@ -91,10 +111,24 @@ public final class PathExecutor {
         this.allowDigOnReplan = allowDigOnReplan;
         this.traversalPolicy = traversalPolicy;
         this.bounds = bounds == null ? TraversalBounds.unbounded() : bounds;
+        this.persistentExclusions = persistentExclusions == null
+                ? Set.of()
+                : persistentExclusions.stream()
+                .map(BlockPos::immutable)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        this.positionConstraint = positionConstraint == null
+                ? ignored -> true : positionConstraint;
     }
 
     public ActionResult tick(ActionPack pack) {
         totalTicks++;
+        advancedThisTick = false;
+        BlockPos currentPosition = pack.player().blockPosition();
+        if (persistentExclusions.contains(currentPosition)
+                || !positionConstraint.test(currentPosition)) {
+            cleanup(pack);
+            return ActionResult.failed("path_skill_constraint_violated");
+        }
         if (!bounds.contains(pack.player().blockPosition())) {
             cleanup(pack);
             return ActionResult.failed("path_bounds_exceeded");
@@ -102,15 +136,13 @@ public final class PathExecutor {
         if (path.isEmpty() || index >= path.size()) {
             cleanup(pack);
             double distSq = pack.player().blockPosition().distSqr(originalGoal);
-            if (exactGoal && !isExactGoal(pack.player().blockPosition(), originalGoal)) {
+            boolean arrived = exactGoal
+                    ? hasReachedNode(pack.player().blockPosition(), originalGoal)
+                    : distSq <= 4.0D;
+            if (!arrived) {
                 BotLog.warn(LogCategory.PATH, pack.player(), "path_end_not_exact",
                         "dist_sq", distSq, "goal", LogFields.pos(originalGoal));
-                return ActionResult.failed("ended_before_exact_goal dist_sq=" + (int) distSq);
-            }
-            if (distSq > 4.0D) {
-                BotLog.warn(LogCategory.PATH, pack.player(), "path_end_far_from_goal",
-                        "dist_sq", distSq, "goal", LogFields.pos(originalGoal));
-                return ActionResult.failed("ended_far_from_goal dist_sq=" + (int) distSq);
+                return ActionResult.failed("ended_before_goal dist_sq=" + (int) distSq);
             }
             return ActionResult.SUCCESS;
         }
@@ -134,9 +166,20 @@ public final class PathExecutor {
         if (!result.isInProgress()) {
             return result;
         }
+        if (advancedThisTick) {
+            // advanceTo resets the tracker. Sampling the old local `next` here would seed that
+            // fresh tracker with a completed node and make genuine progress to the new node look
+            // like a 40-tick stall.
+            return ActionResult.IN_PROGRESS;
+        }
         Node progressNode = activeWalkTargetIndex >= index && activeWalkTargetIndex < path.size()
                 ? path.get(activeWalkTargetIndex)
                 : next;
+        // Mining has its own monotonic destroy progress and a 600 tick timeout. Counting the
+        // stationary mining phase as locomotion stall resets slow block breaking forever.
+        if (next.moveType() == MoveType.DIG_THROUGH && !digWalking) {
+            return ActionResult.IN_PROGRESS;
+        }
         return checkProgress(pack, progressNode);
     }
 
@@ -148,6 +191,50 @@ public final class PathExecutor {
         return totalTicks;
     }
 
+    public int replanCount() {
+        return replanCount;
+    }
+
+    public int pathLength() {
+        return path.size();
+    }
+
+    public int remainingNodes() {
+        return Math.max(0, path.size() - index);
+    }
+
+    public BlockPos currentNode() {
+        return index >= 0 && index < path.size() ? path.get(index).pos() : originalGoal;
+    }
+
+    public double bestNodeDistance() {
+        return progressTracker.bestDistance();
+    }
+
+    public double pathCost() {
+        return path.isEmpty() ? 0.0D : Math.max(0.0D, path.get(path.size() - 1).gCost());
+    }
+
+    public double remainingPathCost() {
+        if (path.isEmpty() || index >= path.size()) {
+            return 0.0D;
+        }
+        double completedCost = index <= 0 ? 0.0D : path.get(index - 1).gCost();
+        return Math.max(0.0D, path.get(path.size() - 1).gCost() - completedCost);
+    }
+
+    public int noProgressEvents() {
+        return noProgressEvents;
+    }
+
+    public int oscillationEvents() {
+        return oscillationEvents;
+    }
+
+    public String lastReplanReason() {
+        return lastReplanReason;
+    }
+
     public TraversalPolicy traversalPolicy() {
         return traversalPolicy;
     }
@@ -157,7 +244,7 @@ public final class PathExecutor {
     }
 
     private ActionResult tickWalk(ActionPack pack, Node next) {
-        if (hasArrived(pack.player().blockPosition(), next.pos())) {
+        if (hasArrived(pack.player().blockPosition(), next.pos(), index)) {
             advance();
             return ActionResult.IN_PROGRESS;
         }
@@ -171,13 +258,15 @@ public final class PathExecutor {
                         "from", LogFields.pos(next.pos()),
                         "to", LogFields.pos(target.pos()));
             }
-            BlockPos requiredColumn = exactGoal && target.pos().equals(originalGoal)
-                    ? originalGoal
+            // Every intermediate node is a real route obligation. Only an explicitly non-exact
+            // terminal goal retains the legacy near policy used by follow/combat/entity targets.
+            BlockPos requiredColumn = exactGoal || activeWalkTargetIndex < path.size() - 1
+                    ? target.pos()
                     : null;
             subWalker = new WalkToController(Vec3.atCenterOf(target.pos()), requiredColumn);
         }
         Node target = path.get(activeWalkTargetIndex);
-        if (hasArrived(pack.player().blockPosition(), target.pos())) {
+        if (hasArrived(pack.player().blockPosition(), target.pos(), activeWalkTargetIndex)) {
             advanceTo(activeWalkTargetIndex + 1);
             return ActionResult.IN_PROGRESS;
         }
@@ -217,7 +306,7 @@ public final class PathExecutor {
             }
             subMiner = null;
             digWalking = true;
-            subWalker = new WalkToController(Vec3.atCenterOf(next.pos()));
+            subWalker = new WalkToController(Vec3.atCenterOf(next.pos()), next.pos());
         }
 
         ActionResult walk = subWalker.tick(pack);
@@ -277,17 +366,19 @@ public final class PathExecutor {
     }
 
     private ActionResult checkProgress(ActionPack pack, Node next) {
-        Vec3 current = pack.player().position();
-        if (lastPos != null && current.distanceTo(lastPos) < 0.03D) {
-            stuckTicks++;
-        } else {
-            stuckTicks = 0;
-        }
-        lastPos = current;
-        if (stuckTicks > STUCK_TICKS_LIMIT) {
-            return handleStuck(pack, "no_progress_at: " + compact(next.pos()));
-        }
-        return ActionResult.IN_PROGRESS;
+        PathProgressTracker.Stall stall = progressTracker.sample(
+                pack.player().position(), Vec3.atCenterOf(next.pos()));
+        return switch (stall) {
+            case NONE -> ActionResult.IN_PROGRESS;
+            case NO_GOAL_PROGRESS -> {
+                noProgressEvents++;
+                yield handleStuck(pack, "no_goal_progress_at:" + compact(next.pos()));
+            }
+            case OSCILLATION -> {
+                oscillationEvents++;
+                yield handleStuck(pack, "oscillation_at:" + compact(next.pos()));
+            }
+        };
     }
 
     private void advance() {
@@ -301,15 +392,19 @@ public final class PathExecutor {
         subWalker = null;
         subMiner = null;
         digWalking = false;
-        stuckTicks = 0;
-        lastPos = null;
+        progressTracker.reset();
         activeWalkTargetIndex = -1;
         nodeRetry = 0;
         replanTried = false;
+        forceSingleStep = false;
+        advancedThisTick = true;
     }
 
     private int chooseWalkTargetIndex(ActionPack pack) {
         int best = index;
+        if (forceSingleStep) {
+            return best;
+        }
         BlockPos from = pack.player().blockPosition();
         int max = Math.min(path.size() - 1, index + AIBotConfig.get().nav().lookahead());
         for (int candidate = index + 1; candidate <= max; candidate++) {
@@ -333,13 +428,17 @@ public final class PathExecutor {
         if (dy < -1 || dy > 1) {
             return false;
         }
-        return lineClearForStringPull(pack.player(), from, target, traversalPolicy);
+        return lineClearForStringPull(
+                pack.player(), from, target, traversalPolicy,
+                persistentExclusions, positionConstraint);
     }
 
     private static boolean lineClearForStringPull(AIPlayerEntity player,
                                                   BlockPos from,
                                                   BlockPos target,
-                                                  TraversalPolicy policy) {
+                                                  TraversalPolicy policy,
+                                                  Set<BlockPos> persistentExclusions,
+                                                  Predicate<BlockPos> positionConstraint) {
         var world = player.serverLevel();
         AABB swept = playerBox(from).minmax(playerBox(target)).deflate(1.0E-4D);
         if (!world.noCollision(player, swept)) {
@@ -355,7 +454,9 @@ public final class PathExecutor {
                     from.getX() + 0.5D + dx * t,
                     from.getY() + dy * t,
                     from.getZ() + 0.5D + dz * t);
-            if (!passableColumn(world, sample, policy)) {
+            if (persistentExclusions.contains(sample)
+                    || !positionConstraint.test(sample)
+                    || !passableColumn(world, sample, policy)) {
                 return false;
             }
             if (!hasSupport(world, sample) && !sample.equals(from)) {
@@ -394,6 +495,10 @@ public final class PathExecutor {
             Node candidate = path.get(candidateIndex);
             if (!bounds.contains(candidate.pos())) {
                 return new RouteProblem(candidate.pos(), "outside_path_bounds");
+            }
+            if (persistentExclusions.contains(candidate.pos())
+                    || !positionConstraint.test(candidate.pos())) {
+                return new RouteProblem(candidate.pos(), "skill_constraint_violated");
             }
             String danger = DangerCheck.scan(world, candidate.pos(), traversalPolicy);
             if (danger != null) {
@@ -434,17 +539,11 @@ public final class PathExecutor {
                 centerX + 0.3D, feet.getY() + 1.8D, centerZ + 0.3D);
     }
 
-    private static boolean arrivedAt(BlockPos current, BlockPos target) {
-        int dx = current.getX() - target.getX();
-        int dz = current.getZ() - target.getZ();
-        return dx * dx + dz * dz <= 1 && Math.abs(current.getY() - target.getY()) <= 1;
-    }
-
-    private boolean hasArrived(BlockPos current, BlockPos target) {
-        if (exactGoal && target.equals(originalGoal)) {
-            return isExactGoal(current, target);
+    private boolean hasArrived(BlockPos current, BlockPos target, int targetIndex) {
+        if (!exactGoal && targetIndex == path.size() - 1) {
+            return current.distSqr(target) <= 4.0D;
         }
-        return arrivedAt(current, target);
+        return hasReachedNode(current, target);
     }
 
     /**
@@ -452,7 +551,7 @@ public final class PathExecutor {
      * stair or slab can report a feet Y one block below the path node, so vertical equality would
      * reject an otherwise exact and stable placement column.
      */
-    private static boolean isExactGoal(BlockPos current, BlockPos target) {
+    static boolean hasReachedNode(BlockPos current, BlockPos target) {
         return current.getX() == target.getX()
                 && current.getZ() == target.getZ()
                 && Math.abs(current.getY() - target.getY()) <= 1;
@@ -461,18 +560,16 @@ public final class PathExecutor {
     private ActionResult handleWalkFailure(ActionPack pack, String reason) {
         if (reason.contains("stuck_blocked") && nodeRetry < AIBotConfig.get().nav().nodeRetry()) {
             nodeRetry++;
-            int previous = index;
-            index = Math.max(1, index - 1);
             subWalker = null;
             activeWalkTargetIndex = -1;
-            stuckTicks = 0;
-            lastPos = null;
+            progressTracker.reset();
+            forceSingleStep = true;
             pack.stopMovement();
             BotLog.path(pack.player(), "path_node_retry",
                     "reason", reason,
                     "retry", nodeRetry,
-                    "from_index", previous,
-                    "to_index", index);
+                    "index", index,
+                    "single_step", true);
             return ActionResult.IN_PROGRESS;
         }
         return handleStuck(pack, reason);
@@ -483,6 +580,7 @@ public final class PathExecutor {
     }
 
     private ActionResult handleStuck(ActionPack pack, String reason, boolean forceFresh) {
+        lastReplanReason = reason;
         if (!replanTried) {
             int now = pack.player().getServer().getTickCount();
             if (now - lastReplanTick < REPLAN_COOLDOWN_TICKS) {
@@ -491,7 +589,8 @@ public final class PathExecutor {
             }
             lastReplanTick = now;
             replanTried = true;
-            BotLog.path(pack.player(), "path_stuck", "at_node", reason, "stuck_ticks", stuckTicks);
+            BotLog.path(pack.player(), "path_stuck", "at_node", reason,
+                    "no_progress_ticks", progressTracker.noProgressTicks());
             if (!Standability.isStandable(
                     pack.player().serverLevel(), pack.player().blockPosition(), traversalPolicy)) {
                 if (traversalPolicy == TraversalPolicy.AMBIENT_DRY_OPEN
@@ -503,6 +602,8 @@ public final class PathExecutor {
                 }
             }
             boolean canPillar = allowPillarOnReplan && hasPlaceableBlock(pack.player());
+            Set<BlockPos> replanExclusions = new LinkedHashSet<>(persistentExclusions);
+            replanExclusions.addAll(transientExclusions);
             AStarPathfinder finder = new AStarPathfinder(
                     pack.player().serverLevel(),
                     pack.player().blockPosition(),
@@ -513,18 +614,20 @@ public final class PathExecutor {
                     allowDigOnReplan,
                     traversalPolicy,
                     1.0D,
-                    transientExclusions,
-                    bounds);
+                    replanExclusions,
+                    bounds,
+                    positionConstraint);
             PathfindingResult fresh = finder.findPath(forceFresh);
             if (fresh.success()) {
+                replanCount++;
                 BotLog.path(pack.player(), "path_replan", "at_node", reason, "new_path_size", fresh.path().size());
                 path = fresh.path();
                 index = 1;
                 subWalker = null;
                 subMiner = null;
                 digWalking = false;
-                stuckTicks = 0;
-                lastPos = null;
+                progressTracker.reset();
+                forceSingleStep = false;
                 replanTried = false;
                 return ActionResult.IN_PROGRESS;
             }

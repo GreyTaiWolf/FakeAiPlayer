@@ -48,6 +48,12 @@ public final class Standability {
         return result;
     }
 
+    /** Uncached check for live interaction ownership where the supporting cell may just change. */
+    public static boolean isStandableFresh(
+            ServerLevel world, BlockPos pos, TraversalPolicy policy) {
+        return compute(world, pos, policy);
+    }
+
     public static Optional<BlockPos> findNearestStandable(ServerLevel world,
                                                           BlockPos origin,
                                                           int horizontalRadius,

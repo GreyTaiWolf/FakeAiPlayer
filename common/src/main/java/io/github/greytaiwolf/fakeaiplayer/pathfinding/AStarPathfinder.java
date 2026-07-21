@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.PriorityQueue;
 import java.util.Set;
+import java.util.function.Predicate;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 
@@ -20,6 +21,7 @@ public final class AStarPathfinder {
     private static final long DEFAULT_MAX_MILLIS = 50L;
     private static final int MAX_CACHE_ENTRIES = 256;
     private static final long SUCCESS_CACHE_MILLIS = 2_000L;
+    private static final Predicate<BlockPos> ALLOW_ALL_POSITIONS = ignored -> true;
     private static final Map<CacheKey, CachedResult> RESULT_CACHE = new LinkedHashMap<>(MAX_CACHE_ENTRIES, 0.75F, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<CacheKey, CachedResult> eldest) {
@@ -36,6 +38,8 @@ public final class AStarPathfinder {
     private final TraversalPolicy policy;
     private final Set<BlockPos> excludedPositions;
     private final TraversalBounds bounds;
+    private final Predicate<BlockPos> positionConstraint;
+    private final boolean cacheableConstraint;
     // 加权 A*(ε-admissible):挖掘接近场景启发式(欧氏×1)远低于真实挖掘成本(×8),搜索退化成
     // 全向泛洪 50ms 必 TIMEOUT(geo 矩阵实测)。ε=3 牺牲最优性换收敛速度——挖矿不需要最短路。
     private final double heuristicWeight;
@@ -123,6 +127,27 @@ public final class AStarPathfinder {
                            double heuristicWeight,
                            Set<BlockPos> excludedPositions,
                            TraversalBounds bounds) {
+        this(world, start, goal, maxNodes, maxMillis, canPillar, allowDig,
+                policy, heuristicWeight, excludedPositions, bounds, ALLOW_ALL_POSITIONS);
+    }
+
+    /**
+     * Full constructor for a skill-owned invariant that must survive both initial planning and
+     * executor replanning. Predicate-backed searches deliberately bypass the shared path cache:
+     * an arbitrary world-sensitive predicate cannot be represented safely by the cache key.
+     */
+    public AStarPathfinder(ServerLevel world,
+                           BlockPos start,
+                           BlockPos goal,
+                           int maxNodes,
+                           long maxMillis,
+                           boolean canPillar,
+                           boolean allowDig,
+                           TraversalPolicy policy,
+                           double heuristicWeight,
+                           Set<BlockPos> excludedPositions,
+                           TraversalBounds bounds,
+                           Predicate<BlockPos> positionConstraint) {
         this.world = world;
         this.start = start.immutable();
         this.goal = goal.immutable();
@@ -131,6 +156,9 @@ public final class AStarPathfinder {
         this.policy = policy;
         this.excludedPositions = immutablePositions(excludedPositions);
         this.bounds = bounds == null ? TraversalBounds.unbounded() : bounds;
+        this.positionConstraint = positionConstraint == null
+                ? ALLOW_ALL_POSITIONS : positionConstraint;
+        this.cacheableConstraint = this.positionConstraint == ALLOW_ALL_POSITIONS;
         this.heuristicWeight = heuristicWeight;
         this.enumerator = new NeighborEnumerator(canPillar, allowDig, policy);
         this.maxNodes = maxNodes;
@@ -172,7 +200,7 @@ public final class AStarPathfinder {
                 world.dimension().location().toString(), effectiveStart, effectiveGoal,
                 (int) (maxNodes + heuristicWeight * 1000), maxMillis,
                 canPillar, allowDig, policy, excludedPositions, bounds, cacheVersion);
-        if (!bypassCache) {
+        if (!bypassCache && cacheableConstraint) {
             PathfindingResult cached = cached(cacheKey, startTime);
             if (cached != null && (!cached.success() || validateCachedPath(cached.path(), effectiveGoal))) {
                 return cached;
@@ -196,11 +224,13 @@ public final class AStarPathfinder {
         int explored = 0;
         while (!open.isEmpty()) {
             if (explored >= maxNodes) {
-                return done(cache(cacheKey, PathfindingResult.failure(FailureReason.SEARCH_LIMIT, explored, elapsed(startTime)), startTime));
+                return done(cacheIfAllowed(cacheKey, PathfindingResult.failure(
+                        FailureReason.SEARCH_LIMIT, explored, elapsed(startTime)), startTime));
             }
             if (elapsed(startTime) > maxMillis) {
                 BotLog.comm(null, "findpath_timeout_diag", "explored", explored, "ms", elapsed(startTime), "open", open.size(), "dig", allowDig);
-                return done(cache(cacheKey, PathfindingResult.failure(FailureReason.TIMEOUT, explored, elapsed(startTime)), startTime));
+                return done(cacheIfAllowed(cacheKey, PathfindingResult.failure(
+                        FailureReason.TIMEOUT, explored, elapsed(startTime)), startTime));
             }
 
             Node current = open.poll();
@@ -209,11 +239,14 @@ public final class AStarPathfinder {
             }
             explored++;
             if (current.pos().equals(effectiveGoal)) {
-                return done(cache(cacheKey, PathfindingResult.success(reconstruct(current), explored, elapsed(startTime)), startTime));
+                return done(cacheIfAllowed(cacheKey, PathfindingResult.success(
+                        reconstruct(current), explored, elapsed(startTime)), startTime));
             }
 
             for (NeighborCandidate neighbor : enumerator.getNeighbors(current.pos(), world)) {
-                if (excludedPositions.contains(neighbor.pos()) || !bounds.contains(neighbor.pos())) {
+                if (excludedPositions.contains(neighbor.pos())
+                        || !bounds.contains(neighbor.pos())
+                        || !positionConstraint.test(neighbor.pos())) {
                     continue;
                 }
                 if (closed.contains(neighbor.pos())) {
@@ -233,7 +266,8 @@ public final class AStarPathfinder {
                         current));
             }
         }
-        return done(cache(cacheKey, PathfindingResult.failure(FailureReason.GOAL_UNREACHABLE, explored, elapsed(startTime)), startTime));
+        return done(cacheIfAllowed(cacheKey, PathfindingResult.failure(
+                FailureReason.GOAL_UNREACHABLE, explored, elapsed(startTime)), startTime));
     }
 
     private BlockPos resolveEndpoint(BlockPos requested, boolean startPoint) {
@@ -241,6 +275,7 @@ public final class AStarPathfinder {
                 || !policy.requiresOpenGoal()
                 || LocalOpenness.isOpen(world, requested, policy);
         if (bounds.contains(requested) && !excludedPositions.contains(requested)
+                && positionConstraint.test(requested)
                 && Standability.isStandable(world, requested, policy)
                 && acceptableOpenGoal) {
             return requested;
@@ -249,13 +284,17 @@ public final class AStarPathfinder {
         // 时不 snap——DIG_THROUGH 邻居本就允许"将被挖开的实心格"做路径节点,执行器会把它挖出来。
         // 原"终点必须有现成可站点"的硬检查正是当年 OreSeek 在包裹矿上连续卡死、被迫发明任务私有
         // "控制式直挖"的根源(8 格内无站位 → snap null → 整次寻路被拒)。
-        if (allowDig && !startPoint && bounds.contains(requested) && !excludedPositions.contains(requested)
+        if (allowDig && !startPoint && bounds.contains(requested)
+                && !excludedPositions.contains(requested)
+                && positionConstraint.test(requested)
                 && !policy.requiresOpenGoal() && isDiggableColumn(requested)) {
             return requested;
         }
         Optional<BlockPos> snapped = Standability.findNearestStandable(
                 world, requested, 8, 128, 32, policy,
-                candidate -> bounds.contains(candidate) && !excludedPositions.contains(candidate)
+                candidate -> bounds.contains(candidate)
+                        && !excludedPositions.contains(candidate)
+                        && positionConstraint.test(candidate)
                         && (startPoint || !policy.requiresOpenGoal()
                         || LocalOpenness.isOpen(world, candidate, policy)));
         if (snapped.isEmpty()) {
@@ -281,7 +320,9 @@ public final class AStarPathfinder {
         for (int i = 1; i < path.size(); i++) {
             Node previous = path.get(i - 1);
             Node expected = path.get(i);
-            if (!bounds.contains(expected.pos()) || excludedPositions.contains(expected.pos())) {
+            if (!bounds.contains(expected.pos())
+                    || excludedPositions.contains(expected.pos())
+                    || !positionConstraint.test(expected.pos())) {
                 return false;
             }
             boolean stillReachable = enumerator.getNeighbors(previous.pos(), world).stream()
@@ -336,6 +377,11 @@ public final class AStarPathfinder {
             RESULT_CACHE.put(key, new CachedResult(result, nowMillis + SUCCESS_CACHE_MILLIS));
         }
         return result;
+    }
+
+    private PathfindingResult cacheIfAllowed(
+            CacheKey key, PathfindingResult result, long nowMillis) {
+        return cacheableConstraint ? cache(key, result, nowMillis) : result;
     }
 
     private static void removeCached(CacheKey key) {

@@ -77,7 +77,8 @@ jobs:
       - name: Build before billed execution
         run: >-
           ./gradlew --no-daemon --console=plain --stacktrace
-          clean :common:test :fabric:runGameTest :fabric:build :neoforge:build
+          clean :common:test :fabric:runGameTest :neoforge:runGameTestServer
+          :fabric:build :neoforge:build
 
       - name: Run selected billed story in isolated evidence harness
         env:
@@ -113,3 +114,6 @@ jobs:
             common/build/test-results/**
             fabric/build/test-results/**
             fabric/build/run/gameTest/logs/**
+            fabric/build/run/gameTest/crash-reports/**
+            neoforge/build/run/gameTest/logs/**
+            neoforge/build/run/gameTest/crash-reports/**

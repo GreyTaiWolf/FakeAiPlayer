@@ -6,6 +6,7 @@ import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.mining.OreScan;
 import io.github.greytaiwolf.fakeaiplayer.mining.ToolTier;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationSnapshot;
 import java.util.Set;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -34,6 +35,7 @@ public final class MineTask extends AbstractTask {
     private int pickupTicks;
     private boolean pickupSweepAttempted;
     private boolean directMiningTarget;
+    private long navigationRequestId;
 
     public MineTask(Block targetBlock, int countNeeded) {
         this.targetBlock = targetBlock;
@@ -92,7 +94,11 @@ public final class MineTask extends AbstractTask {
             return;
         }
         phase = Phase.MOVING;
-        bot.getActionPack().startPathTo(choice.stand());
+        var approach = HarvestCore.startApproach(bot, choice);
+        navigationRequestId = bot.getActionPack().navigationSnapshot().requestId();
+        if (approach.isFailed()) {
+            phase = Phase.SEARCHING;
+        }
     }
 
     private void move(AIPlayerEntity bot) {
@@ -106,6 +112,11 @@ public final class MineTask extends AbstractTask {
             return;
         }
         if (bot.getActionPack().isPathExecutorIdle()) {
+            NavigationSnapshot navigation = bot.getActionPack().navigationSnapshot();
+            if (navigation.requestId() == navigationRequestId) {
+                BotLog.action(bot, "mine_navigation_finished",
+                        "state", navigation.state(), "reason", navigation.reason());
+            }
             phase = Phase.SEARCHING;
         }
     }
