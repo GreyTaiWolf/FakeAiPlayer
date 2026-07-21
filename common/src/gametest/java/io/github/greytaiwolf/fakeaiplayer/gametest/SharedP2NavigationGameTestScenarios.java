@@ -531,6 +531,15 @@ public final class SharedP2NavigationGameTestScenarios {
                         "Continuously moving target stalled the follower between replan cadences");
             }));
             helper.runAtTickTime(55, () -> fixture.checked(() -> {
+                NavigationHandle handle = handleRef[0];
+                if (handle != null && handle.state() == NavigationState.ARRIVED) {
+                    // ActionPack ticks before this scheduled GameTest callback. Do not teleport a
+                    // target away after the handle has correctly accepted the immediately prior
+                    // live ring; that would manufacture an out-of-ring terminal state in the test.
+                    require(ring.accepts(helper.getLevel(), follower.blockPosition()),
+                            "Follower arrived outside the pre-settlement live target ring");
+                    return;
+                }
                 BlockPos settled = fixture.absolute(new BlockPos(3, FEET_Y, 15));
                 target.teleportTo(
                         helper.getLevel(), settled.getX() + 0.5D, settled.getY(),
