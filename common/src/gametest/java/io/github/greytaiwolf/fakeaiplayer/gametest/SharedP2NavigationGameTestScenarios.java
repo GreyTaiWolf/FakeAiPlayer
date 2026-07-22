@@ -114,49 +114,73 @@ public final class SharedP2NavigationGameTestScenarios {
     }
 
     public static void interactionPoseUsesOneFrontierAndCheapestStand(GameTestHelper helper) {
-        run(helper, fixture -> {
+        runAsync(helper, fixture -> {
             fixture.prepareFlat(FEET_Y, 2, 18, 2, 18);
             AIPlayerEntity bot = fixture.spawnBot("P2Pose", new BlockPos(3, FEET_Y, 10));
             BlockPos target = fixture.absolute(new BlockPos(15, FEET_Y, 10));
             fixture.setAbsolute(target, Blocks.OAK_LOG.defaultBlockState());
-            InteractionPosePlanner.PlanningBudget budget =
-                    InteractionPosePlanner.PlanningBudget.bounded(8, 250L);
-            InteractionPosePlanner.InteractionPose pose = InteractionPosePlanner.plan(
-                    bot, target, Set.of(), budget, 8).orElseThrow(
-                    () -> new IllegalStateException("Production pose planner found no stand"));
+            int[] inconclusiveAttempts = new int[1];
 
-            double singletonBest = Double.POSITIVE_INFINITY;
-            for (int dx = -2; dx <= 2; dx++) {
-                for (int dz = -2; dz <= 2; dz++) {
-                    int ring = Math.max(Math.abs(dx), Math.abs(dz));
-                    boolean plannerCandidate = ring == 2
-                            || (ring == 1 && Math.abs(dx) + Math.abs(dz) == 1);
-                    if (!plannerCandidate) {
-                        continue;
-                    }
-                    BlockPos stand = target.offset(dx, 0, dz);
-                    if (stand.equals(target)
-                            || !Standability.isStandable(
-                            helper.getLevel(), stand, TraversalPolicy.TASK_WALK_DRY)
-                            || !InteractionPosePlanner.canInteractFrom(bot, stand, target, 5.0D)) {
-                        continue;
-                    }
-                    PathfindingResult baseline = search(
-                            helper, bot.blockPosition(), NavGoal.exact(stand),
-                            new NavigationSearchMetrics());
-                    if (baseline.success()) {
-                        singletonBest = Math.min(singletonBest, baseline.pathCost());
+            helper.onEachTick(() -> fixture.checked(() -> {
+                InteractionPosePlanner.PlanningBudget budget =
+                        InteractionPosePlanner.PlanningBudget.bounded(8, 250L);
+                var planned = InteractionPosePlanner.plan(
+                        bot, target, Set.of(), budget, 8);
+                NavigationSearchMetrics.Snapshot metrics = budget.searchMetrics();
+                require(metrics.frontiersStarted() <= 1
+                                && metrics.searchesCompleted() <= 1
+                                && metrics.frontiersStarted() == metrics.searchesCompleted(),
+                        "One pose decision used " + metrics.frontiersStarted()
+                                + " frontiers and " + metrics.searchesCompleted()
+                                + " completed searches");
+                if (planned.isEmpty()) {
+                    require(budget.inconclusive(),
+                            "Production pose planner conclusively found no stand");
+                    inconclusiveAttempts[0]++;
+                    require(inconclusiveAttempts[0] < 20,
+                            "Pose planning remained budget-inconclusive for "
+                                    + inconclusiveAttempts[0] + " ticks: "
+                                    + NavigationSearchBudget.snapshot(
+                                    bot.getServer(), bot.getUUID()));
+                    return;
+                }
+                InteractionPosePlanner.InteractionPose pose = planned.orElseThrow();
+
+                double singletonBest = Double.POSITIVE_INFINITY;
+                for (int dx = -2; dx <= 2; dx++) {
+                    for (int dz = -2; dz <= 2; dz++) {
+                        int ring = Math.max(Math.abs(dx), Math.abs(dz));
+                        boolean plannerCandidate = ring == 2
+                                || (ring == 1 && Math.abs(dx) + Math.abs(dz) == 1);
+                        if (!plannerCandidate) {
+                            continue;
+                        }
+                        BlockPos stand = target.offset(dx, 0, dz);
+                        if (stand.equals(target)
+                                || !Standability.isStandable(
+                                helper.getLevel(), stand, TraversalPolicy.TASK_WALK_DRY)
+                                || !InteractionPosePlanner.canInteractFrom(
+                                bot, stand, target, 5.0D)) {
+                            continue;
+                        }
+                        PathfindingResult baseline = search(
+                                helper, bot.blockPosition(), NavGoal.exact(stand),
+                                new NavigationSearchMetrics());
+                        if (baseline.success()) {
+                            singletonBest = Math.min(singletonBest, baseline.pathCost());
+                        }
                     }
                 }
-            }
-            NavigationSearchMetrics.Snapshot metrics = budget.searchMetrics();
-            require(metrics.frontiersStarted() == 1 && metrics.searchesCompleted() == 1,
-                    "Pose planner used " + metrics.frontiersStarted() + " frontiers and "
-                            + metrics.searchesCompleted() + " completed searches");
-            require(Double.isFinite(singletonBest)
-                            && pose.pathCost() <= singletonBest + 1.0E-6D,
-                    "One-frontier pose cost exceeded singleton best: "
-                            + pose.pathCost() + " > " + singletonBest);
+                require(metrics.frontiersStarted() == 1 && metrics.searchesCompleted() == 1,
+                        "Successful pose plan used " + metrics.frontiersStarted()
+                                + " frontiers and " + metrics.searchesCompleted()
+                                + " completed searches");
+                require(Double.isFinite(singletonBest)
+                                && pose.pathCost() <= singletonBest + 1.0E-6D,
+                        "One-frontier pose cost exceeded singleton best: "
+                                + pose.pathCost() + " > " + singletonBest);
+                fixture.succeed();
+            }));
         });
     }
 
