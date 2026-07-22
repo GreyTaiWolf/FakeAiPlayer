@@ -39,11 +39,17 @@ jobs:
       - name: Run evidence validator adversarial self-tests
         run: bash scripts/evidence_validate.sh --self-test
 
-      - name: Run unit tests, headless GameTests and production build
+      - name: Run unit tests, Fabric GameTests and Fabric build
+        timeout-minutes: 12
         run: >-
           ./gradlew --no-daemon --console=plain --stacktrace
-          clean :common:test :fabric:runGameTest :neoforge:runGameTestServer
-          :fabric:build :neoforge:build
+          clean :common:test :fabric:runGameTest :fabric:build
+
+      - name: Run NeoForge GameTests and NeoForge build
+        timeout-minutes: 15
+        run: >-
+          ./gradlew --no-daemon --console=plain --stacktrace
+          :neoforge:runGameTestServer :neoforge:build
 
       - name: Inspect production artifacts
         run: CI_STATIC_CHECK_ARTIFACTS=1 bash scripts/ci_static_check.sh
