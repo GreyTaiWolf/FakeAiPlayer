@@ -53,6 +53,23 @@ class ExecutionStackTest {
     }
 
     @Test
+    void targetedCancellationRemovesOnlyOneMissionAndPreservesLifoOrder() {
+        UUID cancelledMission = UUID.randomUUID();
+        UUID preservedMission = UUID.randomUUID();
+        ExecutionStack<String> stack = new ExecutionStack<>();
+        stack.push("preserved", TaskOrigin.mission(preservedMission, "build"), PauseOwner.SYSTEM);
+        stack.push("cancelled", TaskOrigin.mission(cancelledMission, "mine"), PauseOwner.SAFETY);
+        stack.push("combat", TaskOrigin.safety("combat"), PauseOwner.SAFETY);
+
+        assertEquals(java.util.List.of("cancelled"), stack.removeMatching(
+                frame -> cancelledMission.equals(frame.origin().missionId())).stream()
+                .map(ExecutionStack.Frame::work).toList());
+        assertTrue(stack.anyMatch(frame -> frame.origin().safety()));
+        assertEquals(java.util.List.of("combat", "preserved"),
+                stack.drain().stream().map(ExecutionStack.Frame::work).toList());
+    }
+
+    @Test
     void finalPersistentLockReleaseResumesRegardlessOfAcquisitionOrder() {
         EnumSet<PauseOwner> inventoryThenUser = EnumSet.of(PauseOwner.INVENTORY, PauseOwner.USER);
         inventoryThenUser.remove(PauseOwner.INVENTORY);

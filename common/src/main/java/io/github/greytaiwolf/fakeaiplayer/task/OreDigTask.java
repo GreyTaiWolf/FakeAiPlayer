@@ -472,12 +472,22 @@ public final class OreDigTask extends AbstractTask {
         for (Block oreBlock : targetOres) {
             String oreId = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(oreBlock).toString();
             var rich = io.github.greytaiwolf.fakeaiplayer.memory.KnowledgeBase.INSTANCE
-                    .richZoneNear(bot.getUUID(), oreId, bot.blockPosition(), 128, 3, 24);
+                    .richZoneNear(
+                            bot.getUUID(),
+                            bot.serverLevel().dimension().location().toString(),
+                            oreId,
+                            bot.blockPosition(),
+                            128,
+                            3,
+                            24);
             if (rich.isPresent() && !oreExcluded(bot, rich.get())) {
                 BlockPos zone = rich.get();
                 if (bot.blockPosition().closerThan(zone, 16)) {
                     io.github.greytaiwolf.fakeaiplayer.memory.KnowledgeBase.INSTANCE
-                            .invalidateResource(bot.getUUID(), zone);
+                            .invalidateResource(
+                                    bot.getUUID(),
+                                    bot.serverLevel().dimension().location().toString(),
+                                    zone);
                     BotLog.action(bot, "ore_dig_rich_zone_stale", "at", zone.toShortString());
                 } else if (bot.getActionPack().isPathExecutorIdle()) {
                     // walk 优先(startPathTo 两阶段):富区常在百格级,大预算 DIG 单阶段 50ms 必

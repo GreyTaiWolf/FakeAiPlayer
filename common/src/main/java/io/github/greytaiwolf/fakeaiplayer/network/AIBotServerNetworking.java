@@ -572,15 +572,16 @@ public final class AIBotServerNetworking {
     }
 
     private static void assign(AIPlayerEntity bot, Task task) {
-        IntentController.INSTANCE.replace(
+        IntentController.ReplaceResult result = IntentController.INSTANCE.replace(
                 bot,
                 IntentController.ControlOrigin.PLAYER_PANEL,
                 "panel_assign:" + task.name(),
-                () -> {
-                    TaskManager.INSTANCE.assign(bot, task,
-                            TaskOrigin.of(TaskOrigin.Kind.PLAYER_PANEL, "panel_assign"));
-                    return true;
-                });
+                () -> TaskManager.INSTANCE.assign(
+                        bot, task,
+                        TaskOrigin.of(TaskOrigin.Kind.PLAYER_PANEL, "panel_assign")).started());
+        if (!result.replacementStarted()) {
+            BotLog.task(bot, "panel_task_deferred", "task", task.name(), "reason", "safety_work_active");
+        }
     }
 
     private BotSnapshotS2C snapshot(AIPlayerEntity bot) {

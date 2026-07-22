@@ -4,6 +4,7 @@ import io.github.greytaiwolf.fakeaiplayer.brain.BotReporter;
 import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.manager.AIPlayerManager;
+import io.github.greytaiwolf.fakeaiplayer.mission.MissionArbiter;
 import io.github.greytaiwolf.fakeaiplayer.observe.BotProfiler;
 import io.github.greytaiwolf.fakeaiplayer.observe.TpsGuard;
 import io.github.greytaiwolf.fakeaiplayer.runtime.ExecutionStack;
@@ -28,23 +29,64 @@ public final class TaskManager {
     private final Map<UUID, TaskStatus> lastStatus = new ConcurrentHashMap<>();
     private final Map<UUID, FailureRecord> lastFailure = new ConcurrentHashMap<>();
     private final Map<UUID, FailureRecord> pendingFailure = new ConcurrentHashMap<>();
+    private final Map<UUID, String> navigationSafetyLeases = new ConcurrentHashMap<>();
+    private final Map<UUID, Set<UUID>> missionInterruptions = new ConcurrentHashMap<>();
 
     private TaskManager() {
     }
 
-    public void assign(AIPlayerEntity bot, Task task, TaskOrigin origin) {
-        if (hasPersistentPause(bot) && !origin.safety()) {
-            throw new IllegalStateException("mission_paused:" + pauseOwners(bot));
+    public TaskAssignmentResult assign(AIPlayerEntity bot, Task task, TaskOrigin origin) {
+        if (bot == null || task == null || origin == null) {
+            throw new IllegalArgumentException("task_assignment_incomplete");
+        }
+        UUID uuid = bot.getUUID();
+        if (navigationSafetyLeases.containsKey(uuid) && !origin.safety()) {
+            String reason = "navigation_safety_active:" + navigationSafetyLeases.get(uuid);
+            BotLog.task(bot, "task_assignment_deferred",
+                    "incoming", task.name(),
+                    "incoming_origin", origin.kind(),
+                    "active_origin", "navigation_safety",
+                    "decision", MissionArbiter.Action.DEFER,
+                    "reason", reason);
+            return new TaskAssignmentResult(false, MissionArbiter.Action.DEFER, reason);
+        }
+        TaskOrigin currentOrigin = activeOrigins.get(uuid);
+        if (currentOrigin == null) {
+            ExecutionStack<Task> stack = executionStacks.get(uuid);
+            currentOrigin = stack == null ? null : stack.peek().map(ExecutionStack.Frame::origin).orElse(null);
+        }
+        MissionArbiter.Decision decision = MissionArbiter.decide(
+                currentOrigin == null ? null : workClaim(currentOrigin),
+                workClaim(origin),
+                hasPersistentPause(bot));
+        if (!decision.startsIncoming()) {
+            BotLog.task(bot, "task_assignment_deferred",
+                    "incoming", task.name(),
+                    "incoming_origin", origin.kind(),
+                    "active_origin", currentOrigin == null ? "none" : currentOrigin.kind(),
+                    "decision", decision.action(),
+                    "reason", decision.reason());
+            return new TaskAssignmentResult(false, decision.action(), decision.reason());
         }
         io.github.greytaiwolf.fakeaiplayer.coordination.IdleCoordinator.INSTANCE
                 .cancelAmbient(bot, "task_assigned");
-        if (origin.safety()) {
+        UUID preemptedFrameId = null;
+        if (decision.action() == MissionArbiter.Action.PREEMPT && active.containsKey(uuid)) {
+            pauseFor(bot, origin.safety() ? PauseOwner.SAFETY : PauseOwner.SYSTEM,
+                    "arbiter:" + decision.reason());
+            ExecutionStack<Task> stack = executionStacks.get(uuid);
+            preemptedFrameId = stack == null
+                    ? null : stack.peek().map(ExecutionStack.Frame::frameId).orElse(null);
+        } else if (decision.action() == MissionArbiter.Action.REPLACE) {
+            io.github.greytaiwolf.fakeaiplayer.coordination.IdleCoordinator.INSTANCE
+                    .cancelClaimedJob(bot, "replaced_by:" + origin.kind());
+            cancelIntentTasks(bot, "replaced_by:" + origin.kind());
+        }
+        if (origin.safety() && decision.action() != MissionArbiter.Action.PREEMPT) {
             bot.getActionPack().cancelActivePathForSafety(
                     "safety_task_assign:" + origin.reason());
         }
-        abort(bot);
         bot.getActionPack().stopAll();
-        UUID uuid = bot.getUUID();
         active.put(uuid, task);
         activeOrigins.put(uuid, origin);
         try {
@@ -69,11 +111,21 @@ public final class TaskManager {
                 startFailure.addSuppressed(cleanupFailure);
             }
             TaskStatus failed = TaskStatus.from(task);
-            lastStatus.put(uuid, failed);
-            if (failed.state() == TaskState.FAILED) {
-                recordFailure(bot, task.name(), failed.failureReason(), bot.getServer().getTickCount());
+            boolean restoredPreemptedWork = false;
+            try {
+                restoredPreemptedWork = rollbackFailedPreemption(bot, preemptedFrameId);
+            } catch (RuntimeException rollbackFailure) {
+                startFailure.addSuppressed(rollbackFailure);
             }
-            BotReporter.INSTANCE.onStatus(bot.getServer(), bot, failed);
+            // A failed interrupt must not overwrite the restored owner's RUNNING status or leak a
+            // bot-global pending failure that the old Mission/Brain would consume as its own.
+            if (!restoredPreemptedWork) {
+                lastStatus.put(uuid, failed);
+                if (failed.state() == TaskState.FAILED) {
+                    recordFailure(bot, task.name(), failed.failureReason(), bot.getServer().getTickCount());
+                }
+                BotReporter.INSTANCE.onStatus(bot.getServer(), bot, failed);
+            }
             BotLog.error(bot, "task_start_failed", startFailure, "name", task.name());
             throw startFailure;
         }
@@ -81,16 +133,82 @@ public final class TaskManager {
         lastStatus.put(uuid, status);
         BotReporter.INSTANCE.onAssigned(bot, status);
         BotLog.task(bot, "task_assigned", "name", task.name(), "params", task.describe(),
-                "origin", origin.kind(), "origin_reason", origin.reason());
+                "origin", origin.kind(), "origin_reason", origin.reason(),
+                "arbiter", decision.action(), "arbiter_reason", decision.reason());
+        return new TaskAssignmentResult(true, decision.action(), decision.reason());
+    }
+
+    private static MissionArbiter.WorkClaim workClaim(TaskOrigin origin) {
+        MissionArbiter.WorkKind kind = switch (origin.kind()) {
+            case SAFETY -> MissionArbiter.WorkKind.SAFETY;
+            case REFLEX -> MissionArbiter.WorkKind.REFLEX;
+            case PLAYER_COMMAND, PLAYER_PANEL -> MissionArbiter.WorkKind.PLAYER;
+            case VERIFY -> MissionArbiter.WorkKind.VERIFY;
+            case MISSION -> MissionArbiter.WorkKind.MISSION;
+            case LLM_TOOL, LLM_SKILL -> MissionArbiter.WorkKind.AI_DIRECT;
+            case JOB -> MissionArbiter.WorkKind.JOB;
+            case SYSTEM_BACKGROUND -> MissionArbiter.WorkKind.BACKGROUND;
+        };
+        String owner = origin.missionId() != null
+                ? "mission:" + origin.missionId()
+                : origin.jobId() != null
+                ? "job:" + origin.jobId()
+                : origin.kind().name().toLowerCase(java.util.Locale.ROOT) + ':' + origin.reason();
+        int priority = switch (origin.kind()) {
+            case SAFETY -> safetyPriority(origin.reason());
+            case REFLEX -> 750;
+            case PLAYER_COMMAND, PLAYER_PANEL -> 900;
+            case VERIFY -> 800;
+            case MISSION -> 700;
+            case LLM_TOOL, LLM_SKILL -> 600;
+            case JOB -> 400;
+            case SYSTEM_BACKGROUND -> 200;
+        };
+        boolean resumable = switch (origin.kind()) {
+            case MISSION, LLM_SKILL, JOB, REFLEX, SYSTEM_BACKGROUND -> true;
+            default -> false;
+        };
+        return new MissionArbiter.WorkClaim(kind, owner, priority, resumable);
+    }
+
+    private static int safetyPriority(String reason) {
+        String normalized = reason == null ? "" : reason.toLowerCase(java.util.Locale.ROOT);
+        if (normalized.contains("lava") || normalized.contains("drown")) {
+            return 1_000;
+        }
+        if (normalized.contains("emergency") || normalized.contains("entomb")) {
+            return 980;
+        }
+        if (normalized.contains("low_hp") || normalized.contains("critical")
+                || normalized.contains("threat")) {
+            return 950;
+        }
+        if (normalized.contains("recover_drops")) {
+            return 850;
+        }
+        return 900;
+    }
+
+    private static boolean rollbackFailedPreemption(AIPlayerEntity bot, UUID preemptedFrameId) {
+        if (preemptedFrameId == null) {
+            return false;
+        }
+        return INSTANCE.resumeTop(bot, frame -> frame.frameId().equals(preemptedFrameId));
     }
 
     public void abort(AIPlayerEntity bot) {
-        Task current = active.remove(bot.getUUID());
-        activeOrigins.remove(bot.getUUID());
+        UUID uuid = bot.getUUID();
+        Task current = active.remove(uuid);
+        TaskOrigin origin = activeOrigins.remove(uuid);
         if (current != null) {
             current.abort(bot);
-            lastStatus.put(bot.getUUID(), TaskStatus.from(current));
+            lastStatus.put(uuid, TaskStatus.from(current));
             BotReporter.INSTANCE.onStatus(bot.getServer(), bot, TaskStatus.from(current));
+            if (resumesSystemPause(origin)) {
+                resumeSystemPause(bot);
+            } else if (origin != null && origin.safety()) {
+                resumeNestedSafetyPause(bot);
+            }
         }
     }
 
@@ -113,6 +231,7 @@ public final class TaskManager {
         }
         activeOrigins.remove(uuid);
         pauseLocks.remove(uuid);
+        missionInterruptions.remove(uuid);
         lastFailure.remove(uuid);
         pendingFailure.remove(uuid);
         lastStatus.put(uuid, TaskStatus.idle());
@@ -127,6 +246,7 @@ public final class TaskManager {
         ExecutionStack<Task> stack = executionStacks.remove(uuid);
         java.util.List<ExecutionStack.Frame<Task>> pausedFrames = stack == null ? java.util.List.of() : stack.drain();
         pauseLocks.remove(uuid);
+        missionInterruptions.remove(uuid);
         boolean hadFailure = lastFailure.remove(uuid) != null;
         boolean hadPendingFailure = pendingFailure.remove(uuid) != null;
         if (current != null) {
@@ -160,6 +280,74 @@ public final class TaskManager {
         return representative != null || hadFailure || hadPendingFailure;
     }
 
+    /** Cancels only Task frames owned by one Mission, leaving active safety/reflex work untouched. */
+    public boolean cancelMissionTasks(AIPlayerEntity bot, UUID missionId, String reason) {
+        if (bot == null || missionId == null) {
+            return false;
+        }
+        UUID uuid = bot.getUUID();
+        java.util.List<Task> cancelled = new ArrayList<>();
+        Task current = active.get(uuid);
+        TaskOrigin currentOrigin = activeOrigins.get(uuid);
+        if (current != null && currentOrigin != null && missionId.equals(currentOrigin.missionId())
+                && active.remove(uuid, current)) {
+            activeOrigins.remove(uuid, currentOrigin);
+            cancelled.add(current);
+        }
+        ExecutionStack<Task> stack = executionStacks.get(uuid);
+        if (stack != null) {
+            for (ExecutionStack.Frame<Task> frame : stack.removeMatching(
+                    candidate -> missionId.equals(candidate.origin().missionId()))) {
+                cancelled.add(frame.work());
+            }
+            if (stack.isEmpty()) {
+                executionStacks.remove(uuid, stack);
+            }
+        }
+        boolean preserveActiveActions = active.containsKey(uuid);
+        for (Task task : cancelled) {
+            try {
+                cancelDetachedTask(bot, task, reason, preserveActiveActions);
+            } catch (RuntimeException exception) {
+                BotLog.error(bot, "mission_task_cancel_cleanup_failed", exception,
+                        "mission_id", missionId, "name", task.name(), "reason", reason);
+            }
+        }
+        if (!cancelled.isEmpty()) {
+            Set<UUID> interrupted = missionInterruptions.get(uuid);
+            if (interrupted != null) {
+                interrupted.remove(missionId);
+                if (interrupted.isEmpty()) {
+                    missionInterruptions.remove(uuid, interrupted);
+                }
+            }
+            if (!active.containsKey(uuid)) {
+                TaskStatus status = TaskStatus.from(cancelled.get(0));
+                lastStatus.put(uuid, status);
+                BotReporter.INSTANCE.onStatus(bot.getServer(), bot, status);
+            }
+            BotLog.task(bot, "mission_tasks_cancelled", "mission_id", missionId,
+                    "count", cancelled.size(), "reason", reason);
+        }
+        return !cancelled.isEmpty();
+    }
+
+    private static void cancelDetachedTask(AIPlayerEntity bot,
+                                           Task task,
+                                           String reason,
+                                           boolean preserveActiveActions) {
+        if (preserveActiveActions && task instanceof AbstractTask abstractTask
+                && task.state() == TaskState.PAUSED) {
+            // The Task's ActionPack work was already stopped when it entered the stack. Calling
+            // onAbort now would stop the unrelated safety/reflex Task that currently owns the
+            // shared ActionPack, so retire the detached frame without replaying global cleanup.
+            abstractTask.state = TaskState.CANCELLED;
+            abstractTask.failureReason = reason == null ? "" : reason;
+            return;
+        }
+        task.cancel(bot, reason);
+    }
+
     public Optional<Task> getActive(AIPlayerEntity bot) {
         return Optional.ofNullable(active.get(bot.getUUID()));
     }
@@ -191,6 +379,63 @@ public final class TaskManager {
     public boolean hasPersistentPause(AIPlayerEntity bot) {
         Set<PauseOwner> owners = pauseLocks.get(bot.getUUID());
         return owners != null && owners.stream().anyMatch(PauseOwner::persistentLock);
+    }
+
+    public void acquireNavigationSafetyLease(AIPlayerEntity bot, String reason) {
+        if (bot != null) {
+            navigationSafetyLeases.put(bot.getUUID(), reason == null ? "unknown" : reason);
+        }
+    }
+
+    public void releaseNavigationSafetyLease(AIPlayerEntity bot) {
+        if (bot != null) {
+            navigationSafetyLeases.remove(bot.getUUID());
+        }
+    }
+
+    public boolean hasNavigationSafetyLease(AIPlayerEntity bot) {
+        return bot != null && navigationSafetyLeases.containsKey(bot.getUUID());
+    }
+
+    public boolean hasSafetyOwnership(AIPlayerEntity bot) {
+        if (bot == null) {
+            return false;
+        }
+        UUID uuid = bot.getUUID();
+        TaskOrigin origin = activeOrigins.get(uuid);
+        if (origin != null && origin.safety()) {
+            return true;
+        }
+        ExecutionStack<Task> stack = executionStacks.get(uuid);
+        return navigationSafetyLeases.containsKey(uuid)
+                || (stack != null && stack.anyMatch(
+                frame -> frame.pauseOwner() == PauseOwner.SAFETY));
+    }
+
+    public boolean isMissionAutomaticallyPaused(AIPlayerEntity bot, UUID missionId) {
+        if (bot == null || missionId == null) {
+            return false;
+        }
+        ExecutionStack<Task> stack = executionStacks.get(bot.getUUID());
+        return stack != null && stack.anyMatch(frame ->
+                missionId.equals(frame.origin().missionId())
+                        && frame.pauseOwner().automaticResumeAllowed());
+    }
+
+    /** Returns a latched preemption even if the interrupt already resumed before GoalExecutor ran. */
+    public boolean consumeMissionInterruption(AIPlayerEntity bot, UUID missionId) {
+        if (bot == null || missionId == null) {
+            return false;
+        }
+        UUID uuid = bot.getUUID();
+        Set<UUID> interrupted = missionInterruptions.get(uuid);
+        if (interrupted == null || !interrupted.remove(missionId)) {
+            return false;
+        }
+        if (interrupted.isEmpty()) {
+            missionInterruptions.remove(uuid, interrupted);
+        }
+        return true;
     }
 
     public Set<PauseOwner> pauseOwners(AIPlayerEntity bot) {
@@ -229,11 +474,30 @@ public final class TaskManager {
         if (current == null) {
             return changed;
         }
-        current.pause(bot);
+        // Keep pause as a state transaction. AbstractTask changes its state before invoking
+        // onPause(), so a throwing hook would otherwise remove the only active reference and
+        // leave a half-paused Task outside both the active slot and the execution stack.
+        try {
+            current.pause(bot);
+        } catch (RuntimeException pauseFailure) {
+            active.put(uuid, current);
+            if (origin != null) {
+                activeOrigins.put(uuid, origin);
+            }
+            if (changed) {
+                releasePauseLock(uuid, pauseOwner);
+            }
+            restoreRunningAfterFailedPause(bot, current, pauseFailure);
+            throw pauseFailure;
+        }
         TaskOrigin preservedOrigin = origin == null
                 ? TaskOrigin.of(TaskOrigin.Kind.SYSTEM_BACKGROUND, "unknown_origin") : origin;
         ExecutionStack<Task> stack = executionStacks.computeIfAbsent(uuid, ignored -> new ExecutionStack<>());
         stack.push(current, preservedOrigin, pauseOwner);
+        if (pauseOwner.automaticResumeAllowed() && preservedOrigin.missionId() != null) {
+            missionInterruptions.computeIfAbsent(uuid, ignored -> ConcurrentHashMap.newKeySet())
+                    .add(preservedOrigin.missionId());
+        }
         TaskStatus status = TaskStatus.from(current);
         lastStatus.put(bot.getUUID(), status);
         BotReporter.INSTANCE.onStatus(bot.getServer(), bot, status);
@@ -280,8 +544,16 @@ public final class TaskManager {
             return true;
         }
         Set<PauseOwner> remainingOwners = pauseOwners(bot);
-        return resumeTop(bot, frame -> PauseOwner.resumeAllowedAfterPersistentRelease(
-                frame.pauseOwner(), remainingOwners)) || changed;
+        try {
+            return resumeTop(bot, frame -> PauseOwner.resumeAllowedAfterPersistentRelease(
+                    frame.pauseOwner(), remainingOwners)) || changed;
+        } catch (RuntimeException resumeFailure) {
+            // resumeTop preserves the frame when Task.onResume throws. Restore the matching lock
+            // as part of the same transaction so a failed USER/INVENTORY resume cannot expose
+            // ordinary work to a later assignment.
+            acquirePauseLock(uuid, pauseOwner);
+            throw resumeFailure;
+        }
     }
 
     private boolean resumeTop(AIPlayerEntity bot,
@@ -304,11 +576,23 @@ public final class TaskManager {
         if (hasPersistentPause(bot) && !top.get().origin().safety()) {
             return false;
         }
-        ExecutionStack.Frame<Task> frame = stack.pop().orElseThrow();
+        ExecutionStack.Frame<Task> frame = top.orElseThrow();
         Task task = frame.work();
+        try {
+            task.resume(bot);
+        } catch (RuntimeException resumeFailure) {
+            restorePausedAfterFailedResume(bot, task, resumeFailure);
+            throw resumeFailure;
+        }
+        if (stack.peek().orElse(null) != frame) {
+            IllegalStateException changed =
+                    new IllegalStateException("execution_stack_changed_during_resume");
+            restorePausedAfterFailedResume(bot, task, changed);
+            throw changed;
+        }
+        stack.pop().orElseThrow();
         active.put(uuid, task);
         activeOrigins.put(uuid, frame.origin());
-        task.resume(bot);
         TaskStatus status = TaskStatus.from(task);
         lastStatus.put(bot.getUUID(), status);
         BotReporter.INSTANCE.onStatus(bot.getServer(), bot, status);
@@ -323,12 +607,11 @@ public final class TaskManager {
 
     public boolean pauseUserIntent(AIPlayerEntity bot, String why) {
         UUID uuid = bot.getUUID();
-        TaskOrigin origin = activeOrigins.get(uuid);
-        boolean safetyActive = origin != null && origin.safety();
-        boolean changed = safetyActive
+        boolean safetyOwned = hasSafetyOwnership(bot);
+        boolean changed = safetyOwned
                 ? acquirePauseLock(uuid, PauseOwner.USER)
                 : pauseFor(bot, PauseOwner.USER, "user_pause:" + why);
-        if (!safetyActive) {
+        if (!safetyOwned) {
             bot.getActionPack().stopAll();
         }
         BotLog.task(bot, "mission_user_paused", "why", why, "stack_depth", pausedDepth(bot));
@@ -351,6 +634,8 @@ public final class TaskManager {
                 activeOrigins.remove(uuid);
                 executionStacks.remove(uuid);
                 pauseLocks.remove(uuid);
+                navigationSafetyLeases.remove(uuid);
+                missionInterruptions.remove(uuid);
                 continue;
             }
             AIPlayerEntity player = bot.get();
@@ -373,6 +658,11 @@ public final class TaskManager {
             long started = System.nanoTime();
             try {
                 task.tick(player);
+            } catch (RuntimeException tickFailure) {
+                terminalizeTickFailure(player, task, tickFailure);
+                BotLog.error(player, "task_tick_failed", tickFailure,
+                        "name", task.name(),
+                        "origin", origin == null ? "unknown" : origin.kind());
             } finally {
                 BotProfiler.INSTANCE.record(player, "task_tick", System.nanoTime() - started);
             }
@@ -385,7 +675,9 @@ public final class TaskManager {
                 lastFailure.remove(uuid);
                 pendingFailure.remove(uuid);
                 BotLog.task(player, "task_completed", "name", task.name(), "elapsed_ticks", task.elapsedTicks());
-                if (origin != null && origin.kind() == TaskOrigin.Kind.SYSTEM_BACKGROUND) {
+                if (origin != null && origin.safety()) {
+                    resumeNestedSafetyPause(player);
+                } else if (resumesSystemPause(origin)) {
                     resumeSystemPause(player);
                 }
             } else if (task.state() == TaskState.FAILED) {
@@ -394,7 +686,9 @@ public final class TaskManager {
                 recordFailure(player, task.name(), task.failureReason(), server.getTickCount());
                 BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.TASK, player, "task_failed",
                         "name", task.name(), "reason", task.failureReason(), "elapsed_ticks", task.elapsedTicks());
-                if (origin != null && origin.kind() == TaskOrigin.Kind.SYSTEM_BACKGROUND) {
+                if (origin != null && origin.safety()) {
+                    resumeNestedSafetyPause(player);
+                } else if (resumesSystemPause(origin)) {
                     resumeSystemPause(player);
                 }
             } else if (task.state() == TaskState.CANCELLED) {
@@ -403,7 +697,9 @@ public final class TaskManager {
                 lastFailure.remove(uuid);
                 pendingFailure.remove(uuid);
                 BotLog.task(player, "task_cancelled", "name", task.name(), "reason", task.failureReason());
-                if (origin != null && origin.kind() == TaskOrigin.Kind.SYSTEM_BACKGROUND) {
+                if (origin != null && origin.safety()) {
+                    resumeNestedSafetyPause(player);
+                } else if (resumesSystemPause(origin)) {
                     resumeSystemPause(player);
                 }
             }
@@ -440,6 +736,8 @@ public final class TaskManager {
         lastStatus.clear();
         lastFailure.clear();
         pendingFailure.clear();
+        navigationSafetyLeases.clear();
+        missionInterruptions.clear();
         BotLog.task(null, "tasks_cleared");
     }
 
@@ -451,6 +749,8 @@ public final class TaskManager {
         lastStatus.remove(bot.getUUID());
         lastFailure.remove(bot.getUUID());
         pendingFailure.remove(bot.getUUID());
+        navigationSafetyLeases.remove(bot.getUUID());
+        missionInterruptions.remove(bot.getUUID());
         BotReporter.INSTANCE.onCleared(bot);
     }
 
@@ -462,6 +762,8 @@ public final class TaskManager {
         lastStatus.clear();
         lastFailure.clear();
         pendingFailure.clear();
+        navigationSafetyLeases.clear();
+        missionInterruptions.clear();
     }
 
     public int activeCount() {
@@ -470,6 +772,84 @@ public final class TaskManager {
 
     private static boolean isCritical(Task task) {
         return task instanceof EvadeTask || task instanceof CombatTask || task instanceof EatTask || task instanceof ResupplyTask;
+    }
+
+    private static boolean resumesSystemPause(TaskOrigin origin) {
+        return origin != null && (origin.kind() == TaskOrigin.Kind.REFLEX
+                || origin.kind() == TaskOrigin.Kind.VERIFY
+                || origin.kind() == TaskOrigin.Kind.SYSTEM_BACKGROUND);
+    }
+
+    private static void restoreRunningAfterFailedPause(AIPlayerEntity bot,
+                                                       Task task,
+                                                       RuntimeException failure) {
+        if (task.state() != TaskState.PAUSED) {
+            return;
+        }
+        try {
+            task.resume(bot);
+        } catch (RuntimeException rollbackFailure) {
+            failure.addSuppressed(rollbackFailure);
+            if (task instanceof AbstractTask abstractTask
+                    && task.state() == TaskState.PAUSED) {
+                abstractTask.state = TaskState.RUNNING;
+            }
+        }
+    }
+
+    private static void restorePausedAfterFailedResume(AIPlayerEntity bot,
+                                                       Task task,
+                                                       RuntimeException failure) {
+        if (task.state() != TaskState.RUNNING) {
+            return;
+        }
+        try {
+            task.pause(bot);
+        } catch (RuntimeException rollbackFailure) {
+            failure.addSuppressed(rollbackFailure);
+            if (task instanceof AbstractTask abstractTask
+                    && task.state() == TaskState.RUNNING) {
+                abstractTask.state = TaskState.PAUSED;
+            }
+            try {
+                bot.getActionPack().stopAll();
+            } catch (RuntimeException cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+        }
+    }
+
+    private static void terminalizeTickFailure(AIPlayerEntity bot,
+                                               Task task,
+                                               RuntimeException failure) {
+        if (task.state() == TaskState.COMPLETED
+                || task.state() == TaskState.FAILED
+                || task.state() == TaskState.CANCELLED) {
+            return;
+        }
+        String message = failure.getMessage() == null || failure.getMessage().isBlank()
+                ? failure.getClass().getSimpleName()
+                : failure.getMessage();
+        String reason = "tick_failed:" + message;
+        if (task instanceof AbstractTask abstractTask) {
+            abstractTask.fail(reason);
+            try {
+                bot.getActionPack().stopAll();
+            } catch (RuntimeException cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            return;
+        }
+        try {
+            task.abort(bot);
+        } catch (RuntimeException cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+        }
+    }
+
+    private boolean resumeNestedSafetyPause(AIPlayerEntity bot) {
+        return resumeTop(bot, frame -> frame.pauseOwner() == PauseOwner.SAFETY
+                && frame.origin().safety());
     }
 
     private boolean acquirePauseLock(UUID uuid, PauseOwner owner) {

@@ -17,7 +17,8 @@
       "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerNavigationSafetyGameTests",
       "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerConflictGameTests",
       "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerSharedP0P1GameTests",
-      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerSharedP2GameTests"
+      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerSharedP2GameTests",
+      "io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerSharedP3GameTests"
     ]
   },
   "depends": {

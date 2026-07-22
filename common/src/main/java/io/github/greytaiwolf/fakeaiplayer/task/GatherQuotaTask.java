@@ -27,6 +27,15 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 
 public final class GatherQuotaTask extends AbstractTask {
+    /**
+     * Separates "which items count" from "how the quota is measured". GoalPlanner emits missing
+     * amounts, while direct player/LLM gather commands retain their historical absolute quota.
+     */
+    public enum QuotaMode {
+        ABSOLUTE_AT_LEAST,
+        DELTA_FROM_BASELINE
+    }
+
     private static final int SEARCH_RADIUS = 16;
     // F1:近处(16格)找不到资源时自动扩大半径走远找(32→48),而不是立刻失败交还大脑乱试。
     private static final int MAX_SEARCH_RADIUS = 48;
@@ -75,6 +84,7 @@ public final class GatherQuotaTask extends AbstractTask {
     private final Item targetItem;
     private final int targetCount;
     private final boolean exactItem;
+    private final QuotaMode quotaMode;
     // Fix C:目标是原木时,接受/采集**任意**树种(生物群系不一定有橡木)。进度按整族原木总数计。
     private final Set<Item> acceptItems;
     private final Set<Block> harvestBlocks;
@@ -124,7 +134,7 @@ public final class GatherQuotaTask extends AbstractTask {
     private final Map<BlockPos, Integer> deferredTreeLogExpiries = new HashMap<>();
 
     public GatherQuotaTask(Item targetItem, int targetCount) {
-        this(targetItem, targetCount, false);
+        this(targetItem, targetCount, false, QuotaMode.ABSOLUTE_AT_LEAST);
     }
 
     /**
@@ -132,9 +142,18 @@ public final class GatherQuotaTask extends AbstractTask {
      *                  widen a requested log to the all-log family
      */
     public GatherQuotaTask(Item targetItem, int targetCount, boolean exactItem) {
+        this(targetItem, targetCount, exactItem,
+                exactItem ? QuotaMode.DELTA_FROM_BASELINE : QuotaMode.ABSOLUTE_AT_LEAST);
+    }
+
+    public GatherQuotaTask(Item targetItem,
+                           int targetCount,
+                           boolean exactItem,
+                           QuotaMode quotaMode) {
         this.targetItem = targetItem;
         this.targetCount = Math.max(1, targetCount);
         this.exactItem = exactItem;
+        this.quotaMode = quotaMode == null ? QuotaMode.ABSOLUTE_AT_LEAST : quotaMode;
         this.acceptItems = acceptItemsFor(targetItem, exactItem);
         this.harvestBlocks = harvestBlocksFor(this.acceptItems);
         this.probabilisticDrop = harvestBlocks.contains(Blocks.SHORT_GRASS)
@@ -171,7 +190,7 @@ public final class GatherQuotaTask extends AbstractTask {
         // the planner as a missing amount, so it tracks a delta from this task's immutable start
         // baseline; otherwise a bot holding 2/5 required logs would gather only one of the three
         // missing logs and stop at an absolute count of 3.
-        acceptedBaseline = exactItem ? countAccepted(bot) : 0;
+        acceptedBaseline = quotaMode == QuotaMode.DELTA_FROM_BASELINE ? countAccepted(bot) : 0;
         countSoFar = progressCount(bot);
         phase = countSoFar >= targetCount ? Phase.DONE : Phase.SURVEY;
         stockpileTask = null;
@@ -457,7 +476,8 @@ public final class GatherQuotaTask extends AbstractTask {
         // 记忆导向:语义知识库(跨会话)里最近的同类资源点 → 直奔(哪怕中途轻扫先截胡也赚)。
         for (Block block : harvestBlocks) {
             var known = io.github.greytaiwolf.fakeaiplayer.memory.KnowledgeBase.INSTANCE.nearestResource(
-                    bot.getUUID(), BuiltInRegistries.BLOCK.getKey(block).toString(), feet, KNOWN_RESOURCE_RANGE);
+                    bot.getUUID(), world.dimension().location().toString(),
+                    BuiltInRegistries.BLOCK.getKey(block).toString(), feet, KNOWN_RESOURCE_RANGE);
             if (known.isPresent()) {
                 exploreHint = known.get().pos();
                 exploreHeading = Math.atan2(exploreHint.getZ() + 0.5D - bot.getZ(), exploreHint.getX() + 0.5D - bot.getX());
@@ -590,7 +610,8 @@ public final class GatherQuotaTask extends AbstractTask {
         // 防下次 startExplore 又朝同一条旧情报奔;之后回 SURVEY(没货由 fail 链继续外探)。
         if (exploreTarget == null || bot.blockPosition().distSqr(exploreTarget) <= 9.0D) {
             if (exploreHint != null && bot.blockPosition().distSqr(exploreHint) <= 256.0D) {
-                io.github.greytaiwolf.fakeaiplayer.memory.KnowledgeBase.INSTANCE.invalidateResource(bot.getUUID(), exploreHint);
+                io.github.greytaiwolf.fakeaiplayer.memory.KnowledgeBase.INSTANCE.invalidateResource(
+                        bot.getUUID(), bot.serverLevel().dimension().location().toString(), exploreHint);
                 exploreHint = null;
             }
             bot.getActionPack().stopAll();
@@ -1076,11 +1097,21 @@ public final class GatherQuotaTask extends AbstractTask {
     }
 
     private int progressCount(AIPlayerEntity bot) {
-        return progressFromAbsolute(exactItem, acceptedBaseline, countAccepted(bot));
+        return progressFromAbsolute(quotaMode, acceptedBaseline, countAccepted(bot));
     }
 
+    /** Backward-compatible test/helper overload for the historical exact-implies-delta contract. */
     static int progressFromAbsolute(boolean exactItem, int baseline, int absoluteCount) {
-        return exactItem ? Math.max(0, absoluteCount - baseline) : Math.max(0, absoluteCount);
+        return progressFromAbsolute(
+                exactItem ? QuotaMode.DELTA_FROM_BASELINE : QuotaMode.ABSOLUTE_AT_LEAST,
+                baseline,
+                absoluteCount);
+    }
+
+    static int progressFromAbsolute(QuotaMode quotaMode, int baseline, int absoluteCount) {
+        return quotaMode == QuotaMode.DELTA_FROM_BASELINE
+                ? Math.max(0, absoluteCount - baseline)
+                : Math.max(0, absoluteCount);
     }
 
     private boolean isHarvestBlock(AIPlayerEntity bot, BlockPos pos) {

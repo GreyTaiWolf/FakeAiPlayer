@@ -69,7 +69,11 @@ public final class DigDownTask extends AbstractTask {
         this.targetDrops = targetDropsFor(targetBlock, exactDrops);
     }
 
-    static Set<Item> targetDropsFor(Block targetBlock, boolean exactDrops) {
+    /**
+     * Returns the exact item family this task uses for baseline and completion accounting.
+     * Mission predicates must use this method too so planning and execution cannot disagree.
+     */
+    public static Set<Item> targetDropsFor(Block targetBlock, boolean exactDrops) {
         Set<Item> drops = new HashSet<>(HarvestCore.expectedDropsFor(Set.of(targetBlock)));
         if (targetBlock == Blocks.STONE && !exactDrops) {
             // 深层(Y<0)全是深板岩(挖了掉 cobbled_deepslate)、远古遗迹是黑石——都算"石料",

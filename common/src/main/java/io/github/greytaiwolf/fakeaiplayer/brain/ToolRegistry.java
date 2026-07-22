@@ -34,7 +34,9 @@ import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.manager.AIPlayerManager;
 import io.github.greytaiwolf.fakeaiplayer.memory.BotMemory;
 import io.github.greytaiwolf.fakeaiplayer.memory.BotMemoryStore;
+import io.github.greytaiwolf.fakeaiplayer.mission.GoalSpec;
 import io.github.greytaiwolf.fakeaiplayer.mining.OreScan;
+import io.github.greytaiwolf.fakeaiplayer.mining.ToolTier;
 import io.github.greytaiwolf.fakeaiplayer.mode.CapabilityRuntime;
 import io.github.greytaiwolf.fakeaiplayer.mode.ObservableWorldQuery;
 import io.github.greytaiwolf.fakeaiplayer.mode.PrivilegedCapability;
@@ -61,6 +63,7 @@ import io.github.greytaiwolf.fakeaiplayer.task.SleepTask;
 import io.github.greytaiwolf.fakeaiplayer.task.SmeltTask;
 import io.github.greytaiwolf.fakeaiplayer.task.StockpileTask;
 import io.github.greytaiwolf.fakeaiplayer.task.OreDigTask;
+import io.github.greytaiwolf.fakeaiplayer.task.ResumeMiningTask;
 import io.github.greytaiwolf.fakeaiplayer.task.StripMineTask;
 import io.github.greytaiwolf.fakeaiplayer.task.Task;
 import io.github.greytaiwolf.fakeaiplayer.task.TaskManager;
@@ -336,7 +339,7 @@ public final class ToolRegistry {
                 assignLlm(bot, task);
                 return ok("assigned: " + task.name());
             }
-            boolean started = GoalExecutor.INSTANCE.submit(bot,
+            boolean started = submitAiGoal(bot,
                     new Goal.MineOre(oreTargetsFrom(requiredString(args, "ore")), optionalInt(args, "count", 1)));
             return started ? ok("goal_assigned: mine_ore") : fail("goal_plan_failed");
         });
@@ -346,7 +349,7 @@ public final class ToolRegistry {
                 .property("count", integerSchema("desired inventory count"))
                 .required("item")
                 .build(), (bot, args) -> {
-            boolean started = GoalExecutor.INSTANCE.submit(bot,
+            boolean started = submitAiGoal(bot,
                     new Goal.HaveItem(requiredItem(args, "item"), optionalInt(args, "count", 1)));
             return started ? ok("goal_assigned: achieve_goal") : fail("goal_plan_failed");
         });
@@ -360,7 +363,7 @@ public final class ToolRegistry {
             net.minecraft.world.item.Item produce = spec.crop() == net.minecraft.world.level.block.Blocks.WHEAT
                     ? net.minecraft.world.item.Items.WHEAT
                     : spec.seed(); // 胡萝卜/土豆:产出即种子物品
-            boolean started = GoalExecutor.INSTANCE.submit(bot,
+            boolean started = submitAiGoal(bot,
                     new Goal.HarvestCrop(spec.crop(), spec.seed(), produce, optionalInt(args, "count", 1)));
             return started ? ok("goal_assigned: harvest_crop") : fail("goal_plan_failed");
         });
@@ -370,7 +373,7 @@ public final class ToolRegistry {
                 + "Auto-plans (hunt->cook meat OR farm->bread) based on surroundings; do NOT decompose manually. count = how many food items (default 4).", objectSchema()
                 .property("count", integerSchema("how many cooked food items to stock (default 4)"))
                 .build(), (bot, args) -> {
-            boolean started = GoalExecutor.INSTANCE.submit(bot,
+            boolean started = submitAiGoal(bot,
                     new Goal.Food(optionalInt(args, "count", 4)));
             return started ? ok("goal_assigned: provision_food") : fail("goal_plan_failed");
         });
@@ -380,20 +383,20 @@ public final class ToolRegistry {
                 + "For ANY general 找吃的/搞点吃的 request use provision_food instead (it auto-picks hunt or farm). count = how many (default 4).", objectSchema()
                 .property("count", integerSchema("how many wild food to gather (default 4)"))
                 .build(), (bot, args) -> {
-            boolean started = GoalExecutor.INSTANCE.submit(bot,
+            boolean started = submitAiGoal(bot,
                     new Goal.HaveItem(net.minecraft.world.item.Items.SWEET_BERRIES, optionalInt(args, "count", 4)));
             return started ? ok("goal_assigned: forage") : fail("goal_plan_failed");
         });
 
         register("achieve_armor", "Make and equip a full set of iron armor plus an iron sword with deterministic planning. Use for 武装起来/做一身装备/给我穿上盔甲/gear up. Auto-plans mining, smelting and crafting; do not decompose manually.", objectSchema()
                 .build(), (bot, args) -> {
-            boolean started = GoalExecutor.INSTANCE.submit(bot, new Goal.Armor());
+            boolean started = submitAiGoal(bot, new Goal.Armor());
             return started ? ok("goal_assigned: achieve_armor") : fail("goal_plan_failed");
         });
 
         register("achieve_workstation", "Set up a utility station cluster: craft and place a crafting table, furnace and chest nearby. Use for 搭个工作台/摆好工作台熔炉箱子/set up workstations. Do not use this for 建个家/盖房/build a home; every building request must use draft_building and human confirmation. Auto-plans gathering and crafting; do not decompose manually.", objectSchema()
                 .build(), (bot, args) -> {
-            boolean started = GoalExecutor.INSTANCE.submit(bot, new Goal.Workstation());
+            boolean started = submitAiGoal(bot, new Goal.Workstation());
             return started ? ok("goal_assigned: achieve_workstation") : fail("goal_plan_failed");
         });
 
@@ -532,7 +535,7 @@ public final class ToolRegistry {
                 .property("count", integerSchema("how many to obtain"))
                 .required("item")
                 .build(), (bot, args) -> {
-            boolean started = GoalExecutor.INSTANCE.submit(bot,
+            boolean started = submitAiGoal(bot,
                     new Goal.Stockpile(requiredItem(args, "item"), optionalInt(args, "count", 1)));
             return started ? ok("goal_assigned: stockpile") : fail("goal_plan_failed");
         });
@@ -859,19 +862,33 @@ public final class ToolRegistry {
             java.util.Set<net.minecraft.world.level.block.Block> ores = new java.util.HashSet<>();
             mem.recall("mine_face_ores").ifPresent(csv -> {
                 for (String id : csv.split(",")) {
-                    var block = net.minecraft.core.registries.BuiltInRegistries.BLOCK
-                            .getValue(net.minecraft.resources.ResourceLocation.parse(id.trim()));
-                    if (block != net.minecraft.world.level.block.Blocks.AIR) {
-                        ores.add(block);
+                    try {
+                        var block = net.minecraft.core.registries.BuiltInRegistries.BLOCK
+                                .getValue(net.minecraft.resources.ResourceLocation.parse(id.trim()));
+                        if (block != null && block != net.minecraft.world.level.block.Blocks.AIR
+                                && OreScan.isOreBlock(block)) {
+                            ores.add(block);
+                        }
+                    } catch (IllegalArgumentException ignored) {
+                        // Ignore stale/corrupt memory entries; the empty-set check below fails
+                        // honestly instead of silently changing the remembered ore family.
                     }
                 }
             });
-            // 队列接力:先走回作业面,再原矿种续挖(goal 队列自动衔接,中途打断也能再续)。
-            Task back = new MoveTask(bot, face.get().pos());
-            assignLlm(bot, back);
-            GoalExecutor.INSTANCE.submit(bot, new Goal.MineOre(
-                    ores.isEmpty() ? java.util.Set.of(net.minecraft.world.level.block.Blocks.IRON_ORE) : ores,
-                    optionalInt(args, "count", 8)));
+            if (ores.isEmpty()) {
+                return fail("no_valid_mine_face_ores: 上次矿种记录缺失或已失效");
+            }
+            int count = optionalInt(args, "count", 8);
+            if (count < 1 || count > 64) {
+                return fail("resume_mining_count_out_of_range: expected 1..64");
+            }
+            if (!ToolTier.hasRequiredPickaxe(bot, ores)) {
+                return fail("need_better_tool:" + ToolTier.requiredPickaxeItemId(ores));
+            }
+            // One composite Task owns both phases. OreDigTask takes its inventory baseline only
+            // after returning, so "continue 8" always means eight additional drops.
+            Task resume = new ResumeMiningTask(face.get().pos(), face.get().dimension(), ores, count);
+            assignResumableLlm(bot, resume);
             return ok("resuming at " + face.get().pos().toShortString());
         });
 
@@ -882,7 +899,7 @@ public final class ToolRegistry {
                 .build(), (bot, args) -> {
             var ores = oreTargetsFrom(requiredString(args, "ore"));
             int count = optionalInt(args, "count", 1);
-            boolean started = GoalExecutor.INSTANCE.submit(bot, new Goal.MineOre(ores, count));
+            boolean started = submitAiGoal(bot, new Goal.MineOre(ores, count));
             if (!started) {
                 return fail("goal_plan_failed");
             }
@@ -890,7 +907,7 @@ public final class ToolRegistry {
             Item yield = io.github.greytaiwolf.fakeaiplayer.action.HarvestCore.expectedDropsFor(ores)
                     .stream().findFirst().orElse(null);
             if (yield != null) {
-                GoalExecutor.INSTANCE.submit(bot, new Goal.Stockpile(yield, count));
+                submitAiGoal(bot, new Goal.Stockpile(yield, count));
             }
             return ok("goal_assigned: mine_ore + stockpile queued");
         });
@@ -903,6 +920,10 @@ public final class ToolRegistry {
                 return fail("no_recent_death");
             }
             var death = deaths.get(0);
+            String currentDimension = bot.serverLevel().dimension().location().toString();
+            if (!currentDimension.equals(death.dimension())) {
+                return fail("death_in_other_dimension:" + death.dimension());
+            }
             Task task = new io.github.greytaiwolf.fakeaiplayer.task.RecoverDropsTask(death.pos(), death.gameTick());
             assignLlm(bot, task);
             return ok("assigned: recover_drops -> " + death.pos().toShortString());
@@ -943,7 +964,7 @@ public final class ToolRegistry {
                     assignLlm(bot, task);
                     return ok("assigned: " + task.name());
                 }
-                boolean started = GoalExecutor.INSTANCE.submit(bot,
+                boolean started = submitAiGoal(bot,
                         new Goal.MineOre(oreTargetsFrom(requiredString(params, "ore")), optionalInt(params, "count", 1)));
                 return started ? ok("goal_assigned: mine_ore") : fail("goal_plan_failed");
             }
@@ -956,7 +977,7 @@ public final class ToolRegistry {
                         assignLlm(bot, task);
                         return ok("assigned: " + task.name());
                     }
-                    boolean started = GoalExecutor.INSTANCE.submit(bot, new Goal.MineOre(OreScan.oreFamily(block), count));
+                    boolean started = submitAiGoal(bot, new Goal.MineOre(OreScan.oreFamily(block), count));
                     return started ? ok("goal_assigned: mine_ore") : fail("goal_plan_failed");
                 }
             }
@@ -1208,7 +1229,25 @@ public final class ToolRegistry {
     }
 
     private static void assignLlm(AIPlayerEntity bot, Task task) {
-        TaskManager.INSTANCE.assign(bot, task, TaskOrigin.of(TaskOrigin.Kind.LLM_TOOL, "llm_tool"));
+        assignLlm(bot, task, TaskOrigin.Kind.LLM_TOOL);
+    }
+
+    private static void assignResumableLlm(AIPlayerEntity bot, Task task) {
+        assignLlm(bot, task, TaskOrigin.Kind.LLM_SKILL);
+    }
+
+    private static void assignLlm(AIPlayerEntity bot, Task task, TaskOrigin.Kind kind) {
+        io.github.greytaiwolf.fakeaiplayer.task.TaskAssignmentResult assignment =
+                TaskManager.INSTANCE.assign(
+                        bot, task, TaskOrigin.of(kind, "llm_tool:" + task.name()));
+        if (!assignment.started()) {
+            throw new IllegalArgumentException(
+                    "work_deferred:" + assignment.reason() + "; use a high-level Goal or wait for active work");
+        }
+    }
+
+    private static boolean submitAiGoal(AIPlayerEntity bot, Goal goal) {
+        return GoalExecutor.INSTANCE.submit(bot, goal, GoalSpec.Source.AI_PROPOSAL);
     }
 
     private static ServerPlayer onlineOwner(AIPlayerEntity bot) {
