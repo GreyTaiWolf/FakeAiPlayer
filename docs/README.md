@@ -20,7 +20,7 @@
 - 每 Bot API Key 通过 `/fakeaiplayer ai setup <name>` 的遮罩客户端 UI 提交；验证成功后才明文写入当前玩家的 `config/fakeaiplayer-client.json`（POSIX 尽量 `0600`）。服务端只在会话内存持有玩家 Key，新 Key 的失败验证不会替换旧 Key。该文件不加密，客户端本机和服务器管理边界必须信任。
 - Bot 普通回复和连接成功后的可选问候会以 `[AI] <Bot>` 进入 owner-only 主聊天；不向附近玩家/全服广播。主动问候不开放工具，不能自行启动任务；新任务需 owner/已授权 OP 明确输入，既有生存危险接管例外保留。
 - CI 静态门禁会从共享源码推导全部 C2S/S2C payload，检查 Fabric/NeoForge 双端注册，并专项验证凭据 nonce、pending/commit/reject、secret 脱敏、客户端明文文件权限、owner-only 聊天、建筑预览、Bot Menu、断线清理和生产 JAR 内容，防止后续更新只接入单一加载器。NeoForge 协议版本为 `4`。
-- 建筑基线曾在本地用 Temurin Java 21.0.11 完成 Java 21 源码语法解析、纯生成器编译/12,800 组方案烟雾和静态门禁；历史同步提交 `dfb0ab8` 的 GitHub Actions 全矩阵通过当时的 10 项 Fabric GameTest。当前源码清单为 74 个 JUnit 类、274 个 `@Test`、35 项 Fabric GameTest 和 11 项 NeoForge GameTest；本轮新增 P0/P1 代码尚未取得 Java 21 双加载器运行结果，最新通过结论必须以本次提交的新 CI run 为准。
+- 建筑基线曾在本地用 Temurin Java 21.0.11 完成 Java 21 源码语法解析、纯生成器编译/12,800 组方案烟雾和静态门禁；历史同步提交 `dfb0ab8` 的 GitHub Actions 全矩阵通过当时的 10 项 Fabric GameTest。当前源码清单为 79 个 JUnit 类、312 个 `@Test`、49 项 Fabric GameTest 和 25 项 NeoForge GameTest。P0/P1 已在提交 [`9155c9c`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/9155c9ca18cb1c8021bf50d453bbafe84f2c1489) 的 [CI #106](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29862817627) 中通过；P2 已在代码提交 [`2450e13`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/2450e1352f27e3768e0f2d0ceeed98c7d7a71c4a) 的 [CI #129](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29879516182) 中通过 Java 21、当前完整 JUnit、Fabric 49/49、NeoForge 25/25、双端生产构建与产物检查、两进程持久化和 strict-survival runtime/evidence；P2 新增 14 个两端同源场景。上述结果尚未被显式 pin 为发布 baseline。
 
 建筑能力当前应读作以下链路，而不是“AI 可以任意造房子”：
 
