@@ -554,6 +554,10 @@ public final class GoalExecutor {
     }
 
     private static Map<String, String> checkpoint(ActivePlan active) {
+        // Persist only replay-safe evidence. The planner rebuilds executable Skills from the
+        // authoritative world after a restart, so lifecycle state, plan revision and invocation
+        // ids are diagnostics rather than durable cursor data. Writing values that restoreRuntime
+        // cannot reconstruct would make an "exact restore" claim false.
         Map<String, String> checkpoint = new java.util.LinkedHashMap<>();
         checkpoint.put("origin", encodePos(active.origin));
         checkpoint.put("started_tick", String.valueOf(active.startedTick));
@@ -568,12 +572,6 @@ public final class GoalExecutor {
                     .collect(java.util.stream.Collectors.joining(";")));
         }
         checkpoint.put("revision", String.valueOf(active.completedSteps));
-        checkpoint.put("plan_revision", String.valueOf(active.missionPlan.revision()));
-        checkpoint.put("mission_state", active.state.name());
-        if (active.currentSkillSpec != null) {
-            checkpoint.put("current_skill", active.currentSkillSpec.invocationId());
-            checkpoint.put("current_capability", active.currentSkillSpec.id());
-        }
         return Map.copyOf(checkpoint);
     }
 
