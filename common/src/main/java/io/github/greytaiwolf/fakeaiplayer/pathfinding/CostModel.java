@@ -39,19 +39,40 @@ public final class CostModel {
 
     public static double heuristic(BlockPos from, BlockPos to) {
         int dx = Math.abs(from.getX() - to.getX());
-        int dy = Math.abs(from.getY() - to.getY());
         int dz = Math.abs(from.getZ() - to.getZ());
         int diagonal = Math.min(dx, dz);
         int straight = Math.max(dx, dz) - diagonal;
-        return straight + 1.41D * diagonal + 1.5D * dy;
+        // Jump and drop edges change one horizontal coordinate and Y in the same move. Adding
+        // horizontal and vertical lower bounds would charge that edge twice (for example a
+        // one-block jump costs 1.5, not 1.0 + 1.5). The maximum keeps both bounds admissible.
+        double horizontal = 0.8D * straight + 1.41D * diagonal;
+        double vertical = minimumVerticalCost(
+                from.getY(), to.getY(), Math.abs(from.getY() - to.getY()));
+        return Math.max(horizontal, vertical);
+    }
+
+    /**
+     * Conservative lower bound for an arbitrary horizontal gap. A one-block downward transition
+     * is the cheapest edge that can also make horizontal progress and costs {@code 0.8}.
+     */
+    public static double minimumHorizontalCost(double horizontalGap) {
+        return 0.8D * Math.max(0.0D, horizontalGap);
+    }
+
+    /**
+     * Conservative lower bound for vertical displacement. Descending can combine horizontal
+     * travel with a drop whose marginal cost is only {@code 0.3}; using jump cost in both
+     * directions overestimated paths and invalidated A* optimality claims.
+     */
+    public static double minimumVerticalCost(int fromY, int toY, double verticalGap) {
+        if (verticalGap <= 0.0D) {
+            return 0.0D;
+        }
+        return toY >= fromY ? 1.5D * verticalGap : 0.3D * verticalGap;
     }
 
     private static double turnPenalty(Node current, BlockPos next) {
-        Node parent = current.parent();
-        if (parent == null) {
-            return 0.0D;
-        }
-        Direction previous = horizontalDirection(parent.pos(), current.pos());
+        Direction previous = current.heading();
         Direction incoming = horizontalDirection(current.pos(), next);
         if (previous == null || incoming == null || previous == incoming) {
             return 0.0D;
@@ -59,7 +80,7 @@ public final class CostModel {
         return previous.getOpposite() == incoming ? 0.4D : 0.15D;
     }
 
-    private static Direction horizontalDirection(BlockPos from, BlockPos to) {
+    static Direction horizontalDirection(BlockPos from, BlockPos to) {
         int dx = Integer.compare(to.getX() - from.getX(), 0);
         int dz = Integer.compare(to.getZ() - from.getZ(), 0);
         if (dx != 0 && dz == 0) {

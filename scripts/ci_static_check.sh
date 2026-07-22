@@ -43,15 +43,21 @@ required_files=(
   neoforge/src/main/java/io/github/greytaiwolf/fakeaiplayer/platform/neoforge/client/NeoForgeBuildingPreviewRenderer.java
   common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedGameTestFixture.java
   common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedP0P1GameTestScenarios.java
+  common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedP2NavigationGameTestScenarios.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NavGoal.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NavigationHandle.java
+  common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/MultiGoalAStarPathfinder.java
   common/src/main/java/io/github/greytaiwolf/fakeaiplayer/mixin/BlockItemPlacementMixin.java
   common/src/main/java/io/github/greytaiwolf/fakeaiplayer/task/tree/PlayerPlacedLogLedger.java
   fabric/src/gametest/resources/fabric.mod.json
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerDeterministicGameTests.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP0P1GameTests.java
+  fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP2GameTests.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerHarnessTestMod.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotTestSubcommand.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotVerifySubcommand.java
   neoforge/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP0P1GameTests.java
+  neoforge/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP2GameTests.java
   scripts/evidence_run.sh
   scripts/evidence_batch.sh
   scripts/evidence_validate.sh
@@ -82,6 +88,8 @@ grep -Fq 'must be a project-relative child directory' fabric/build.gradle \
   || fail 'harness run directory traversal guard is missing'
 grep -Fq '"fabric-gametest"' fabric/src/gametest/resources/fabric.mod.json \
   || fail 'GameTest entrypoint is not registered'
+grep -Fq 'FakeAiPlayerSharedP2GameTests' fabric/src/gametest/resources/fabric.mod.json \
+  || fail 'P2 shared GameTest entrypoint is not registered'
 
 for mixin_config in fabric/src/main/resources/fakeaiplayer.mixins.json \
     neoforge/src/main/resources/fakeaiplayer.mixins.json; do
@@ -195,6 +203,96 @@ for shared_wrapper in "$fabric_shared_tests" "$neoforge_shared_tests"; do
     fail "$shared_wrapper enables retries without isolating the monotonic provenance ledger"
   fi
 done
+
+p2_scenarios=common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedP2NavigationGameTestScenarios.java
+fabric_p2_tests=fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP2GameTests.java
+neoforge_p2_tests=neoforge/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP2GameTests.java
+grep -Fq '@GameTestHolder(FakeAiPlayer.MOD_ID)' "$neoforge_p2_tests" \
+  || fail 'NeoForge P2 scenarios are missing @GameTestHolder'
+grep -Fq '@PrefixGameTestTemplate(false)' "$neoforge_p2_tests" \
+  || fail 'NeoForge P2 template id would be rewritten by the holder prefix'
+fabric_p2_contracts="$(grep -oE 'batch = "[^"]+", timeoutTicks = [0-9]+' \
+    "$fabric_p2_tests" | sort)"
+neoforge_p2_contracts="$(grep -oE 'batch = "[^"]+", timeoutTicks = [0-9]+' \
+    "$neoforge_p2_tests" | sort)"
+[[ -n "$fabric_p2_contracts" && "$fabric_p2_contracts" == "$neoforge_p2_contracts" ]] \
+  || fail 'Fabric and NeoForge P2 GameTest ids/timeouts differ'
+fabric_p2_scenarios="$(grep -oE 'SharedP2NavigationGameTestScenarios\.[A-Za-z0-9_]+' \
+    "$fabric_p2_tests" | sort)"
+neoforge_p2_scenarios="$(grep -oE 'SharedP2NavigationGameTestScenarios\.[A-Za-z0-9_]+' \
+    "$neoforge_p2_tests" | sort)"
+[[ "$fabric_p2_scenarios" == "$neoforge_p2_scenarios" ]] \
+  || fail 'Fabric and NeoForge P2 wrappers do not delegate to the same scenarios'
+shared_p2_scenarios="$(grep -oE 'public static void [A-Za-z0-9_]+' \
+    "$p2_scenarios" | awk '{print $4}' | sort)"
+fabric_p2_delegates="$(printf '%s\n' "$fabric_p2_scenarios" \
+    | sed 's/^SharedP2NavigationGameTestScenarios\.//' | sort)"
+neoforge_p2_delegates="$(printf '%s\n' "$neoforge_p2_scenarios" \
+    | sed 's/^SharedP2NavigationGameTestScenarios\.//' | sort)"
+[[ "$shared_p2_scenarios" == "$fabric_p2_delegates"
+    && "$shared_p2_scenarios" == "$neoforge_p2_delegates" ]] \
+  || fail 'A shared P2 scenario is missing or duplicated in a loader wrapper'
+grep -Fq 'implements FabricGameTest' "$fabric_p2_tests" \
+  || fail 'Fabric P2 wrapper is not registered through FabricGameTest'
+for shared_wrapper in "$fabric_p2_tests" "$neoforge_p2_tests"; do
+  duplicate_batch="$(grep -oE 'batch = "[^"]+"' "$shared_wrapper" \
+      | sort | uniq -d | head -1)"
+  [[ -z "$duplicate_batch" ]] \
+    || fail "$shared_wrapper contains duplicate P2 batch id $duplicate_batch"
+done
+for shared_wrapper in "$fabric_p2_tests" "$neoforge_p2_tests"; do
+  if grep -Eq 'attempts[[:space:]]*=|requiredSuccesses[[:space:]]*=' "$shared_wrapper"; then
+    fail "$shared_wrapper enables retries without isolated P2 fixtures"
+  fi
+done
+grep -Fq 'frontiersStarted() == 1' "$p2_scenarios" \
+  || fail 'P2 single-search scenario does not assert a request-owned frontier count'
+grep -Fq 'record Exact' common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NavGoal.java \
+  || fail 'P2 NavGoal.Exact contract is missing'
+grep -Fq 'record FollowRing' common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NavGoal.java \
+  || fail 'P2 NavGoal.FollowRing contract is missing'
+grep -Fq 'Map<SearchState, Double> gScore' \
+    common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/MultiGoalAStarPathfinder.java \
+  || fail 'P2 multi-goal A* does not retain heading-aware search state'
+for pathfinder in \
+    common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/AStarPathfinder.java \
+    common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/MultiGoalAStarPathfinder.java; do
+  grep -Fq 'boolean virtuallyClearedColumn' "$pathfinder" \
+    || fail "$pathfinder merges live and virtually cleared DIG columns"
+  grep -Fq 'node.moveType() == MoveType.DIG_THROUGH' "$pathfinder" \
+    || fail "$pathfinder does not derive virtual-column state from the incoming DIG move"
+done
+neighbor_enumerator=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NeighborEnumerator.java
+if ! grep -A1 -F 'if (!currentColumnWillBeCleared) {' "$neighbor_enumerator" \
+    | grep -Fq 'addPillar(current, world, result);'; then
+  fail 'virtual DIG clearance can leak through a PILLAR transition'
+fi
+path_executor=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/PathExecutor.java
+grep -Fq 'candidateIndex == index && !committedEditCompletion' "$path_executor" \
+  || fail 'the first pending route edge does not fail closed when its live source column is blocked'
+grep -Fq 'candidate.pos().equals(previous.pos().below())' "$path_executor" \
+  || fail 'the committed DIG exception is not limited to the expected downward support removal'
+grep -Fq 'candidate.moveType() == MoveType.PILLAR_UP && pillarPlaced' "$path_executor" \
+  || fail 'pillar completion is not tied to an executor-observed successful placement'
+grep -Fq 'currentEditCommitted && !candidateStandable' "$path_executor" \
+  || fail 'a committed DIG/PILLAR edit can continue after its target postcondition is lost'
+grep -Fq 'boolean committedEditCompletion = currentEditCommitted && candidateStandable' \
+    "$path_executor" \
+  || fail 'a committed edit completion exception can leak into future lookahead edges'
+first_edge_revalidation="$(sed -n \
+    '/List<NeighborCandidate> transitions = candidateIndex == index/,/boolean transitionValid/p' \
+    "$path_executor")"
+grep -Fq '? validator.getNeighbors(previous.pos(), world)' <<< "$first_edge_revalidation" \
+  || fail 'the first pending route edge does not revalidate its predecessor against live world state'
+grep -Fq ': validator.getNeighbors(previous, world);' <<< "$first_edge_revalidation" \
+  || fail 'future route edges do not preserve pending DIG virtual-column semantics'
+world_edit_fallback="$(sed -n \
+    '/if (!transitionValid/,/if (!transitionValid) {/p' "$path_executor")"
+grep -Fq 'transitionValid = transitions.stream()' <<< "$world_edit_fallback" \
+  || fail 'a completed world-edit step does not require a live replacement transition'
+if grep -Fq 'Standability.isStandable' <<< "$world_edit_fallback"; then
+  fail 'a completed world-edit step can bypass live transition validation with standability alone'
+fi
 
 [[ ! -e common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotTestSubcommand.java ]] \
   || fail 'test command leaked into production source set'

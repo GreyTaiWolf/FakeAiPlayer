@@ -19,6 +19,8 @@ import java.util.Set;
 import java.util.function.Predicate;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.util.Mth;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Blocks;
@@ -29,10 +31,18 @@ public final class PathExecutor {
     private static final int REPLAN_COOLDOWN_TICKS = 40;
     private static final int ROUTE_REVALIDATE_LOOKAHEAD = 3;
     private static final int MAX_TRANSIENT_EXCLUSIONS = 8;
+    // Must match MoveTask's 1.5-block completion radius; a wider executor success previously made
+    // MoveTask treat a successful walk as unfinished and incorrectly enter destructive dig fallback.
+    private static final double NEAR_ARRIVAL_DISTANCE_SQ = 2.25D;
 
     private List<Node> path;
     private int index = 1;
-    private final BlockPos originalGoal;
+    private BlockPos resolvedGoal;
+    private NavGoal replanGoal;
+    private final NavigationRequest navigationRequest;
+    private long plannedWorldVersion;
+    private String plannedGoalFingerprint;
+    private String plannedSemanticGoalFingerprint;
     private final boolean exactGoal;
     private final boolean allowPillarOnReplan;
     private final boolean allowDigOnReplan;
@@ -44,10 +54,12 @@ public final class PathExecutor {
     private WalkToController subWalker;
     private MiningController subMiner;
     private boolean digWalking;
+    private boolean pillarPlaced;
     private boolean replanTried;
     private final PathProgressTracker progressTracker = new PathProgressTracker();
     private int totalTicks;
     private int replanCount;
+    private int failureReplanCount;
     private int lastReplanTick = -REPLAN_COOLDOWN_TICKS;
     private int activeWalkTargetIndex = -1;
     private int nodeRetry;
@@ -56,6 +68,12 @@ public final class PathExecutor {
     private int noProgressEvents;
     private int oscillationEvents;
     private String lastReplanReason = "";
+    private FailureReason failureReason = FailureReason.NONE;
+    private double sunkPathCost;
+    private int unsafeAcceptedTicks;
+    private boolean failureEvidenceUnrestricted;
+    private boolean planningDeferred;
+    private ProvenRoute provenContinuation;
 
     public PathExecutor(List<Node> path, BlockPos originalGoal) {
         this(path, originalGoal, false, true, true, TraversalPolicy.TASK_MUTATING_DRY);
@@ -105,7 +123,12 @@ public final class PathExecutor {
                         Set<BlockPos> persistentExclusions,
                         Predicate<BlockPos> positionConstraint) {
         this.path = List.copyOf(path);
-        this.originalGoal = originalGoal.immutable();
+        this.resolvedGoal = originalGoal.immutable();
+        this.replanGoal = NavGoal.exact(originalGoal);
+        this.navigationRequest = null;
+        this.plannedWorldVersion = AStarPathfinder.worldVersion();
+        this.plannedGoalFingerprint = replanGoal.identityKey();
+        this.plannedSemanticGoalFingerprint = replanGoal.identityKey();
         this.exactGoal = exactGoal;
         this.allowPillarOnReplan = allowPillarOnReplan;
         this.allowDigOnReplan = allowDigOnReplan;
@@ -118,30 +141,120 @@ public final class PathExecutor {
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
         this.positionConstraint = positionConstraint == null
                 ? ignored -> true : positionConstraint;
+        this.failureEvidenceUnrestricted = false;
+    }
+
+    /** Formal P2 constructor retaining the semantic goal, permission snapshot, and world version. */
+    public PathExecutor(PathfindingResult plan,
+                        NavGoal plannedGoal,
+                        NavigationRequest request) {
+        if (plan == null || !plan.success() || plan.path().isEmpty()
+                || plan.resolvedGoal() == null || plannedGoal == null || request == null) {
+            throw new IllegalArgumentException("formal path executor requires a successful plan");
+        }
+        this.path = List.copyOf(plan.path());
+        this.resolvedGoal = plan.resolvedGoal().immutable();
+        this.replanGoal = plannedGoal;
+        this.navigationRequest = request;
+        this.plannedWorldVersion = plan.worldVersion();
+        this.plannedGoalFingerprint = plan.goalFingerprint();
+        this.plannedSemanticGoalFingerprint = plan.goalFingerprint();
+        this.exactGoal = true;
+        this.allowPillarOnReplan = request.allowPillar();
+        this.allowDigOnReplan = request.allowDig();
+        this.traversalPolicy = request.traversalPolicy();
+        this.bounds = request.bounds();
+        this.persistentExclusions = request.excludedPositions();
+        this.positionConstraint = request.positionConstraint();
+        this.failureEvidenceUnrestricted = request.unrestrictedEvidenceScope();
+    }
+
+    /** Formal constructor retaining the already-proven suffix for budget-free execution relays. */
+    public PathExecutor(NavigationPlanner.PlanningOutcome outcome,
+                        NavigationRequest request) {
+        this(outcome.result(), outcome.plannedGoal(), request);
+        this.provenContinuation = outcome.continuation();
+        this.failureEvidenceUnrestricted = outcome.unrestrictedEvidenceScope();
     }
 
     public ActionResult tick(ActionPack pack) {
         totalTicks++;
         advancedThisTick = false;
+        planningDeferred = false;
         BlockPos currentPosition = pack.player().blockPosition();
+        if (navigationRequest != null
+                && !navigationRequest.goal().resolvable(pack.player().serverLevel())) {
+            cleanup(pack);
+            failureReason = FailureReason.STALE_WORLD;
+            return ActionResult.failed("navigation_goal_stale");
+        }
         if (persistentExclusions.contains(currentPosition)
                 || !positionConstraint.test(currentPosition)) {
             cleanup(pack);
+            failureReason = FailureReason.STALE_WORLD;
             return ActionResult.failed("path_skill_constraint_violated");
         }
-        if (!bounds.contains(pack.player().blockPosition())) {
+        if (!bounds.contains(currentPosition)) {
             cleanup(pack);
+            failureReason = FailureReason.PATH_BLOCKED;
             return ActionResult.failed("path_bounds_exceeded");
+        }
+        // Movement/string-pulling can cross a discrete node between ActionPack ticks. Commit that
+        // fact before any semantic-goal change or route invalidation can trigger a fresh search, so
+        // sunk cost and the incoming heading describe the position the bot actually reached.
+        commitReachedPathProgress(currentPosition);
+        if (navigationRequest != null) {
+            boolean semanticallyAccepted = navigationRequest.goal().accepts(
+                    pack.player().serverLevel(), currentPosition);
+            if (NavigationPlanner.isSatisfiedAt(
+                    pack.player(), navigationRequest, currentPosition)) {
+                unsafeAcceptedTicks = 0;
+                cleanup(pack);
+                return ActionResult.SUCCESS;
+            }
+            if (semanticallyAccepted && !Standability.isStandableFresh(
+                    pack.player().serverLevel(), currentPosition, traversalPolicy)) {
+                // A jump can pass through an accepted follow/flee ring while airborne. Wait for
+                // the movement controller/physics to establish a legal feet cell; never publish
+                // ARRIVED from the unsupported intermediate block position.
+                boolean transientAirborne = !pack.player().onGround()
+                        && pack.player().serverLevel().getFluidState(currentPosition).isEmpty()
+                        && pack.player().serverLevel().getFluidState(
+                        currentPosition.above()).isEmpty();
+                if (transientAirborne && ++unsafeAcceptedTicks <= 20) {
+                    return ActionResult.IN_PROGRESS;
+                }
+                unsafeAcceptedTicks = 0;
+                return handleStuck(pack, "accepted_goal_not_standable", true);
+            }
+            unsafeAcceptedTicks = 0;
+            if (semanticallyAccepted && traversalPolicy.requiresOpenGoal()) {
+                return handleStuck(pack, "accepted_goal_not_open", true);
+            }
+            String currentFingerprint = navigationRequest.goal().fingerprint(
+                    pack.player().serverLevel());
+            if (!currentFingerprint.equals(plannedSemanticGoalFingerprint)) {
+                int now = pack.player().getServer().getTickCount();
+                boolean cadenceDue = !replanGoal.dynamic()
+                        || now - lastReplanTick >= 10;
+                if (cadenceDue) {
+                    return handleStuck(pack, "dynamic_goal_changed", true);
+                }
+                // A tracked entity can cross a block boundary every tick. Keep following the last
+                // validated route between the 10-tick replanning cadence instead of stopping the
+                // bot for nine ticks out of ten; the live goal is still rechecked before ARRIVED.
+            }
         }
         if (path.isEmpty() || index >= path.size()) {
             cleanup(pack);
-            double distSq = pack.player().blockPosition().distSqr(originalGoal);
+            double distSq = pack.player().blockPosition().distSqr(resolvedGoal);
             boolean arrived = exactGoal
-                    ? hasReachedNode(pack.player().blockPosition(), originalGoal)
-                    : distSq <= 4.0D;
+                    ? hasReachedNode(pack.player().blockPosition(), resolvedGoal)
+                    : distSq <= NEAR_ARRIVAL_DISTANCE_SQ;
             if (!arrived) {
                 BotLog.warn(LogCategory.PATH, pack.player(), "path_end_not_exact",
-                        "dist_sq", distSq, "goal", LogFields.pos(originalGoal));
+                        "dist_sq", distSq, "goal", LogFields.pos(resolvedGoal));
+                failureReason = FailureReason.PATH_BLOCKED;
                 return ActionResult.failed("ended_before_goal dist_sq=" + (int) distSq);
             }
             return ActionResult.SUCCESS;
@@ -157,7 +270,6 @@ public final class PathExecutor {
                     "policy", traversalPolicy.name());
             return handleStuck(pack, "route_invalidated:" + routeProblem.reason(), true);
         }
-
         ActionResult result = switch (next.moveType()) {
             case WALK, DIAGONAL, JUMP_UP, DROP_DOWN -> tickWalk(pack, next);
             case DIG_THROUGH -> tickDigThrough(pack, next);
@@ -195,6 +307,11 @@ public final class PathExecutor {
         return replanCount;
     }
 
+    /** Recovery replans only; expected dynamic-target refreshes do not consume this budget. */
+    public int failureReplanCount() {
+        return failureReplanCount;
+    }
+
     public int pathLength() {
         return path.size();
     }
@@ -204,7 +321,7 @@ public final class PathExecutor {
     }
 
     public BlockPos currentNode() {
-        return index >= 0 && index < path.size() ? path.get(index).pos() : originalGoal;
+        return index >= 0 && index < path.size() ? path.get(index).pos() : resolvedGoal;
     }
 
     public double bestNodeDistance() {
@@ -212,7 +329,9 @@ public final class PathExecutor {
     }
 
     public double pathCost() {
-        return path.isEmpty() ? 0.0D : Math.max(0.0D, path.get(path.size() - 1).gCost());
+        double currentPlan = path.isEmpty()
+                ? 0.0D : Math.max(0.0D, path.get(path.size() - 1).gCost());
+        return Math.max(0.0D, sunkPathCost + currentPlan);
     }
 
     public double remainingPathCost() {
@@ -221,6 +340,11 @@ public final class PathExecutor {
         }
         double completedCost = index <= 0 ? 0.0D : path.get(index - 1).gCost();
         return Math.max(0.0D, path.get(path.size() - 1).gCost() - completedCost);
+    }
+
+    /** Cost of route edges already consumed, including sunk edges before any successful replan. */
+    public double completedPathCost() {
+        return Math.max(0.0D, pathCost() - remainingPathCost());
     }
 
     public int noProgressEvents() {
@@ -237,6 +361,89 @@ public final class PathExecutor {
 
     public TraversalPolicy traversalPolicy() {
         return traversalPolicy;
+    }
+
+    public BlockPos resolvedGoal() {
+        return resolvedGoal;
+    }
+
+    public long worldVersion() {
+        return plannedWorldVersion;
+    }
+
+    public FailureReason failureReason() {
+        return failureReason;
+    }
+
+    /** Incoming heading of the last completed search state, retained across segment boundaries. */
+    public Direction currentHeading() {
+        if (path.isEmpty()) {
+            return null;
+        }
+        int completedIndex = Math.max(0, Math.min(path.size() - 1, index - 1));
+        return path.get(completedIndex).heading();
+    }
+
+    public boolean failureEvidenceUnrestricted() {
+        return failureEvidenceUnrestricted;
+    }
+
+    /** True only for the tick whose local replan was deferred by the shared search ledger. */
+    public boolean planningDeferred() {
+        return planningDeferred;
+    }
+
+    public boolean semanticGoalChanged(AIPlayerEntity bot) {
+        return navigationRequest != null && navigationRequest.goal().dynamic()
+                && !plannedSemanticGoalFingerprint.equals(
+                navigationRequest.goal().fingerprint(bot.serverLevel()));
+    }
+
+    /**
+     * Installs the next segment of the same complete proof without starting another A* frontier.
+     * Returns false when world/goal/start provenance changed, in which case ActionPack performs a
+     * fresh bounded plan using {@link #currentHeading()}.
+     */
+    public boolean activateProvenContinuation(AIPlayerEntity bot) {
+        if (navigationRequest == null || provenContinuation == null) {
+            return false;
+        }
+        Set<BlockPos> continuationExclusions = new LinkedHashSet<>(persistentExclusions);
+        continuationExclusions.addAll(transientExclusions);
+        NavigationRequest validationRequest = navigationRequest.withConstraint(
+                continuationExclusions,
+                positionConstraint,
+                navigationRequest.constraintKey());
+        java.util.Optional<ProvenRoute.Slice> resumed = provenContinuation.resume(
+                bot, validationRequest, navigationRequest.segmentLength());
+        if (resumed.isEmpty()) {
+            provenContinuation = null;
+            return false;
+        }
+        ProvenRoute.Slice slice = resumed.orElseThrow();
+        sunkPathCost += completedCurrentRouteCost();
+        PathfindingResult next = slice.result();
+        path = next.path();
+        resolvedGoal = next.resolvedGoal().immutable();
+        provenContinuation = slice.continuation();
+        plannedWorldVersion = next.worldVersion();
+        plannedGoalFingerprint = next.goalFingerprint();
+        plannedSemanticGoalFingerprint = navigationRequest.goal().fingerprint(bot.serverLevel());
+        index = 1;
+        subWalker = null;
+        subMiner = null;
+        digWalking = false;
+        pillarPlaced = false;
+        progressTracker.reset();
+        activeWalkTargetIndex = -1;
+        nodeRetry = 0;
+        forceSingleStep = false;
+        advancedThisTick = false;
+        replanTried = false;
+        failureReason = FailureReason.NONE;
+        planningDeferred = false;
+        unsafeAcceptedTicks = 0;
+        return true;
     }
 
     public static boolean hasPlaceableBlock(AIPlayerEntity player) {
@@ -327,18 +534,24 @@ public final class PathExecutor {
             advance();
             return ActionResult.IN_PROGRESS;
         }
-        int slot = findPlaceableBlock(player);
-        if (slot < 0) {
-            return handleStuck(pack, "pillar_no_block");
+        if (!pillarPlaced) {
+            int slot = findPlaceableBlock(player);
+            if (slot < 0) {
+                return handleStuck(pack, "pillar_no_block");
+            }
+            InventoryAction.equipFromSlot(player, slot);
         }
-        InventoryAction.equipFromSlot(player, slot);
         LookAction.lookAtBlock(player, placeSlot, Direction.UP);
         pack.setForward(0.0F);
         pack.setJumping(true);
         pack.jumpOnce();
         double rise = player.getY() - placeSlot.getY();
-        if (rise > 0.5D && rise < 1.2D && player.serverLevel().getBlockState(placeSlot).isAir()) {
-            BuildAction.placeBlockAt(player, placeSlot);
+        if (!pillarPlaced && rise > 0.5D && rise < 1.2D
+                && player.serverLevel().getBlockState(placeSlot).isAir()) {
+            ActionResult placement = BuildAction.placeBlockAt(player, placeSlot);
+            if (placement.isSuccess()) {
+                pillarPlaced = true;
+            }
         }
         return ActionResult.IN_PROGRESS;
     }
@@ -385,6 +598,45 @@ public final class PathExecutor {
         advanceTo(index + 1);
     }
 
+    /** Commits discrete path cost that movement completed between ActionPack ticks. */
+    private void commitReachedPathProgress(BlockPos currentPosition) {
+        if (path.isEmpty() || index >= path.size()) {
+            return;
+        }
+        int furthestCandidate = activeWalkTargetIndex >= index
+                ? Math.min(activeWalkTargetIndex, path.size() - 1)
+                : index;
+        // A string-pulled walk can be sampled on an intermediate discrete node before its farther
+        // controller target. Commit the furthest node actually reached, not only the two ends, so
+        // a same-tick dynamic replan retains every sunk edge and the real incoming heading.
+        for (int candidate = furthestCandidate; candidate >= index; candidate--) {
+            if (canPrecommitReachedNode(currentPosition, candidate)) {
+                advanceTo(candidate + 1);
+                return;
+            }
+        }
+    }
+
+    private boolean canPrecommitReachedNode(BlockPos currentPosition, int candidateIndex) {
+        Node candidate = path.get(candidateIndex);
+        return canPrecommitMovement(
+                candidate.moveType(), currentPosition, candidate.pos(),
+                hasArrived(currentPosition, candidate.pos(), candidateIndex));
+    }
+
+    static boolean canPrecommitMovement(MoveType moveType,
+                                        BlockPos currentPosition,
+                                        BlockPos targetPosition,
+                                        boolean tolerantArrival) {
+        return switch (moveType) {
+            case WALK, DIAGONAL -> tolerantArrival;
+            case JUMP_UP, DROP_DOWN -> currentPosition.equals(targetPosition);
+            // Mining and pillaring own their postconditions. The ordinary Y±1 arrival tolerance
+            // would otherwise skip a same-column vertical edit before it happened.
+            case DIG_THROUGH, PILLAR_UP -> false;
+        };
+    }
+
     private void advanceTo(int nextIndex) {
         Node next = path.get(index);
         BotLog.path(null, "path_advance", "index", index, "total", path.size(), "move_type", next.moveType(), "pos", LogFields.pos(next.pos()));
@@ -392,6 +644,7 @@ public final class PathExecutor {
         subWalker = null;
         subMiner = null;
         digWalking = false;
+        pillarPlaced = false;
         progressTracker.reset();
         activeWalkTargetIndex = -1;
         nodeRetry = 0;
@@ -489,7 +742,12 @@ public final class PathExecutor {
         Standability.clearCache();
         NeighborEnumerator validator = new NeighborEnumerator(
                 allowPillarOnReplan, allowDigOnReplan, traversalPolicy);
-        validator.setPathGoal(originalGoal);
+        if (navigationRequest == null) {
+            validator.setPathGoal(resolvedGoal);
+        } else {
+            validator.setPathGoalPredicate(position ->
+                    replanGoal.accepts(world, position));
+        }
         int last = Math.min(path.size() - 1, index + ROUTE_REVALIDATE_LOOKAHEAD - 1);
         for (int candidateIndex = index; candidateIndex <= last; candidateIndex++) {
             Node candidate = path.get(candidateIndex);
@@ -505,15 +763,44 @@ public final class PathExecutor {
                 return new RouteProblem(candidate.pos(), danger);
             }
             Node previous = path.get(candidateIndex - 1);
-            boolean transitionValid = validator.getNeighbors(previous.pos(), world).stream()
+            boolean currentEditCommitted = candidateIndex == index
+                    && ((candidate.moveType() == MoveType.DIG_THROUGH && digWalking)
+                    || (candidate.moveType() == MoveType.PILLAR_UP && pillarPlaced));
+            boolean candidateStandable = Standability.isStandableFresh(
+                    world, candidate.pos(), traversalPolicy);
+            if (currentEditCommitted && !candidateStandable) {
+                return new RouteProblem(candidate.pos(), "committed_edit_invalidated");
+            }
+            boolean committedEditCompletion = currentEditCommitted && candidateStandable
+                    && ((candidate.moveType() == MoveType.DIG_THROUGH
+                    && digWalking
+                    && candidate.pos().equals(previous.pos().below())
+                    && passableColumn(world, previous.pos(), traversalPolicy)
+                    && DangerCheck.scan(world, previous.pos(), traversalPolicy) == null)
+                    || (candidate.moveType() == MoveType.PILLAR_UP && pillarPlaced));
+            if (candidateIndex == index && !committedEditCompletion
+                    && !Standability.isStandableFresh(
+                    world, previous.pos(), traversalPolicy)) {
+                return new RouteProblem(previous.pos(), "source_not_standable");
+            }
+            // The first predecessor has already executed. Revalidate that edge against the live
+            // column so a completed DIG cannot hide a wall placed behind it. Only later path
+            // nodes may rely on the virtual clearing effect of a DIG that is still pending.
+            List<NeighborCandidate> transitions = candidateIndex == index
+                    ? validator.getNeighbors(previous.pos(), world)
+                    : validator.getNeighbors(previous, world);
+            boolean transitionValid = committedEditCompletion || transitions.stream()
                     .anyMatch(neighbor -> neighbor.pos().equals(candidate.pos())
                             && neighbor.moveType() == candidate.moveType());
             if (!transitionValid
                     && (candidate.moveType() == MoveType.DIG_THROUGH
                     || candidate.moveType() == MoveType.PILLAR_UP)) {
                 // A world-edit step that has already finished naturally becomes a normal dry
-                // stand position. Treat that as progress rather than invalidating the route.
-                transitionValid = Standability.isStandable(world, candidate.pos(), traversalPolicy);
+                // transition. Accept the changed move kind only when the live departure geometry
+                // still exposes an actual edge to the same target; standability alone could hide
+                // a wall that was placed back into the already-executed predecessor column.
+                transitionValid = transitions.stream()
+                        .anyMatch(neighbor -> neighbor.pos().equals(candidate.pos()));
             }
             if (!transitionValid) {
                 return new RouteProblem(candidate.pos(), "transition_blocked");
@@ -541,7 +828,7 @@ public final class PathExecutor {
 
     private boolean hasArrived(BlockPos current, BlockPos target, int targetIndex) {
         if (!exactGoal && targetIndex == path.size() - 1) {
-            return current.distSqr(target) <= 4.0D;
+            return current.distSqr(target) <= NEAR_ARRIVAL_DISTANCE_SQ;
         }
         return hasReachedNode(current, target);
     }
@@ -572,6 +859,9 @@ public final class PathExecutor {
                     "single_step", true);
             return ActionResult.IN_PROGRESS;
         }
+        if (navigationRequest != null) {
+            rememberEntityObstacles(pack);
+        }
         return handleStuck(pack, reason);
     }
 
@@ -581,11 +871,28 @@ public final class PathExecutor {
 
     private ActionResult handleStuck(ActionPack pack, String reason, boolean forceFresh) {
         lastReplanReason = reason;
+        boolean dynamicRefresh = navigationRequest != null
+                && replanGoal.dynamic()
+                && "dynamic_goal_changed".equals(reason);
         if (!replanTried) {
             int now = pack.player().getServer().getTickCount();
-            if (now - lastReplanTick < REPLAN_COOLDOWN_TICKS) {
+            int cooldown = navigationRequest != null && replanGoal.dynamic()
+                    ? 10 : REPLAN_COOLDOWN_TICKS;
+            if (now - lastReplanTick < cooldown) {
+                if (navigationRequest != null) {
+                    cleanup(pack);
+                    return ActionResult.IN_PROGRESS;
+                }
                 cleanup(pack);
+                failureReason = FailureReason.PATH_BLOCKED;
                 return ActionResult.failed(reason + "; replan_throttled");
+            }
+            if (navigationRequest != null
+                    && !dynamicRefresh
+                    && failureReplanCount >= navigationRequest.maxReplans()) {
+                cleanup(pack);
+                failureReason = FailureReason.PATH_BLOCKED;
+                return ActionResult.failed(reason + "; replan_limit");
             }
             lastReplanTick = now;
             replanTried = true;
@@ -598,39 +905,103 @@ public final class PathExecutor {
                         "path_replan_start_invalid", traversalPolicy)
                         || !bounds.contains(pack.player().blockPosition())) {
                     cleanup(pack);
+                    failureReason = FailureReason.NO_START;
                     return ActionResult.failed(reason + "; replan_failed: NO_START");
                 }
             }
-            boolean canPillar = allowPillarOnReplan && hasPlaceableBlock(pack.player());
             Set<BlockPos> replanExclusions = new LinkedHashSet<>(persistentExclusions);
             replanExclusions.addAll(transientExclusions);
-            AStarPathfinder finder = new AStarPathfinder(
-                    pack.player().serverLevel(),
-                    pack.player().blockPosition(),
-                    originalGoal,
-                    10_000,
-                    50L,
-                    canPillar,
-                    allowDigOnReplan,
-                    traversalPolicy,
-                    1.0D,
-                    replanExclusions,
-                    bounds,
-                    positionConstraint);
-            PathfindingResult fresh = finder.findPath(forceFresh);
+            PathfindingResult fresh;
+            NavGoal freshGoal = replanGoal;
+            boolean freshEvidenceUnrestricted = false;
+            if (navigationRequest != null) {
+                // Any local invalidation revokes the old suffix. A successful fresh proof installs
+                // its own continuation; a deferred/failed search must never resume stale nodes.
+                provenContinuation = null;
+                NavigationRequest replanRequest = navigationRequest.withConstraint(
+                        replanExclusions,
+                        positionConstraint,
+                        navigationRequest.constraintKey());
+                NavigationPlanner.PlanningOutcome outcome = NavigationPlanner.plan(
+                        pack.player(), replanRequest, true, currentHeading());
+                fresh = outcome.result();
+                freshGoal = outcome.plannedGoal();
+                freshEvidenceUnrestricted = outcome.unrestrictedEvidenceScope();
+                if (fresh.success()) {
+                    provenContinuation = outcome.continuation();
+                    failureEvidenceUnrestricted = freshEvidenceUnrestricted;
+                }
+            } else {
+                boolean canPillar = allowPillarOnReplan && hasPlaceableBlock(pack.player());
+                AStarPathfinder finder = new AStarPathfinder(
+                        pack.player().serverLevel(),
+                        pack.player().blockPosition(),
+                        resolvedGoal,
+                        10_000,
+                        50L,
+                        canPillar,
+                        allowDigOnReplan,
+                        traversalPolicy,
+                        1.0D,
+                        replanExclusions,
+                        bounds,
+                        positionConstraint);
+                fresh = finder.findPath(forceFresh);
+            }
+            if (navigationRequest != null) {
+                // A failed fresh search is still authoritative provenance. Publishing the prior
+                // plan revision would make a real GOAL_UNREACHABLE look stale to outcome policy.
+                plannedWorldVersion = fresh.worldVersion();
+            }
             if (fresh.success()) {
                 replanCount++;
+                if (!dynamicRefresh) {
+                    failureReplanCount++;
+                }
                 BotLog.path(pack.player(), "path_replan", "at_node", reason, "new_path_size", fresh.path().size());
+                sunkPathCost += completedCurrentRouteCost();
                 path = fresh.path();
+                resolvedGoal = fresh.resolvedGoal() == null
+                        ? resolvedGoal : fresh.resolvedGoal().immutable();
+                replanGoal = freshGoal;
+                plannedWorldVersion = fresh.worldVersion();
+                plannedGoalFingerprint = fresh.goalFingerprint();
+                if (navigationRequest != null) {
+                    plannedSemanticGoalFingerprint = navigationRequest.goal().fingerprint(
+                            pack.player().serverLevel());
+                }
                 index = 1;
                 subWalker = null;
                 subMiner = null;
                 digWalking = false;
+                pillarPlaced = false;
                 progressTracker.reset();
                 forceSingleStep = false;
                 replanTried = false;
+                failureReason = FailureReason.NONE;
                 return ActionResult.IN_PROGRESS;
             }
+            if (fresh.reason() == FailureReason.SEARCH_BUDGET) {
+                cleanup(pack);
+                replanTried = false;
+                lastReplanTick = now - cooldown;
+                lastReplanReason = reason + "; search_budget_deferred";
+                planningDeferred = true;
+                return ActionResult.IN_PROGRESS;
+            }
+            if (navigationRequest != null) {
+                // The terminal proof inherits the actual replan scope, including transient entity
+                // exclusions. Never upgrade that narrower search to the original request scope.
+                Set<BlockPos> evidenceExclusions = new LinkedHashSet<>(persistentExclusions);
+                evidenceExclusions.addAll(transientExclusions);
+                NavigationRequest evidenceRequest = navigationRequest.withConstraint(
+                        evidenceExclusions,
+                        positionConstraint,
+                        navigationRequest.constraintKey());
+                failureEvidenceUnrestricted = freshEvidenceUnrestricted
+                        && evidenceRequest.unrestrictedEvidenceScope();
+            }
+            failureReason = fresh.reason();
             reason = reason + "; replan_failed: " + fresh.reason();
         }
         cleanup(pack);
@@ -644,7 +1015,35 @@ public final class PathExecutor {
         }
         subWalker = null;
         digWalking = false;
+        pillarPlaced = false;
         pack.stopMovement();
+    }
+
+    private double completedCurrentRouteCost() {
+        if (path.isEmpty() || index <= 0) {
+            return 0.0D;
+        }
+        int completedIndex = Math.min(index - 1, path.size() - 1);
+        return Math.max(0.0D, path.get(completedIndex).gCost());
+    }
+
+    private void rememberEntityObstacles(ActionPack pack) {
+        for (LivingEntity entity : pack.player().serverLevel().getEntitiesOfClass(
+                LivingEntity.class,
+                pack.player().getBoundingBox().inflate(8.0D),
+                entity -> entity != pack.player() && entity.isAlive())) {
+            AABB box = entity.getBoundingBox();
+            int minX = Mth.floor(box.minX + 1.0E-4D);
+            int maxX = Mth.floor(box.maxX - 1.0E-4D);
+            int minZ = Mth.floor(box.minZ + 1.0E-4D);
+            int maxZ = Mth.floor(box.maxZ - 1.0E-4D);
+            int feetY = Mth.floor(box.minY + 1.0E-4D);
+            for (int x = minX; x <= maxX; x++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    rememberExclusion(new BlockPos(x, feetY, z));
+                }
+            }
+        }
     }
 
     private static Direction faceFromPlayer(ActionPack pack, BlockPos pos) {
