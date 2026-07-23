@@ -1322,18 +1322,10 @@ public final class AIBotVerifySubcommand {
         return bot.getStats().getValue(net.minecraft.stats.Stats.CUSTOM.get(net.minecraft.stats.Stats.DEATHS));
     }
 
-    // 拥有某装备:背包里有 或 已穿在任意装备槽。用于 armor 断言——避免"合好甲→自动穿甲"的 1-tick 竞态
-    // (runningGoal 在目标完成那刻检断言,穿甲在同 burst 下一拍生效,否则误判'胸甲没穿' FAIL)。
-    private static boolean hasGear(AIPlayerEntity bot, Item item) {
-        if (InventoryAction.countItem(bot, item) >= 1) {
-            return true;
-        }
-        for (net.minecraft.world.entity.EquipmentSlot slot : net.minecraft.world.entity.EquipmentSlot.values()) {
-            if (bot.getItemBySlot(slot).is(item)) {
-                return true;
-            }
-        }
-        return false;
+    private static boolean hasEquipped(AIPlayerEntity bot,
+                                       net.minecraft.world.entity.EquipmentSlot slot,
+                                       Item item) {
+        return bot.getItemBySlot(slot).is(item);
     }
 
     // 实操:砍 8 根原木(自然找树;接受任意树种)。
@@ -1482,11 +1474,11 @@ public final class AIBotVerifySubcommand {
         }
         return Result.runningGoal("real_armor", 36000,
                 ignored -> bot.isAlive() && deathCount(bot) == deathBase
-                        && hasGear(bot, Items.IRON_HELMET)
-                        && hasGear(bot, Items.IRON_CHESTPLATE)
-                        && hasGear(bot, Items.IRON_LEGGINGS)
-                        && hasGear(bot, Items.IRON_BOOTS)
-                        && hasGear(bot, Items.IRON_SWORD)); // 铁套+铁剑:整套四件甲 + 铁剑都到手(Goal.Armor full 本就含剑)
+                        && hasEquipped(bot, net.minecraft.world.entity.EquipmentSlot.HEAD, Items.IRON_HELMET)
+                        && hasEquipped(bot, net.minecraft.world.entity.EquipmentSlot.CHEST, Items.IRON_CHESTPLATE)
+                        && hasEquipped(bot, net.minecraft.world.entity.EquipmentSlot.LEGS, Items.IRON_LEGGINGS)
+                        && hasEquipped(bot, net.minecraft.world.entity.EquipmentSlot.FEET, Items.IRON_BOOTS)
+                        && InventoryAction.countItem(bot, Items.IRON_SWORD) >= 1);
     }
 
     // 安全边界回归:旧 real_build 曾直接提交 small_hut 并自动选址/整地，绕过投影确认。
@@ -2371,8 +2363,7 @@ public final class AIBotVerifySubcommand {
         });
     }
 
-    // 续挖(R6/R7):预置 mine_face 地标+矿种记忆于 35 格外(矿就埋在作业面旁),复刻 resume_mining
-    // 工具体(MoveTask 回面+MineOre 排队),断言走回去挖到矿——验证地标记忆与任务/目标衔接语义。
+    // 续挖(R6/R7):单一复合任务先无损返回 35 格外的作业面,再从启动时库存基线新增挖 2 个矿。
     private static Result assignGeoResume(AIPlayerEntity bot) {
         prepareArea(bot);
         clearInventory(bot);
@@ -2380,6 +2371,7 @@ public final class AIBotVerifySubcommand {
         BlockPos origin = bot.blockPosition();
         clearNearbyMobs(world, origin);
         InventoryAction.giveItem(bot, new ItemStack(Items.STONE_PICKAXE, 1));
+        InventoryAction.giveItem(bot, new ItemStack(Items.RAW_IRON, 8));
         // 作业面:东 35 格,走廊保通,面旁嵌 2 铁矿
         BlockPos face = origin.offset(35, 0, 0);
         for (int dx = 0; dx <= 37; dx++) {
@@ -2399,14 +2391,17 @@ public final class AIBotVerifySubcommand {
         var mem = io.github.greytaiwolf.fakeaiplayer.memory.BotMemoryStore.INSTANCE.of(bot.getUUID());
         mem.markPlace("mine_face", world, face);
         mem.remember("mine_face_ores", "minecraft:iron_ore");
-        // 复刻 resume_mining 工具体
-        TaskManager.INSTANCE.assign(bot, new io.github.greytaiwolf.fakeaiplayer.task.MoveTask(bot, face),
-                io.github.greytaiwolf.fakeaiplayer.runtime.TaskOrigin.of(io.github.greytaiwolf.fakeaiplayer.runtime.TaskOrigin.Kind.VERIFY, "geo_resume"));
-        GoalExecutor.INSTANCE.submit(bot,
-                new Goal.MineOre(java.util.Set.of(Blocks.IRON_ORE), 2));
+        TaskManager.INSTANCE.assign(bot,
+                new io.github.greytaiwolf.fakeaiplayer.task.ResumeMiningTask(
+                        face,
+                        world.dimension().location().toString(),
+                        java.util.Set.of(Blocks.IRON_ORE),
+                        2),
+                io.github.greytaiwolf.fakeaiplayer.runtime.TaskOrigin.of(
+                        io.github.greytaiwolf.fakeaiplayer.runtime.TaskOrigin.Kind.VERIFY, "geo_resume"));
         final int deathBase = deathCount(bot);
         return Result.running("geo_resume", 4800,
-                ignored -> bot.isAlive() && InventoryAction.countItem(bot, Items.RAW_IRON) >= 2
+                ignored -> bot.isAlive() && InventoryAction.countItem(bot, Items.RAW_IRON) >= 10
                         && deathCount(bot) == deathBase);
     }
 
@@ -2514,13 +2509,14 @@ public final class AIBotVerifySubcommand {
         io.github.greytaiwolf.fakeaiplayer.memory.KnowledgeBase kb = io.github.greytaiwolf.fakeaiplayer.memory.KnowledgeBase.INSTANCE;
         io.github.greytaiwolf.fakeaiplayer.memory.EpisodeLog log = io.github.greytaiwolf.fakeaiplayer.memory.EpisodeLog.INSTANCE;
         BlockPos spot = bot.blockPosition().offset(1000, 0, 1000); // 远离实际活动区,不污染后续场景
+        String dimension = bot.serverLevel().dimension().location().toString();
         int dangersBefore = kb.dangerCount(bot.getUUID());
         log.record(bot, io.github.greytaiwolf.fakeaiplayer.memory.EpisodeLog.Type.DEATH, spot, "smoke_test");
         if (kb.dangerCount(bot.getUUID()) != dangersBefore) {
             return Result.fail("knowledge_smoke", "single_death_created_zone(应两次才立牌)");
         }
         log.record(bot, io.github.greytaiwolf.fakeaiplayer.memory.EpisodeLog.Type.DEATH, spot.offset(3, 0, 3), "smoke_test");
-        if (!kb.isDanger(bot.getUUID(), spot)) {
+        if (!kb.isDanger(bot.getUUID(), dimension, spot)) {
             return Result.fail("knowledge_smoke", "two_deaths_no_zone(聚类蒸馏未生效)");
         }
         int resBefore = kb.resourceCount(bot.getUUID());
@@ -2529,8 +2525,25 @@ public final class AIBotVerifySubcommand {
         if (kb.resourceCount(bot.getUUID()) != resBefore + 1) {
             return Result.fail("knowledge_smoke", "resource_dedup_failed(8 格内同矿应去重)");
         }
-        if (kb.nearestResource(bot.getUUID(), "minecraft:iron_ore", spot.offset(40, 0, 0), 96).isEmpty()) {
+        if (kb.nearestResource(
+                bot.getUUID(), dimension, "minecraft:iron_ore", spot.offset(40, 0, 0), 96).isEmpty()) {
             return Result.fail("knowledge_smoke", "nearest_resource_miss");
+        }
+        var netherResource = new io.github.greytaiwolf.fakeaiplayer.memory.EpisodeLog.EpisodeEvent(
+                bot.getServer().getTickCount(),
+                io.github.greytaiwolf.fakeaiplayer.memory.EpisodeLog.Type.RESOURCE_FOUND,
+                spot.offset(80, 0, 0),
+                "minecraft:gold_ore",
+                "minecraft:the_nether");
+        kb.distill(bot, netherResource, java.util.List.of(netherResource));
+        if (kb.nearestResource(
+                bot.getUUID(), dimension, "minecraft:gold_ore", spot.offset(80, 0, 0), 96).isPresent()) {
+            return Result.fail("knowledge_smoke", "cross_dimension_resource_leaked");
+        }
+        if (kb.nearestResource(
+                bot.getUUID(), "minecraft:the_nether", "minecraft:gold_ore",
+                spot.offset(80, 0, 0), 96).isEmpty()) {
+            return Result.fail("knowledge_smoke", "dimension_bound_resource_missing");
         }
         return Result.pass("knowledge_smoke", "distill+dedup+query ok, dangers=" + kb.dangerCount(bot.getUUID())
                 + " resources=" + kb.resourceCount(bot.getUUID()));
@@ -2674,11 +2687,11 @@ public final class AIBotVerifySubcommand {
         // 断言与 typed Armor predicate 同口径：头/胸/腿/脚/剑五项缺一不可。
         return Result.runningGoal("achieve_armor", 16000,
                 ignored -> bot.isAlive()
-                        && hasGear(bot, Items.IRON_HELMET)
-                        && hasGear(bot, Items.IRON_CHESTPLATE)
-                        && hasGear(bot, Items.IRON_LEGGINGS)
-                        && hasGear(bot, Items.IRON_BOOTS)
-                        && hasGear(bot, Items.IRON_SWORD));
+                        && hasEquipped(bot, net.minecraft.world.entity.EquipmentSlot.HEAD, Items.IRON_HELMET)
+                        && hasEquipped(bot, net.minecraft.world.entity.EquipmentSlot.CHEST, Items.IRON_CHESTPLATE)
+                        && hasEquipped(bot, net.minecraft.world.entity.EquipmentSlot.LEGS, Items.IRON_LEGGINGS)
+                        && hasEquipped(bot, net.minecraft.world.entity.EquipmentSlot.FEET, Items.IRON_BOOTS)
+                        && InventoryAction.countItem(bot, Items.IRON_SWORD) >= 1);
     }
 
     // Phase2:基建目标。给足木板+圆石(聚焦"做三件套+摆放"),achieve Goal.Workstation 应在周围摆出工作台/熔炉/箱子。

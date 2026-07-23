@@ -41,8 +41,21 @@ public final class IntentController {
                                  String reason,
                                  Supplier<Boolean> startReplacement) {
         requireServerThread(bot);
+        Objects.requireNonNull(origin, "origin");
         Objects.requireNonNull(startReplacement, "startReplacement");
         rejectInventoryOwnedMutation(bot);
+        if (TaskManager.INSTANCE.hasSafetyOwnership(bot)) {
+            String normalized = normalizeReason(origin, reason);
+            BotLog.comm(bot, "intent_replacement_deferred",
+                    "origin", origin,
+                    "reason", normalized,
+                    "blocker", "safety_work_active");
+            if (origin.notifiesUser()) {
+                BrainCoordinator.INSTANCE.sendPanelChat(
+                        bot, "system", "正在执行保命自救；脱险后才能替换当前任务。");
+            }
+            return new ReplaceResult(unchangedOutcome(), false);
+        }
         IntentControlTransaction.Outcome cancellation = cancel(
                 bot, origin, reason, IntentControlTransaction.Scope.CURRENT);
         boolean replacementStarted;
@@ -72,9 +85,7 @@ public final class IntentController {
         }
         boolean changed = BrainCoordinator.INSTANCE.invalidateDecision(bot, "intent_pause:" + normalized);
         changed |= BrainCoordinator.INSTANCE.clearIntentWakeSources(bot);
-        boolean safetyActive = TaskManager.INSTANCE.activeOrigin(bot)
-                .map(TaskOrigin::safety)
-                .orElse(false);
+        boolean safetyActive = TaskManager.INSTANCE.hasSafetyOwnership(bot);
         IdleCoordinator.INSTANCE.cancelAmbient(bot, "user_pause");
         changed |= TaskManager.INSTANCE.pauseUserIntent(bot, normalized);
         boolean hadActions = bot.getActionPack().hasActiveActions();
@@ -141,6 +152,20 @@ public final class IntentController {
 
     private static String normalizeReason(ControlOrigin origin, String reason) {
         return reason == null || reason.isBlank() ? origin.name().toLowerCase(Locale.ROOT) : reason;
+    }
+
+    private static IntentControlTransaction.Outcome unchangedOutcome() {
+        return new IntentControlTransaction.Outcome(
+                IntentControlTransaction.Scope.CURRENT,
+                false,
+                false,
+                false,
+                0,
+                false,
+                false,
+                false,
+                false,
+                false);
     }
 
     private static void requireServerThread(AIPlayerEntity bot) {

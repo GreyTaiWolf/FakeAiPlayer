@@ -40,6 +40,7 @@ public final class AIBotRestartHarnessCommand {
     private static final String PROBE_JOB_KIND = "restart_checkpoint_probe";
     private static final String CHECKPOINT_ORIGIN = "origin";
     private static final String CHECKPOINT_STARTED_TICK = "started_tick";
+    private static final String CHECKPOINT_ELAPSED_MISSION_TICKS = "elapsed_mission_ticks";
     private static final String CHECKPOINT_REVISION = "revision";
     private static final AtomicBoolean TICKER_REGISTERED = new AtomicBoolean();
     private static volatile UUID checkpointWatchBot;
@@ -161,12 +162,16 @@ public final class AIBotRestartHarnessCommand {
         MissionRecord pausedActive = pausedRuntime.active();
         Map<String, String> checkpoint = pausedActive == null ? Map.of() : pausedActive.checkpoint();
         boolean exactShape = checkpoint.keySet().equals(Set.of(
-                CHECKPOINT_ORIGIN, CHECKPOINT_STARTED_TICK, CHECKPOINT_REVISION));
+                CHECKPOINT_ORIGIN,
+                CHECKPOINT_STARTED_TICK,
+                CHECKPOINT_ELAPSED_MISSION_TICKS,
+                CHECKPOINT_REVISION));
         boolean nonDefaultCheckpoint = exactShape
                 && parseNonNegative(checkpoint.get(CHECKPOINT_REVISION)) >= 1
                 && checkpoint.get(CHECKPOINT_ORIGIN) != null
                 && !checkpoint.get(CHECKPOINT_ORIGIN).isBlank()
-                && parseNonNegative(checkpoint.get(CHECKPOINT_STARTED_TICK)) > 0;
+                && parseNonNegative(checkpoint.get(CHECKPOINT_STARTED_TICK)) > 0
+                && parseNonNegative(checkpoint.get(CHECKPOINT_ELAPSED_MISSION_TICKS)) > 0;
         boolean missionShape = pausedActive != null
                 && "have_item".equals(pausedActive.spec().type())
                 && "minecraft:torch".equals(pausedActive.spec().params().get("item"))
@@ -189,6 +194,7 @@ public final class AIBotRestartHarnessCommand {
         expected.put("mission_id", pausedActive.missionId());
         expected.put("checkpoint_origin", checkpoint.get(CHECKPOINT_ORIGIN));
         expected.put("checkpoint_started_tick", checkpoint.get(CHECKPOINT_STARTED_TICK));
+        expected.put("checkpoint_elapsed_mission_ticks", checkpoint.get(CHECKPOINT_ELAPSED_MISSION_TICKS));
         expected.put("checkpoint_revision", checkpoint.get(CHECKPOINT_REVISION));
         expected.put("checkpoint_size", String.valueOf(checkpoint.size()));
         expected.put("queue_count", String.valueOf(pausedRuntime.queue().size()));
@@ -211,6 +217,7 @@ public final class AIBotRestartHarnessCommand {
                 + " lease_claimed=" + leaseClaimed
                 + " mission_id=" + pausedActive.missionId()
                 + " revision=" + checkpoint.get(CHECKPOINT_REVISION)
+                + " elapsed_mission_ticks=" + checkpoint.get(CHECKPOINT_ELAPSED_MISSION_TICKS)
                 + " origin=" + checkpoint.get(CHECKPOINT_ORIGIN)
                 + " started_tick=" + checkpoint.get(CHECKPOINT_STARTED_TICK)), false);
         return ok ? 1 : 0;
@@ -328,6 +335,8 @@ public final class AIBotRestartHarnessCommand {
         Map<String, String> checkpoint = new LinkedHashMap<>();
         checkpoint.put(CHECKPOINT_ORIGIN, job.params().get("checkpoint_origin"));
         checkpoint.put(CHECKPOINT_STARTED_TICK, job.params().get("checkpoint_started_tick"));
+        checkpoint.put(CHECKPOINT_ELAPSED_MISSION_TICKS,
+                job.params().get("checkpoint_elapsed_mission_ticks"));
         checkpoint.put(CHECKPOINT_REVISION, job.params().get("checkpoint_revision"));
         int expectedSize = parseNonNegative(job.params().get("checkpoint_size"));
         return expectedSize == checkpoint.size() && !checkpoint.containsValue(null)

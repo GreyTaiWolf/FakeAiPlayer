@@ -5,6 +5,9 @@ public enum FailureReason {
     NO_START,
     GOAL_UNREACHABLE,
     SEARCH_LIMIT,
+    SEARCH_BUDGET,
     TIMEOUT,
-    GOAL_NOT_STANDABLE
+    GOAL_NOT_STANDABLE,
+    PATH_BLOCKED,
+    STALE_WORLD
 }

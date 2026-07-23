@@ -3,6 +3,7 @@ package io.github.greytaiwolf.fakeaiplayer.pathfinding;
 import io.github.greytaiwolf.fakeaiplayer.AIBotConfig;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Predicate;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -22,7 +23,9 @@ public final class NeighborEnumerator {
     private final boolean canPillar;
     private final boolean allowDig;
     private final TraversalPolicy policy;
-    private BlockPos pathGoal; // 终点格:岩浆预检豁免用(终点贴岩浆由任务层封堵处理,不该让唯一入口无解)
+    // 终点格:岩浆预检豁免用(终点贴岩浆由任务层封堵处理,不该让唯一入口无解)。P2 使用
+    // predicate 保留多终点语义；旧单目标入口仍由 setPathGoal 适配。
+    private Predicate<BlockPos> pathGoalPredicate = ignored -> false;
 
     public NeighborEnumerator() {
         this(false, true, TraversalPolicy.TASK_MUTATING_DRY);
@@ -57,21 +60,45 @@ public final class NeighborEnumerator {
     }
 
     public void setPathGoal(BlockPos goal) {
-        this.pathGoal = goal;
+        this.pathGoalPredicate = goal == null ? ignored -> false : goal::equals;
+    }
+
+    public void setPathGoalPredicate(Predicate<BlockPos> goalPredicate) {
+        this.pathGoalPredicate = goalPredicate == null ? ignored -> false : goalPredicate;
     }
 
     public List<NeighborCandidate> getNeighbors(BlockPos current, ServerLevel world) {
+        return getNeighbors(current, world, false);
+    }
+
+    /**
+     * Expands a search node while preserving the virtual effect of a preceding dig step.
+     * A {@link MoveType#DIG_THROUGH} node represents a feet/head column that execution will clear;
+     * without this distinction A* can enter the first wall block but can never leave it.
+     */
+    public List<NeighborCandidate> getNeighbors(Node current, ServerLevel world) {
+        if (current == null) {
+            return List.of();
+        }
+        return getNeighbors(
+                current.pos(), world, current.moveType() == MoveType.DIG_THROUGH);
+    }
+
+    private List<NeighborCandidate> getNeighbors(BlockPos current,
+                                                 ServerLevel world,
+                                                 boolean currentColumnWillBeCleared) {
         List<NeighborCandidate> result = new ArrayList<>(HORIZONTAL.length);
         for (Direction direction : HORIZONTAL) {
             BlockPos target = current.relative(direction);
             if (Standability.isStandable(world, target, policy)
-                    && walkTransitionClear(world, current, target)) {
+                    && (currentColumnWillBeCleared
+                    || walkTransitionClear(world, current, target))) {
                 result.add(new NeighborCandidate(target, MoveType.WALK, 0));
                 continue;
             }
 
             BlockPos jumpTarget = target.above();
-            if (canJumpOnto(world, current, target)
+            if (canJumpOnto(world, current, target, currentColumnWillBeCleared)
                     && Standability.isStandable(world, jumpTarget, policy)) {
                 result.add(new NeighborCandidate(jumpTarget, MoveType.JUMP_UP, 0));
                 continue;
@@ -102,8 +129,14 @@ public final class NeighborEnumerator {
                 result.add(new NeighborCandidate(below, MoveType.DIG_THROUGH, 0));
             }
         }
-        addDiagonals(current, world, result);
-        addPillar(current, world, result);
+        addDiagonals(current, world, result, currentColumnWillBeCleared);
+        // A pillar entered directly from a virtual DIG column would stand in the old head block.
+        // That block is clear at execution time but still solid in the search snapshot, so the
+        // virtual state would have to survive beyond the PILLAR node. Keep that unsupported
+        // transition out of the graph instead of merging it with an ordinary pillar state.
+        if (!currentColumnWillBeCleared) {
+            addPillar(current, world, result);
+        }
         return result;
     }
 
@@ -118,7 +151,10 @@ public final class NeighborEnumerator {
     }
 
     // NAV-3:同高对角移动。仅当目标格可站、且两个正交相邻格都"可穿过"(不切墙角)时才允许。
-    private void addDiagonals(BlockPos current, ServerLevel world, List<NeighborCandidate> result) {
+    private void addDiagonals(BlockPos current,
+                              ServerLevel world,
+                              List<NeighborCandidate> result,
+                              boolean currentColumnWillBeCleared) {
         Direction[][] pairs = {
                 {Direction.NORTH, Direction.EAST},
                 {Direction.NORTH, Direction.WEST},
@@ -136,7 +172,8 @@ public final class NeighborEnumerator {
             if (!passableColumn(world, current.relative(pair[0])) || !passableColumn(world, current.relative(pair[1]))) {
                 continue;
             }
-            if (!walkTransitionClear(world, current, diag)) {
+            if (!currentColumnWillBeCleared
+                    && !walkTransitionClear(world, current, diag)) {
                 continue;
             }
             result.add(new NeighborCandidate(diag, MoveType.DIAGONAL, 0));
@@ -144,14 +181,18 @@ public final class NeighborEnumerator {
     }
 
     // NAV-9:垫方块上升一格(原地)。bot 会在脚下放方块并跳上去。需要头顶两格净空。
-    private void addPillar(BlockPos current, ServerLevel world, List<NeighborCandidate> result) {
+    private void addPillar(BlockPos current,
+                           ServerLevel world,
+                           List<NeighborCandidate> result) {
         if (!canPillar) {
             return;
         }
         BlockPos up1 = current.above();
         BlockPos up2 = current.above(2);
         // up1 = 新脚位(当前头位,应为空);up2 = 新头位,需净空
-        if (collisionEmpty(world, up1) && collisionEmpty(world, up2) && !Standability.isDangerous(world.getBlockState(up1))) {
+        if (collisionEmpty(world, up1)
+                && collisionEmpty(world, up2)
+                && !Standability.isDangerous(world.getBlockState(up1))) {
             result.add(new NeighborCandidate(up1, MoveType.PILLAR_UP, 0));
         }
     }
@@ -173,8 +214,14 @@ public final class NeighborEnumerator {
         return collisionEmpty(world, current.above()) && collisionEmpty(world, current.above(2));
     }
 
-    private static boolean canJumpOnto(ServerLevel world, BlockPos current, BlockPos front) {
-        if (!canJumpFrom(world, current)) {
+    private static boolean canJumpOnto(ServerLevel world,
+                                       BlockPos current,
+                                       BlockPos front,
+                                       boolean currentColumnWillBeCleared) {
+        boolean jumpSpace = currentColumnWillBeCleared
+                ? collisionEmpty(world, current.above(2))
+                : canJumpFrom(world, current);
+        if (!jumpSpace) {
             return false;
         }
         BlockState frontState = world.getBlockState(front);
@@ -224,7 +271,7 @@ public final class NeighborEnumerator {
         }
         // P0 安全预检(深层挖矿头号死因):挖开这两格后侧面/上方岩浆会涌入——-59 钻石层就是岩浆层,
         // 实操挖钻石最常见死法。脚/头任一格暴露面贴岩浆 → 这条路不挖,A* 自然绕行。
-        boolean isGoal = pathGoal != null && (target.equals(pathGoal) || head.equals(pathGoal));
+        boolean isGoal = pathGoalPredicate.test(target) || pathGoalPredicate.test(head);
         if (!isGoal && (adjacentLava(world, target) || adjacentLava(world, head))) {
             return false; // 终点格豁免:贴岩浆的矿仍可达,挖前由任务层先封岩浆(ore_dig_lava_seal)
         }

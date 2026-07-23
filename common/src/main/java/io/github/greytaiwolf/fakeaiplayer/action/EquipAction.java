@@ -14,6 +14,8 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;
+import net.minecraft.world.item.enchantment.EnchantmentHelper;
 
 public final class EquipAction {
     private static final EquipmentSlot[] ARMOR_SLOTS = {
@@ -42,8 +44,14 @@ public final class EquipAction {
             if (stack.isEmpty()) {
                 continue;
             }
+            if (stack.isDamageableItem() && stack.getDamageValue() >= stack.getMaxDamage() - 1) {
+                continue;
+            }
             EquipmentSlot equipmentSlot = bot.getEquipmentSlotForItem(stack);
             if (!isArmorSlot(equipmentSlot)) {
+                continue;
+            }
+            if (!canReplaceEquippedArmor(bot, equipmentSlot)) {
                 continue;
             }
             double score = armorScore(stack, equipmentSlot);
@@ -86,7 +94,8 @@ public final class EquipAction {
         double bestDamage = 1.0D;
         for (int slot = 0; slot < inventory.items.size(); slot++) {
             ItemStack stack = inventory.items.get(slot);
-            if (stack.isEmpty()) {
+            if (stack.isEmpty()
+                    || (stack.isDamageableItem() && stack.getDamageValue() >= stack.getMaxDamage() - 1)) {
                 continue;
             }
             double damage = attackDamage(stack);
@@ -143,12 +152,46 @@ public final class EquipAction {
     }
 
     private static double armorScore(ItemStack stack, EquipmentSlot slot) {
-        if (stack.isEmpty()) {
+        if (stack.isEmpty()
+                || (stack.isDamageableItem() && stack.getDamageValue() >= stack.getMaxDamage() - 1)) {
             return 0.0D;
         }
         double armor = attributeValue(stack, slot, Attributes.ARMOR);
         double toughness = attributeValue(stack, slot, Attributes.ARMOR_TOUGHNESS);
-        return armor + toughness * 0.25D;
+        // Vanilla helmets can have equal armor points across gold/chain/iron. A tiny material
+        // tie-break lets a survival loadout replace an equal-defense lower-tier piece while never
+        // overriding a genuinely stronger armor/toughness score.
+        return armor + toughness * 0.25D + armorMaterialRank(stack) * 0.001D;
+    }
+
+    private static int armorMaterialRank(ItemStack stack) {
+        var item = stack.getItem();
+        if (item == Items.NETHERITE_HELMET || item == Items.NETHERITE_CHESTPLATE
+                || item == Items.NETHERITE_LEGGINGS || item == Items.NETHERITE_BOOTS) {
+            return 6;
+        }
+        if (item == Items.DIAMOND_HELMET || item == Items.DIAMOND_CHESTPLATE
+                || item == Items.DIAMOND_LEGGINGS || item == Items.DIAMOND_BOOTS) {
+            return 5;
+        }
+        if (item == Items.IRON_HELMET || item == Items.IRON_CHESTPLATE
+                || item == Items.IRON_LEGGINGS || item == Items.IRON_BOOTS) {
+            return 4;
+        }
+        if (item == Items.CHAINMAIL_HELMET || item == Items.CHAINMAIL_CHESTPLATE
+                || item == Items.CHAINMAIL_LEGGINGS || item == Items.CHAINMAIL_BOOTS
+                || item == Items.TURTLE_HELMET) {
+            return 3;
+        }
+        if (item == Items.GOLDEN_HELMET || item == Items.GOLDEN_CHESTPLATE
+                || item == Items.GOLDEN_LEGGINGS || item == Items.GOLDEN_BOOTS) {
+            return 2;
+        }
+        if (item == Items.LEATHER_HELMET || item == Items.LEATHER_CHESTPLATE
+                || item == Items.LEATHER_LEGGINGS || item == Items.LEATHER_BOOTS) {
+            return 1;
+        }
+        return 0;
     }
 
     private static double attributeValue(ItemStack stack,
@@ -170,6 +213,14 @@ public final class EquipAction {
             }
         }
         return false;
+    }
+
+    /** Mirrors vanilla survival inventory rules for automated armor swaps. */
+    public static boolean canReplaceEquippedArmor(AIPlayerEntity bot, EquipmentSlot slot) {
+        ItemStack equipped = bot.getItemBySlot(slot);
+        return equipped.isEmpty()
+                || bot.isCreative()
+                || !EnchantmentHelper.has(equipped, EnchantmentEffectComponents.PREVENT_ARMOR_CHANGE);
     }
 
     private record Candidate(int sourceSlot, ItemStack stack, double score) {

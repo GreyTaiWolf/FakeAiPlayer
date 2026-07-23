@@ -21,7 +21,12 @@ public final class EpisodeLog {
 
     public enum Type { DEATH, THREAT, RESOURCE_FOUND, GOAL_DONE, GOAL_FAILED }
 
-    public record EpisodeEvent(long gameTick, Type type, BlockPos pos, String detail) {
+    public record EpisodeEvent(long gameTick, Type type, BlockPos pos, String detail, String dimension) {
+        public EpisodeEvent {
+            pos = pos == null ? BlockPos.ZERO : pos.immutable();
+            detail = detail == null ? "" : detail;
+            dimension = dimension == null ? "" : dimension.trim();
+        }
     }
 
     private final Map<UUID, Deque<EpisodeEvent>> events = new ConcurrentHashMap<>();
@@ -32,7 +37,8 @@ public final class EpisodeLog {
     public void record(AIPlayerEntity bot, Type type, BlockPos pos, String detail) {
         Deque<EpisodeEvent> deque = events.computeIfAbsent(bot.getUUID(), k -> new ArrayDeque<>());
         EpisodeEvent event = new EpisodeEvent(bot.getServer().getTickCount(), type,
-                pos.immutable(), detail == null ? "" : detail);
+                pos, detail == null ? "" : detail,
+                bot.serverLevel().dimension().location().toString());
         synchronized (deque) {
             deque.addLast(event);
             while (deque.size() > CAP) {

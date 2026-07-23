@@ -120,7 +120,9 @@ final class SharedGameTestFixture implements AutoCloseable {
         } catch (RuntimeException cleanupFailure) {
             failure.addSuppressed(cleanupFailure);
         }
-        helper.fail(message(failure));
+        String diagnostic = message(failure);
+        System.err.println("[fakeaiplayer-shared-gametest] " + diagnostic);
+        helper.fail(diagnostic);
     }
 
     @Override

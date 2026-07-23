@@ -50,4 +50,23 @@ class GatherQuotaTaskExactTest {
         assertEquals(10, legacyAbsoluteInventoryAtCompletion - existingSand,
                 "an absolute quota would stop after gathering only ten of the fifteen missing sand");
     }
+
+    @Test
+    void quotaModeIsIndependentFromExactItemMatching() {
+        int existingAnyLogs = 2;
+        int missingAnyLogs = 3;
+
+        assertEquals(0, GatherQuotaTask.progressFromAbsolute(
+                GatherQuotaTask.QuotaMode.DELTA_FROM_BASELINE,
+                existingAnyLogs,
+                existingAnyLogs));
+        assertEquals(missingAnyLogs, GatherQuotaTask.progressFromAbsolute(
+                GatherQuotaTask.QuotaMode.DELTA_FROM_BASELINE,
+                existingAnyLogs,
+                existingAnyLogs + missingAnyLogs));
+        assertEquals(existingAnyLogs, GatherQuotaTask.progressFromAbsolute(
+                GatherQuotaTask.QuotaMode.ABSOLUTE_AT_LEAST,
+                existingAnyLogs,
+                existingAnyLogs));
+    }
 }

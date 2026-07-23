@@ -70,7 +70,8 @@ class PrivilegedBoundarySourceTest {
 
         String pathExecutor = read("pathfinding/PathExecutor.java");
         assertTrue(pathExecutor.contains("allowPillarOnReplan && hasPlaceableBlock"));
-        assertTrue(pathExecutor.contains("canPillar,\n                    allowDigOnReplan"),
+        assertTrue(Pattern.compile("canPillar,\\s*allowDigOnReplan")
+                        .matcher(pathExecutor).find(),
                 "construction-safe replans must preserve the non-mutating policy");
 
         String moveTask = read("task/MoveTask.java");

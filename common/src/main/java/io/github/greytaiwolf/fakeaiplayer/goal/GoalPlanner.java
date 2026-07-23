@@ -108,7 +108,12 @@ public final class GoalPlanner {
             for (Block ore : ores) {
                 String id = BuiltInRegistries.BLOCK.getKey(ore).toString();
                 if (io.github.greytaiwolf.fakeaiplayer.memory.KnowledgeBase.INSTANCE
-                        .nearestResource(bot.getUUID(), id, bot.blockPosition(), 96).isPresent()) {
+                        .nearestResource(
+                                bot.getUUID(),
+                                bot.serverLevel().dimension().location().toString(),
+                                id,
+                                bot.blockPosition(),
+                                96).isPresent()) {
                     return true;
                 }
             }
@@ -582,26 +587,60 @@ public final class GoalPlanner {
             // 落脚点就卡死(实测做完头盔、给胸甲熔铁时 no_stand_position_for_furnace)。真人也是一趟挖满再统一熔。
             int totalIron = 0;
             for (Item piece : pieces) {
-                if (counts.getOrDefault(piece, 0) <= 0) {
+                if (!hasIronOrBetterArmor(piece)) {
                     totalIron += ironIngotCost(piece);
                 }
             }
-            if (full && counts.getOrDefault(Items.IRON_SWORD, 0) <= 0) {
+            if (full && !hasIronOrBetterSword()) {
                 totalIron += ironIngotCost(Items.IRON_SWORD);
             }
             if (totalIron > 0) {
                 ensureItem(Items.IRON_INGOT, totalIron, depth + 1, visiting); // 一次挖+熔够,后续合甲/剑直接消耗库存,不再分批回炉
             }
             for (Item piece : pieces) {
-                if (counts.getOrDefault(piece, 0) <= 0 && !ensureItem(piece, 1, depth + 1, visiting)) {
+                if (!hasIronOrBetterArmor(piece) && !ensureItem(piece, 1, depth + 1, visiting)) {
                     return false;
                 }
             }
-            if (full && counts.getOrDefault(Items.IRON_SWORD, 0) <= 0
+            if (full && !hasIronOrBetterSword()
                     && !ensureItem(Items.IRON_SWORD, 1, depth + 1, visiting)) {
                 return false;
             }
+            if (full) {
+                // Crafting into the inventory is not the Goal. A real player equips the loadout,
+                // and the final predicate verifies the server-authoritative armor slots.
+                addStep(GoalStep.equipLoadout());
+            }
             return true;
+        }
+
+        private boolean hasIronOrBetterArmor(Item ironPiece) {
+            if (ironPiece == Items.IRON_HELMET) {
+                return hasAny(Items.IRON_HELMET, Items.DIAMOND_HELMET, Items.NETHERITE_HELMET);
+            }
+            if (ironPiece == Items.IRON_CHESTPLATE) {
+                return hasAny(Items.IRON_CHESTPLATE, Items.DIAMOND_CHESTPLATE, Items.NETHERITE_CHESTPLATE);
+            }
+            if (ironPiece == Items.IRON_LEGGINGS) {
+                return hasAny(Items.IRON_LEGGINGS, Items.DIAMOND_LEGGINGS, Items.NETHERITE_LEGGINGS);
+            }
+            if (ironPiece == Items.IRON_BOOTS) {
+                return hasAny(Items.IRON_BOOTS, Items.DIAMOND_BOOTS, Items.NETHERITE_BOOTS);
+            }
+            return counts.getOrDefault(ironPiece, 0) > 0;
+        }
+
+        private boolean hasIronOrBetterSword() {
+            return hasAny(Items.IRON_SWORD, Items.DIAMOND_SWORD, Items.NETHERITE_SWORD);
+        }
+
+        private boolean hasAny(Item... items) {
+            for (Item item : items) {
+                if (counts.getOrDefault(item, 0) > 0) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         // 算一件成品(甲/剑)配方里需要多少铁锭(用 RecipeRegistry,不硬编码——armorOf=单一 iron_ingot 配料,
