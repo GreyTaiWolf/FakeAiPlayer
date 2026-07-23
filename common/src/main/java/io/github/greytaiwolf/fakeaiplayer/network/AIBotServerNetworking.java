@@ -539,9 +539,9 @@ public final class AIBotServerNetworking {
         }
     }
 
-    private static boolean rejectRecoveryControl(ServerPlayer player,
-                                                 AIPlayerEntity bot,
-                                                 String operation) {
+    private boolean rejectRecoveryControl(ServerPlayer player,
+                                          AIPlayerEntity bot,
+                                          String operation) {
         if (!TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)) {
             return false;
         }
