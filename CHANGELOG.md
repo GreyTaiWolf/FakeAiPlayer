@@ -49,6 +49,7 @@
 - 第二轮集成 [CI #145](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29986196354) 已确认 Java 21、JUnit、Fabric 55/55、NeoForge 31/31、双端生产 JAR 与严格生存黄金链通过，并进一步阻止了权威重规划后的 V3 游标/尝试恢复缺陷；最终修复仍待新的提交绑定 CI 验证。
 - [CI #146](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29992158438) 在 Java 21 编译阶段发现并阻止了面板恢复拒绝辅助方法的实例/静态归属错误。
 - 修复提交 [`f4289ad`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/f4289add63010619891b284c84acad493d2d0409) 的 [CI #149](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29992705897) 已通过 Java 21、95 个 JUnit 类/480 项测试、Fabric 55/55、NeoForge 31/31、双端生产构建与 JAR 隔离、双 JVM V3 恢复、严格生存黄金链和封装证据验证。
+- [PR #14](https://github.com/GreyTaiWolf/FakeAiPlayer/pull/14) 已用中文合并说明进入 `main`；主线合并提交 [`6437764`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/643776427eef46336716daaaae656e2f1c01f0d2) 的 [CI #152](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29993980028) 再次通过同一完整矩阵。
 
 #### 已知限制
 
