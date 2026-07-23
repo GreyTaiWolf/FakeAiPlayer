@@ -47,7 +47,8 @@
 - 完整 P3 代码提交：[`1965137`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/19651378d049099d8ee7d7bf5aecda3e68529d0a)。
 - 首轮集成 [CI #143](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29985224408) 成功暴露并阻止了严格生存黄金链的掉落拾取缺陷。
 - 第二轮集成 [CI #145](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29986196354) 已确认 Java 21、JUnit、Fabric 55/55、NeoForge 31/31、双端生产 JAR 与严格生存黄金链通过，并进一步阻止了权威重规划后的 V3 游标/尝试恢复缺陷；最终修复仍待新的提交绑定 CI 验证。
-- Java 21 JUnit、Fabric 55/55 GameTest、NeoForge 31/31 GameTest、双端生产构建、JAR 隔离、双 JVM 恢复与 strict-survival evidence：等待本次 `main` 集成 PR 的提交绑定 CI。
+- [CI #146](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29992158438) 在 Java 21 编译阶段发现并阻止了面板恢复拒绝辅助方法的实例/静态归属错误。
+- 修复提交 [`f4289ad`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/f4289add63010619891b284c84acad493d2d0409) 的 [CI #149](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29992705897) 已通过 Java 21、95 个 JUnit 类/480 项测试、Fabric 55/55、NeoForge 31/31、双端生产构建与 JAR 隔离、双 JVM V3 恢复、严格生存黄金链和封装证据验证。
 
 #### 已知限制
 
