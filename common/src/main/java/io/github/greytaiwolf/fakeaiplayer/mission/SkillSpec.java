@@ -17,8 +17,25 @@ public record SkillSpec(
         List<String> preconditions,
         List<String> successPredicates,
         RetryPolicy retryPolicy,
-        MissionPolicy.MutationScope mutationScope
+        MissionPolicy.MutationScope mutationScope,
+        MissionPolicy.RiskLevel requiredRisk
 ) {
+    /**
+     * Backwards-compatible constructor for contracts written before per-Skill risk was explicit.
+     * Existing capabilities default to the safest execution class.
+     */
+    public SkillSpec(String invocationId,
+                     String id,
+                     int version,
+                     Map<String, String> parameters,
+                     List<String> preconditions,
+                     List<String> successPredicates,
+                     RetryPolicy retryPolicy,
+                     MissionPolicy.MutationScope mutationScope) {
+        this(invocationId, id, version, parameters, preconditions, successPredicates,
+                retryPolicy, mutationScope, MissionPolicy.RiskLevel.CONSERVATIVE);
+    }
+
     /** Backwards-compatible constructor for callers that model a single invocation per capability. */
     public SkillSpec(String id,
                      int version,
@@ -27,7 +44,8 @@ public record SkillSpec(
                      List<String> successPredicates,
                      RetryPolicy retryPolicy,
                      MissionPolicy.MutationScope mutationScope) {
-        this(id, id, version, parameters, preconditions, successPredicates, retryPolicy, mutationScope);
+        this(id, id, version, parameters, preconditions, successPredicates, retryPolicy,
+                mutationScope, MissionPolicy.RiskLevel.CONSERVATIVE);
     }
 
     public SkillSpec {
@@ -48,6 +66,8 @@ public record SkillSpec(
         }
         retryPolicy = retryPolicy == null ? RetryPolicy.standard() : retryPolicy;
         mutationScope = mutationScope == null ? MissionPolicy.MutationScope.SURVIVAL : mutationScope;
+        requiredRisk = requiredRisk == null
+                ? MissionPolicy.RiskLevel.CONSERVATIVE : requiredRisk;
     }
 
     public record RetryPolicy(

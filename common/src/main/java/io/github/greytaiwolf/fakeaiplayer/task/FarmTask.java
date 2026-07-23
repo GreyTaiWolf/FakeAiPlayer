@@ -14,6 +14,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.Container;
+import net.minecraft.world.item.HoeItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
@@ -75,6 +76,53 @@ public final class FarmTask extends AbstractTask {
         this.harvestOnly = harvestOnly;
         this.produceItem = produceItem;
         this.targetHarvest = Math.max(0, targetHarvest);
+    }
+
+    /**
+     * Shared Mission admission predicate for the quota FarmTask. Mature crops are immediately
+     * harvestable without seeds or a hoe. Planting needs a seed and either existing farmland or a
+     * hoe plus tillable ground.
+     */
+    public static boolean hasHarvestOrPlantOpportunity(AIPlayerEntity bot,
+                                                       BlockPos areaCenter,
+                                                       int radius,
+                                                       Item seed,
+                                                       Block crop) {
+        if (bot == null || areaCenter == null || seed == null || crop == null) {
+            return false;
+        }
+        boolean hasSeeds = InventoryAction.countItem(bot, seed) > 0;
+        boolean hasHoe = bot.getInventory().items.stream()
+                .anyMatch(stack -> !stack.isEmpty() && stack.getItem() instanceof HoeItem);
+        ServerLevel world = bot.serverLevel();
+        int boundedRadius = Math.max(1, radius);
+        return BlockPos.betweenClosedStream(
+                        areaCenter.offset(-boundedRadius, -1, -boundedRadius),
+                        areaCenter.offset(boundedRadius, 1, boundedRadius))
+                .filter(ground -> io.github.greytaiwolf.fakeaiplayer.mode.ObservableWorldQuery
+                        .canObserveBlock(bot, ground)
+                        || io.github.greytaiwolf.fakeaiplayer.mode.ObservableWorldQuery
+                        .canObserveBlock(bot, ground.above()))
+                .anyMatch(ground -> {
+                    BlockPos cropPos = ground.above();
+                    boolean matureCrop = world.getBlockState(cropPos).is(crop)
+                            && FarmAction.isMature(world, cropPos);
+                    boolean emptyCropSpace = world.getBlockState(cropPos).isAir();
+                    boolean farmland = world.getBlockState(ground).is(Blocks.FARMLAND);
+                    boolean tillable = FarmAction.isTillable(world.getBlockState(ground));
+                    return harvestOrPlantOpportunity(
+                            matureCrop, hasSeeds, emptyCropSpace, farmland, hasHoe, tillable);
+                });
+    }
+
+    static boolean harvestOrPlantOpportunity(boolean matureCrop,
+                                             boolean hasSeeds,
+                                             boolean emptyCropSpace,
+                                             boolean farmland,
+                                             boolean hasHoe,
+                                             boolean tillable) {
+        return matureCrop
+                || hasSeeds && emptyCropSpace && (farmland || hasHoe && tillable);
     }
 
     @Override

@@ -159,7 +159,8 @@ stop_server
 {
   printf 'result\tPASS\n'
   printf 'profile\tstrict_survival\n'
-  printf 'checkpoint\tnon_default_exact_restore\n'
+  printf 'checkpoint\tv3_context_cursor_exact_restore\n'
+  printf 'recovery_budget\tnonzero_exact_restore\n'
   printf 'stale_lease\treopened\n'
   printf 'resume\tcompleted_with_postcondition\n'
   printf 'phase1\t%s\n' "$phase1"

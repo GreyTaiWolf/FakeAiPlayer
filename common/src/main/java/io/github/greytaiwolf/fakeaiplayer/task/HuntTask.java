@@ -42,6 +42,11 @@ public final class HuntTask extends AbstractTask {
     private static final Set<Item> RAW_MEATS = Set.of(
             Items.BEEF, Items.PORKCHOP, Items.MUTTON, Items.CHICKEN, Items.RABBIT);
 
+    /** Shared with Mission postcondition verification so Task accounting cannot drift. */
+    public static Set<Item> rawMeatDrops() {
+        return RAW_MEATS;
+    }
+
     private final int targetMeat;
     private final int maxElapsed; // 硬超时按目标量放大(每块肉约多给 24s),打大量肉不被固定 3 分钟掐断
     private int meatBaseline;

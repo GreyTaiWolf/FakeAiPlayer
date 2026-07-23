@@ -46,6 +46,23 @@ class MissionLifecycleTest {
     }
 
     @Test
+    void plannedMissionMayRecoverFromAnAdmissionGateBeforeAChildStarts() {
+        assertTrue(MissionLifecycle.canTransition(
+                MissionState.PLANNED, MissionState.RECOVERING));
+        assertEquals(MissionState.RECOVERING,
+                MissionLifecycle.transition(
+                        MissionState.PLANNED, MissionState.RECOVERING));
+    }
+
+    @Test
+    void restoredPlannedMissionMayEnterRecoveryBeforeStartingNewWork() {
+        assertTrue(MissionLifecycle.canTransition(
+                MissionState.PLANNED, MissionState.RECOVERING));
+        assertEquals(MissionState.RECOVERING,
+                MissionLifecycle.transition(MissionState.PLANNED, MissionState.RECOVERING));
+    }
+
+    @Test
     void terminalStatesCannotBeResurrectedButIdempotentTransitionIsAllowed() {
         for (MissionState terminal : List.of(
                 MissionState.SUCCEEDED,

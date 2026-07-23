@@ -10,6 +10,30 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ExecutionStackTest {
     @Test
+    void originUpgradePreservesFrameIdentityAndLifoOrder() {
+        ExecutionStack<String> stack = new ExecutionStack<>();
+        UUID missionId = UUID.randomUUID();
+        ExecutionStack.Frame<String> mission = stack.push(
+                "mission", TaskOrigin.mission(missionId, "step"));
+        ExecutionStack.Frame<String> safety = stack.push(
+                "safety", TaskOrigin.safety("lava"));
+
+        int changed = stack.replaceOrigins(
+                origin -> missionId.equals(origin.missionId()),
+                origin -> TaskOrigin.mission(
+                        missionId, origin.reason(),
+                        io.github.greytaiwolf.fakeaiplayer.mission.GoalSpec.Source.PLAYER_COMMAND,
+                        95));
+
+        assertEquals(1, changed);
+        assertEquals(safety.frameId(), stack.pop().orElseThrow().frameId());
+        ExecutionStack.Frame<String> upgraded = stack.pop().orElseThrow();
+        assertEquals(mission.frameId(), upgraded.frameId());
+        assertTrue(upgraded.origin().playerMission());
+        assertEquals(95, upgraded.origin().goalPriority());
+    }
+
+    @Test
     void nestedSafetyFramesResumeInLifoOrder() {
         ExecutionStack<String> stack = new ExecutionStack<>();
         stack.push("mission", TaskOrigin.mission(UUID.randomUUID(), "mine"));

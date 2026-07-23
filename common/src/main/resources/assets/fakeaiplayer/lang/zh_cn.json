@@ -113,6 +113,7 @@
   "goal.fakeaiplayer.evidence": "验收证据: %s / %s",
   "goal.fakeaiplayer.result.completed": "已验收完成",
   "goal.fakeaiplayer.result.partial": "部分完成",
+  "goal.fakeaiplayer.result.blocked": "受阻，等待条件变化",
   "goal.fakeaiplayer.result.failed": "验收失败",
   "goal.fakeaiplayer.result.cancelled": "已取消",
   "settings.fakeaiplayer.target": "目标: %s",

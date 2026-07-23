@@ -23,6 +23,15 @@ public interface Task {
 
     void cancel(AIPlayerEntity bot, String reason);
 
+    /**
+     * Retires a Task that has already lost ownership of the bot's shared controls.
+     *
+     * <p>This callback may release only Task-private state. It must not stop or replace movement,
+     * mining, navigation, inventory, or any other bot-global action because a safety/reflex Task
+     * can own those controls while the detached frame is being cancelled.</p>
+     */
+    void cancelDetached(AIPlayerEntity bot, String reason);
+
     double progress();
 
     int elapsedTicks();
