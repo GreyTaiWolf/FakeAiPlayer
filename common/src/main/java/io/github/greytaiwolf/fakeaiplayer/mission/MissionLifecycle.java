@@ -30,7 +30,8 @@ public final class MissionLifecycle {
         result.put(MissionState.VALIDATED, EnumSet.of(
                 MissionState.PLANNED, MissionState.BLOCKED, MissionState.FAILED, MissionState.CANCELLED));
         result.put(MissionState.PLANNED, EnumSet.of(
-                MissionState.RUNNING, MissionState.SUSPENDED, MissionState.VERIFYING,
+                MissionState.RUNNING, MissionState.SUSPENDED, MissionState.RECOVERING,
+                MissionState.VERIFYING,
                 MissionState.BLOCKED, MissionState.FAILED, MissionState.CANCELLED));
         result.put(MissionState.RUNNING, EnumSet.of(
                 MissionState.SUSPENDED, MissionState.RECOVERING, MissionState.VERIFYING,

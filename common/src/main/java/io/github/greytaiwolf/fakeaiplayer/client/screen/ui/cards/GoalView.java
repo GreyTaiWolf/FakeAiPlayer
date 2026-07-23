@@ -33,6 +33,7 @@ public final class GoalView extends PanelCard {
                         Theme.tr("goal.fakeaiplayer.result." + snapshot.goalResultStatus().toLowerCase(java.util.Locale.ROOT)),
                         bx, by, "COMPLETED".equals(snapshot.goalResultStatus()) ? Theme.OK
                                 : "PARTIAL".equals(snapshot.goalResultStatus()) ? Theme.SYS
+                                : "BLOCKED".equals(snapshot.goalResultStatus()) ? Theme.SYS
                                 : "FAILED".equals(snapshot.goalResultStatus()) ? Theme.HP : Theme.TEXT_DIM);
                 context.drawString(renderer, trim(renderer, snapshot.goalResultSummary(), bw), bx, by + 16, Theme.TEXT);
                 context.drawString(renderer,

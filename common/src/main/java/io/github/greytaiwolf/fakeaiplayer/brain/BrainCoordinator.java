@@ -679,7 +679,11 @@ public final class BrainCoordinator {
                                     + "/" + result.evaluation().required()
                                     + ", reason=" + result.reason()
                                     + ", unmet=" + result.evaluation().unmet()
-                                    + ". Only COMPLETED may be described as complete; PARTIAL, FAILED, or CANCELLED must be reported truthfully."));
+                                    + result.terminalSkillOutcome().map(outcome ->
+                                            ", skill_outcome=" + outcome.status()
+                                            + ", failure_kind=" + outcome.failureKind()
+                                            + ", skill_evidence=" + outcome.evidence()).orElse("")
+                                    + ". Only COMPLETED may be described as complete; BLOCKED, PARTIAL, FAILED, or CANCELLED must be reported truthfully."));
                     BotLog.comm(bot, "goal_result_injected",
                             "sequence", result.sequence(),
                             "status", result.status(),

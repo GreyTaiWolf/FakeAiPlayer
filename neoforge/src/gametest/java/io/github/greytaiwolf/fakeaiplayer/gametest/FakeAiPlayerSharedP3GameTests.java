@@ -11,6 +11,7 @@ import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 @PrefixGameTestTemplate(false)
 public final class FakeAiPlayerSharedP3GameTests {
     private static final String ARENA = "p0_arena";
+    private static final String GOLDEN_ARENA = "p3_mission_arena";
 
     private FakeAiPlayerSharedP3GameTests() {
     }
@@ -18,6 +19,11 @@ public final class FakeAiPlayerSharedP3GameTests {
     @GameTest(template = ARENA, batch = "fakeaiplayer_shared_p3_resume", timeoutTicks = 80)
     public static void reflexResumesExactMission(GameTestHelper helper) {
         SharedP3MissionGameTestScenarios.reflexResumesExactMission(helper);
+    }
+
+    @GameTest(template = ARENA, batch = "fakeaiplayer_shared_p3_failed_start", timeoutTicks = 80)
+    public static void failedReflexStartDoesNotLatchMissionInterruption(GameTestHelper helper) {
+        SharedP3MissionGameTestScenarios.failedReflexStartDoesNotLatchMissionInterruption(helper);
     }
 
     @GameTest(template = ARENA, batch = "fakeaiplayer_shared_p3_equip", timeoutTicks = 80)
@@ -33,5 +39,10 @@ public final class FakeAiPlayerSharedP3GameTests {
     @GameTest(template = ARENA, batch = "fakeaiplayer_shared_p3_tick_failure", timeoutTicks = 80)
     public static void taskTickFailureIsContained(GameTestHelper helper) {
         SharedP3MissionGameTestScenarios.taskTickFailureIsContained(helper);
+    }
+
+    @GameTest(template = GOLDEN_ARENA, batch = "fakeaiplayer_shared_p3_golden_chain", timeoutTicks = 6000)
+    public static void goldenSurvivalChainStartsFromEmptyInventory(GameTestHelper helper) {
+        SharedP3MissionGameTestScenarios.goldenSurvivalChainStartsFromEmptyInventory(helper);
     }
 }

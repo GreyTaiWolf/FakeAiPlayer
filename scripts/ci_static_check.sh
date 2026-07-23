@@ -9,6 +9,22 @@ fail() {
   exit 1
 }
 
+# Production artifacts must never contain loader test entrypoints or the generated GameTest
+# arenas. Keep this expression centralized so the ordinary (pre-build) static pass can exercise
+# the same guard that the post-build jar inspection uses.
+readonly verification_jar_leak_regex='io/github/greytaiwolf/fakeaiplayer/(gametest/|command/AIBot(Test|Verify)Subcommand)|data/fakeaiplayer/structure/(p0_arena|p3_mission_arena)\.nbt'
+for generated_test_asset in \
+    'data/fakeaiplayer/structure/p0_arena.nbt' \
+    'data/fakeaiplayer/structure/p3_mission_arena.nbt'; do
+  if ! grep -Eq "$verification_jar_leak_regex" <<< "$generated_test_asset"; then
+    fail "production-jar leak guard misses generated test asset: $generated_test_asset"
+  fi
+done
+if grep -Eq "$verification_jar_leak_regex" \
+    <<< 'data/fakeaiplayer/structure/production_structure.nbt'; then
+  fail 'production-jar leak guard overmatches non-test structures'
+fi
+
 required_files=(
   build.gradle
   common/build.gradle
@@ -44,6 +60,7 @@ required_files=(
   common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedGameTestFixture.java
   common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedP0P1GameTestScenarios.java
   common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedP2NavigationGameTestScenarios.java
+  common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedP3MissionGameTestScenarios.java
   common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NavGoal.java
   common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NavigationHandle.java
   common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/MultiGoalAStarPathfinder.java
@@ -53,11 +70,13 @@ required_files=(
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerDeterministicGameTests.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP0P1GameTests.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP2GameTests.java
+  fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP3GameTests.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerHarnessTestMod.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotTestSubcommand.java
   fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotVerifySubcommand.java
   neoforge/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP0P1GameTests.java
   neoforge/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP2GameTests.java
+  neoforge/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP3GameTests.java
   scripts/evidence_run.sh
   scripts/evidence_batch.sh
   scripts/evidence_validate.sh
@@ -247,6 +266,162 @@ for shared_wrapper in "$fabric_p2_tests" "$neoforge_p2_tests"; do
 done
 grep -Fq 'frontiersStarted() == 1' "$p2_scenarios" \
   || fail 'P2 single-search scenario does not assert a request-owned frontier count'
+
+p3_scenarios=common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedP3MissionGameTestScenarios.java
+fabric_p3_tests=fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP3GameTests.java
+neoforge_p3_tests=neoforge/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP3GameTests.java
+grep -Fq '"io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerSharedP3GameTests"' \
+    fabric/src/gametest/resources/fabric.mod.json \
+  || fail 'Fabric P3 GameTest entrypoint is not registered'
+grep -Fq 'implements FabricGameTest' "$fabric_p3_tests" \
+  || fail 'Fabric P3 wrapper is not registered through FabricGameTest'
+grep -Fq '@GameTestHolder(FakeAiPlayer.MOD_ID)' "$neoforge_p3_tests" \
+  || fail 'NeoForge P3 scenarios are missing @GameTestHolder with the production namespace'
+grep -Fq '@PrefixGameTestTemplate(false)' "$neoforge_p3_tests" \
+  || fail 'NeoForge P3 template ids would be rewritten by the holder prefix'
+fabric_p3_contracts="$(grep -oE 'batch = "[^"]+", timeoutTicks = [0-9]+' \
+    "$fabric_p3_tests" | sort)"
+neoforge_p3_contracts="$(grep -oE 'batch = "[^"]+", timeoutTicks = [0-9]+' \
+    "$neoforge_p3_tests" | sort)"
+[[ -n "$fabric_p3_contracts" && "$fabric_p3_contracts" == "$neoforge_p3_contracts" ]] \
+  || fail 'Fabric and NeoForge P3 GameTest ids/timeouts differ'
+fabric_p3_scenarios="$(grep -oE 'SharedP3MissionGameTestScenarios\.[A-Za-z0-9_]+' \
+    "$fabric_p3_tests" | sort)"
+neoforge_p3_scenarios="$(grep -oE 'SharedP3MissionGameTestScenarios\.[A-Za-z0-9_]+' \
+    "$neoforge_p3_tests" | sort)"
+[[ "$fabric_p3_scenarios" == "$neoforge_p3_scenarios" ]] \
+  || fail 'Fabric and NeoForge P3 wrappers do not delegate to the same shared scenarios'
+shared_p3_scenarios="$(grep -oE 'public static void [A-Za-z0-9_]+' \
+    "$p3_scenarios" | awk '{print $4}' | sort)"
+fabric_p3_delegates="$(printf '%s\n' "$fabric_p3_scenarios" \
+    | sed 's/^SharedP3MissionGameTestScenarios\.//' | sort)"
+[[ "$shared_p3_scenarios" == "$fabric_p3_delegates" ]] \
+  || fail 'A shared P3 scenario is missing or duplicated in a loader wrapper'
+for shared_wrapper in "$fabric_p3_tests" "$neoforge_p3_tests"; do
+  duplicate_batch="$(grep -oE 'batch = "[^"]+"' "$shared_wrapper" \
+      | sort | uniq -d | head -1)"
+  [[ -z "$duplicate_batch" ]] \
+    || fail "$shared_wrapper contains duplicate P3 batch id $duplicate_batch"
+done
+grep -Fq 'batch = "fakeaiplayer_shared_p3_golden_chain", timeoutTicks = 6000' \
+    "$fabric_p3_tests" \
+  || fail 'P3 does not run the zero-inventory survival-to-iron golden chain on both loaders'
+grep -Fq "[name: 'p3_mission_arena', size: [21, 21, 21]]" common/build.gradle \
+  || fail 'P3 golden chain does not have a bounded tall GameTest template'
+grep -Fq 'template = GOLDEN_ARENA, batch = "fakeaiplayer_shared_p3_golden_chain"' \
+    "$fabric_p3_tests" \
+  || fail 'P3 golden chain is not registered against its dedicated tall template'
+grep -Fq 'template = GOLDEN_ARENA, batch = "fakeaiplayer_shared_p3_golden_chain"' \
+    "$neoforge_p3_tests" \
+  || fail 'NeoForge P3 golden chain is not registered against its dedicated tall template'
+
+restart_harness=fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/AIBotRestartHarnessCommand.java
+for invariant in \
+    'MissionCheckpointCodec.RUNTIME_BUDGET_V3' \
+    'CraftTask.class::isInstance' \
+    'recoveriesConsumed() < 1' \
+    'recoveryBudgetExact' \
+    'runtimeStateExact' \
+    'checkpointMetadataExact' \
+    'recovery().equals' \
+    'progress().equals' \
+    'contextFingerprint().equals' \
+    'replanAfterInterrupt()' \
+    'cursor().equals' \
+    'policyExact' \
+    'planRevisionValid' \
+    'planProvenanceValid' \
+    'bound_plan_fingerprint' \
+    'bound_intent_fingerprint' \
+    'bound_context_fingerprint' \
+    'mission_spec_binding' \
+    'queue_spec_binding'; do
+  grep -Fq "$invariant" "$restart_harness" \
+    || fail "two-JVM restart harness is missing nonzero recovery invariant: $invariant"
+done
+for legacy_runtime_key in checkpoint_runtime_budget_v1 checkpoint_runtime_budget_v2; do
+  if grep -Fq "$legacy_runtime_key" "$restart_harness"; then
+    fail "two-JVM restart harness still persists read-only payload $legacy_runtime_key"
+  fi
+done
+grep -Fq 'checkpoint_runtime_budget_v3' "$restart_harness" \
+  || fail 'two-JVM restart harness does not preserve the V3 runtime payload'
+
+checkpoint_codec=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/persist/MissionCheckpointCodec.java
+for invariant in \
+    'CURRENT_VERSION = 3' \
+    'RUNTIME_BUDGET_V1 = "runtime_budget_v1"' \
+    'RUNTIME_BUDGET_V2 = "runtime_budget_v2"' \
+    'RUNTIME_BUDGET_V3 = "runtime_budget_v3"' \
+    'multiple_runtime_budget_payloads' \
+    'mission_checkpoint_plan_binding_missing' \
+    'runtime_intent_fingerprint_invalid' \
+    'runtime_context_fingerprint_invalid' \
+    'V3_PAYLOAD_PARTS = 20' \
+    'CursorCheckpoint cursor' \
+    'boolean replanAfterInterrupt' \
+    'public boolean bound()' \
+    'public boolean current()'; do
+  grep -Fq "$invariant" "$checkpoint_codec" \
+    || fail "Mission checkpoint V3 contract is missing invariant: $invariant"
+done
+cursor_codec=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/persist/CursorCheckpointCodec.java
+for invariant in \
+    'CursorCheckpoint.CURRENT_VERSION' \
+    'cursor_checkpoint_checksum_mismatch' \
+    'checkpointReached' \
+    'activationCounts'; do
+  grep -Fq "$invariant" "$cursor_codec" \
+    || fail "Cursor checkpoint contract is missing invariant: $invariant"
+done
+goal_executor=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/goal/GoalExecutor.java
+for invariant in \
+    'mission_intent_binding_mismatch' \
+    'MissionPlan.intentFingerprint(incomingGoalSpec)' \
+    'incrementMissionTicks(plan.elapsedMissionTicks)' \
+    'mission_checkpoint_downgrade_detected' \
+    'spec.bindingValid()' \
+    'spec.legacyUnboundShape()' \
+    'mission_plan_revision_exhausted' \
+    'active.planCursor.checkpoint()' \
+    'contextFingerprint(active)' \
+    'runtime.current() ? runtime.cursor() : null'; do
+  grep -Fq "$invariant" "$goal_executor" \
+    || fail "GoalExecutor P3 restore boundary is missing invariant: $invariant"
+done
+for invariant in \
+    'plan.planCursor.tryCompleteSkill(' \
+    'if (!completion.accepted())' \
+    'reconcileCursorActivation(server, bot, plan, advancedCursor' \
+    'verifyStableCheckpointBoundary(active)' \
+    'if (active.replanAfterInterrupt)' \
+    'TaskManager.INSTANCE.hasNavigationSafetyLease(bot)' \
+    'boolean restoredInterruptAwaitingReplan'; do
+  grep -Fq "$invariant" "$goal_executor" \
+    || fail "GoalExecutor P3 runtime bridge is missing invariant: $invariant"
+done
+task_manager=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/task/TaskManager.java
+preview_body="$(sed -n '/private MissionArbiter.Decision previewDecision(/,/private TaskOrigin currentOwnerOrigin(/p' \
+    "$task_manager")"
+grep -Fq 'missionDimensionFailure(' <<< "$preview_body" \
+  || fail 'Task assignment preview does not reject a bound Mission before start in the wrong dimension'
+dimension_order="$(grep -n -m1 'missionDimensionFailure(' <<< "$preview_body" | cut -d: -f1)"
+navigation_order="$(grep -n -m1 'navigationSafetyLeases.get' <<< "$preview_body" | cut -d: -f1)"
+[[ -n "$dimension_order" && -n "$navigation_order" && "$dimension_order" -lt "$navigation_order" ]] \
+  || fail 'Mission dimension admission must run before other Task assignment gates'
+grep -Fq 'SmeltTask.hasUsableFurnaceSource(session.runtimeBot())' \
+    common/src/main/java/io/github/greytaiwolf/fakeaiplayer/goal/LegacySkillVerifier.java \
+  || fail 'Mission furnace preflight is narrower than the SmeltTask discovery envelope'
+tick_body="$(sed -n '/public boolean tickBot(/,/public boolean hasActivePlan(/p' "$goal_executor")"
+budget_order="$(grep -n -m1 'missionTimeBudgetExhausted(' <<< "$tick_body" | cut -d: -f1)"
+reconcile_order="$(grep -n -m1 'reconcileCursorActivation(server, bot, plan, advancedCursor' \
+    <<< "$tick_body" | cut -d: -f1)"
+[[ -n "$budget_order" && -n "$reconcile_order" && "$budget_order" -lt "$reconcile_order" ]] \
+  || fail 'Mission time budget must fail before a Timeout fallback can start'
+grep -Fq "printf 'recovery_budget\\tnonzero_exact_restore\\n'" \
+    scripts/persistence_restart_test.sh \
+  || fail 'two-JVM restart evidence does not report nonzero recovery-budget restoration'
+
 grep -Fq 'record Exact' common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NavGoal.java \
   || fail 'P2 NavGoal.Exact contract is missing'
 grep -Fq 'record FollowRing' common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NavGoal.java \
@@ -631,14 +806,50 @@ if [[ "${CI_STATIC_CHECK_ARTIFACTS:-0}" == 1 ]]; then
     || fail 'artifact inspection found no Fabric jars'
   find neoforge/build/libs -maxdepth 1 -type f -name '*.jar' -print -quit | grep -q . \
     || fail 'artifact inspection found no NeoForge jars'
+
+  # The source checks above prove that both wrappers look equivalent. When GameTest results are
+  # present, also prove the loaders actually discovered and executed every P3 wrapper method. The
+  # Fabric API publishes stable normalized method names in its JUnit XML; NeoForge 1.21.3 publishes
+  # stable batch ids in latest.log. Keep this conditional so the documented jar-only inspection can
+  # still run without GameTests, while PR CI (which runs both loaders first) cannot pass on zero tests.
+  fabric_gametest_report=fabric/build/test-results/gametest/TEST-fakeaiplayer-gametest.xml
+  neoforge_gametest_log=neoforge/build/run/gameTest/logs/latest.log
+  if [[ -f "$fabric_gametest_report" || -f "$neoforge_gametest_log" ]]; then
+    [[ -f "$fabric_gametest_report" ]] \
+      || fail 'NeoForge GameTest evidence exists but the Fabric JUnit report is missing'
+    [[ -f "$neoforge_gametest_log" ]] \
+      || fail 'Fabric GameTest evidence exists but the NeoForge latest.log is missing'
+
+    expected_fabric_p3_tests="$(printf '%s\n' "$fabric_p3_delegates" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed 's#^#name="fakeaiplayersharedp3gametests.#; s#$#"#' \
+        | sort)"
+    executed_fabric_p3_tests="$(grep -oE \
+        'name="fakeaiplayersharedp3gametests\.[^"]+"' "$fabric_gametest_report" \
+        | sort || true)"
+    [[ -n "$expected_fabric_p3_tests" \
+        && "$executed_fabric_p3_tests" == "$expected_fabric_p3_tests" ]] \
+      || fail 'Fabric did not execute exactly the registered P3 GameTest methods'
+
+    expected_neoforge_p3_batches="$(grep -oE 'batch = "[^"]+"' "$neoforge_p3_tests" \
+        | sed -E 's/^batch = "([^"]+)"$/\1/' | sort)"
+    executed_neoforge_p3_batches="$(grep -oE \
+        "Running test batch 'fakeaiplayer_shared_p3_[a-z0-9_]+:[0-9]+' \\(1 tests\\)" \
+        "$neoforge_gametest_log" \
+        | sed -E "s/^Running test batch '([^']+):[0-9]+' \\(1 tests\\)$/\\1/" \
+        | sort || true)"
+    [[ -n "$expected_neoforge_p3_batches" \
+        && "$executed_neoforge_p3_batches" == "$expected_neoforge_p3_batches" ]] \
+      || fail 'NeoForge did not execute exactly one test for every registered P3 batch'
+  fi
+
   inspected=0
   while IFS= read -r -d '' jar_file; do
     inspected=1
     if ! jar_listing="$(jar tf "$jar_file")"; then
       fail "invalid or truncated jar: $jar_file"
     fi
-    if grep -Eq 'io/github/greytaiwolf/fakeaiplayer/(gametest/|command/AIBot(Test|Verify)Subcommand)|data/fakeaiplayer/structure/p0_arena\.nbt' \
-        <<< "$jar_listing"; then
+    if grep -Eq "$verification_jar_leak_regex" <<< "$jar_listing"; then
       fail "verification harness or test structure leaked into jar: $jar_file"
     fi
   done < <(find common/build/libs fabric/build/libs neoforge/build/libs \

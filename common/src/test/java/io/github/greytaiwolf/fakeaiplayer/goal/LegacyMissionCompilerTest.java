@@ -2,6 +2,7 @@ package io.github.greytaiwolf.fakeaiplayer.goal;
 
 import io.github.greytaiwolf.fakeaiplayer.mission.GoalSpec;
 import io.github.greytaiwolf.fakeaiplayer.mission.MissionPolicy;
+import io.github.greytaiwolf.fakeaiplayer.mission.MissionPlan;
 import io.github.greytaiwolf.fakeaiplayer.mission.PlanNode;
 import java.util.Collections;
 import java.util.List;
@@ -100,6 +101,30 @@ class LegacyMissionCompilerTest {
     }
 
     @Test
+    void trustedRestoreKeepsTheExactPersistedPolicyInTheExecutableFingerprint() {
+        MissionPolicy restored = new MissionPolicy(
+                MissionPolicy.RiskLevel.BALANCED,
+                MissionPolicy.MutationScope.SURVIVAL,
+                9_001,
+                5,
+                MissionPolicy.InterruptionPolicy.REPLAN_AFTER_SAFETY);
+        UUID missionId = UUID.fromString("00000000-0000-0000-0000-000000000128");
+        Goal goal = new Goal.HaveItem(Items.STICK, 4);
+        List<GoalStep> steps = List.of(GoalStep.craft(Items.STICK, 4));
+
+        LegacyMissionCompiler.CompiledMission canonical = LegacyMissionCompiler.compile(
+                missionId, 3, goal, GoalSpec.Source.PLAYER_COMMAND, 91,
+                "minecraft:overworld", steps);
+        LegacyMissionCompiler.CompiledMission resumed = LegacyMissionCompiler.compile(
+                missionId, 3, goal, GoalSpec.Source.PLAYER_COMMAND, 91,
+                "minecraft:overworld", restored, steps);
+
+        assertEquals(restored, resumed.plan().goal().policy());
+        assertNotEquals(canonical.plan().fingerprint(), resumed.plan().fingerprint());
+        assertEquals(canonical.skills(), resumed.skills());
+    }
+
+    @Test
     void movementAndMiningContractsMatchTheirActualWorldMutationAndDropAccounting() {
         List<LegacyMissionCompiler.ExecutableSkill> skills = LegacyMissionCompiler.compileSkills(List.of(
                 GoalStep.move(new BlockPos(2, 64, 3)),
@@ -114,6 +139,80 @@ class LegacyMissionCompilerTest {
                 skills.get(2).spec().successPredicates());
         assertEquals(List.of("inventory_drop_delta(minecraft:cobblestone)>=2"),
                 skills.get(3).spec().successPredicates());
+    }
+
+    @Test
+    void legacySkillsDeclareEnforceableStartGatesAndExplicitRisk() {
+        List<LegacyMissionCompiler.ExecutableSkill> skills = LegacyMissionCompiler.compileSkills(List.of(
+                GoalStep.gather(Items.OAK_LOG, 1),
+                GoalStep.hunt(1),
+                GoalStep.mineOre(Set.of(Blocks.IRON_ORE), 1),
+                GoalStep.descendToY(16),
+                GoalStep.makeObsidian(1),
+                GoalStep.smelt(Items.RAW_IRON, Items.IRON_INGOT, 1),
+                GoalStep.stockpile(Items.IRON_INGOT)));
+
+        assertEquals(List.of(
+                        MissionPolicy.RiskLevel.CONSERVATIVE,
+                        MissionPolicy.RiskLevel.BALANCED,
+                        MissionPolicy.RiskLevel.BALANCED,
+                        MissionPolicy.RiskLevel.BALANCED,
+                        MissionPolicy.RiskLevel.BALANCED,
+                        MissionPolicy.RiskLevel.CONSERVATIVE,
+                        MissionPolicy.RiskLevel.CONSERVATIVE),
+                skills.stream().map(skill -> skill.spec().requiredRisk()).toList());
+        assertEquals(MissionPolicy.MutationScope.SURVIVAL,
+                skills.get(1).spec().mutationScope());
+        assertEquals(List.of("world:bound_dimension", "inventory:pickup_space"),
+                skills.get(0).spec().preconditions());
+        assertEquals(List.of("world:bound_dimension", "safety:combat_budget"),
+                skills.get(1).spec().preconditions());
+        assertEquals(List.of(
+                        "world:bound_dimension", "inventory:usable_tool", "world:safe_work_face"),
+                skills.get(2).spec().preconditions());
+        assertEquals(List.of(
+                        "world:bound_dimension", "inventory:smelt_input", "inventory:fuel", "station:furnace"),
+                skills.get(5).spec().preconditions());
+        assertEquals(List.of("world:bound_dimension"),
+                skills.get(6).spec().preconditions());
+    }
+
+    @Test
+    void utilityCraftAndFarmContractsMatchWhatTheirTasksCanActuallyComplete() {
+        List<LegacyMissionCompiler.ExecutableSkill> skills = LegacyMissionCompiler.compileSkills(List.of(
+                GoalStep.craft(Items.CRAFTING_TABLE, 1),
+                GoalStep.craft(Items.FURNACE, 1),
+                GoalStep.craft(Items.CRAFTING_TABLE, 2),
+                GoalStep.craft(Items.STICK, 4),
+                GoalStep.farm(Blocks.WHEAT, Items.WHEAT_SEEDS, Items.WHEAT, 3)));
+
+        assertEquals(List.of("utility_available(minecraft:crafting_table)>=1"),
+                skills.get(0).spec().successPredicates());
+        assertEquals(List.of("utility_available(minecraft:furnace)>=1"),
+                skills.get(1).spec().successPredicates());
+        assertEquals(List.of("inventory(minecraft:crafting_table)>=2"),
+                skills.get(2).spec().successPredicates());
+        assertEquals(List.of("inventory(minecraft:stick)>=4"),
+                skills.get(3).spec().successPredicates());
+        assertEquals(List.of(
+                        "world:bound_dimension", "world:mature_crop_or_plantable_seed"),
+                skills.get(4).spec().preconditions());
+        assertEquals(List.of("inventory_crop_delta(minecraft:wheat)>=3"),
+                skills.get(4).spec().successPredicates());
+        assertEquals("minecraft:wheat_seeds",
+                skills.get(4).spec().parameters().get("seed"));
+        assertEquals("minecraft:wheat",
+                skills.get(4).spec().parameters().get("produce"));
+
+        GoalSpec wheatSeed = LegacyMissionCompiler.goalSpec(
+                new Goal.HarvestCrop(Blocks.WHEAT, Items.WHEAT_SEEDS, Items.WHEAT, 3),
+                GoalSpec.Source.PLAYER_COMMAND, "minecraft:overworld");
+        GoalSpec tamperedSeed = LegacyMissionCompiler.goalSpec(
+                new Goal.HarvestCrop(Blocks.WHEAT, Items.BEETROOT_SEEDS, Items.WHEAT, 3),
+                GoalSpec.Source.PLAYER_COMMAND, "minecraft:overworld");
+        assertEquals("minecraft:wheat_seeds", wheatSeed.attributes().get("seed"));
+        assertNotEquals(MissionPlan.intentFingerprint(wheatSeed),
+                MissionPlan.intentFingerprint(tamperedSeed));
     }
 
     @Test
@@ -137,6 +236,8 @@ class LegacyMissionCompilerTest {
         assertEquals("minecraft:overworld", attributes.get("dimension"));
         assertEquals(digest, attributes.get("blueprint_digest"));
         assertEquals("minecraft:overworld", compiled.plan().goal().dimension());
+        assertEquals(MissionPolicy.RiskLevel.BALANCED,
+                compiled.plan().goal().policy().riskLevel());
 
         var parameters = compiled.skills().get(0).spec().parameters();
         assertEquals("10", parameters.get("anchor_x"));
@@ -146,6 +247,14 @@ class LegacyMissionCompilerTest {
         assertEquals(digest, parameters.get("blueprint_digest"));
         assertEquals(MissionPolicy.MutationScope.CONFIRMED_AREA,
                 compiled.skills().get(0).spec().mutationScope());
+        assertEquals(MissionPolicy.RiskLevel.CONSERVATIVE,
+                compiled.skills().get(0).spec().requiredRisk());
+        assertEquals(List.of(
+                        "world:bound_dimension",
+                        "human:confirmed_blueprint",
+                        "inventory:building_materials",
+                        "world:confirmed_dimension_and_anchor"),
+                compiled.skills().get(0).spec().preconditions());
 
         assertEquals("build_goal_requires_confirmed_binding", assertThrows(IllegalArgumentException.class,
                 () -> LegacyMissionCompiler.compile(

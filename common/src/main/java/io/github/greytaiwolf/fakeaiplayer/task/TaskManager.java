@@ -4,6 +4,7 @@ import io.github.greytaiwolf.fakeaiplayer.brain.BotReporter;
 import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.manager.AIPlayerManager;
+import io.github.greytaiwolf.fakeaiplayer.mission.GoalSpec;
 import io.github.greytaiwolf.fakeaiplayer.mission.MissionArbiter;
 import io.github.greytaiwolf.fakeaiplayer.observe.BotProfiler;
 import io.github.greytaiwolf.fakeaiplayer.observe.TpsGuard;
@@ -18,6 +19,8 @@ import java.util.UUID;
 import java.util.ArrayList;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 public final class TaskManager {
     public static final TaskManager INSTANCE = new TaskManager();
@@ -40,28 +43,14 @@ public final class TaskManager {
             throw new IllegalArgumentException("task_assignment_incomplete");
         }
         UUID uuid = bot.getUUID();
-        if (navigationSafetyLeases.containsKey(uuid) && !origin.safety()) {
-            String reason = "navigation_safety_active:" + navigationSafetyLeases.get(uuid);
-            BotLog.task(bot, "task_assignment_deferred",
-                    "incoming", task.name(),
-                    "incoming_origin", origin.kind(),
-                    "active_origin", "navigation_safety",
-                    "decision", MissionArbiter.Action.DEFER,
-                    "reason", reason);
-            return new TaskAssignmentResult(false, MissionArbiter.Action.DEFER, reason);
-        }
-        TaskOrigin currentOrigin = activeOrigins.get(uuid);
-        if (currentOrigin == null) {
-            ExecutionStack<Task> stack = executionStacks.get(uuid);
-            currentOrigin = stack == null ? null : stack.peek().map(ExecutionStack.Frame::origin).orElse(null);
-        }
-        MissionArbiter.Decision decision = MissionArbiter.decide(
-                currentOrigin == null ? null : workClaim(currentOrigin),
-                workClaim(origin),
-                hasPersistentPause(bot));
+        // Resolve the stable identity before any incumbent work is paused. A malformed Task whose
+        // name accessor throws must fail without entering the assignment transaction at all.
+        String incomingTaskName = task.name();
+        TaskOrigin currentOrigin = currentOwnerOrigin(uuid);
+        MissionArbiter.Decision decision = previewDecision(bot, origin, currentOrigin);
         if (!decision.startsIncoming()) {
             BotLog.task(bot, "task_assignment_deferred",
-                    "incoming", task.name(),
+                    "incoming", incomingTaskName,
                     "incoming_origin", origin.kind(),
                     "active_origin", currentOrigin == null ? "none" : currentOrigin.kind(),
                     "decision", decision.action(),
@@ -71,12 +60,16 @@ public final class TaskManager {
         io.github.greytaiwolf.fakeaiplayer.coordination.IdleCoordinator.INSTANCE
                 .cancelAmbient(bot, "task_assigned");
         UUID preemptedFrameId = null;
+        UUID preemptedMissionId = null;
         if (decision.action() == MissionArbiter.Action.PREEMPT && active.containsKey(uuid)) {
-            pauseFor(bot, origin.safety() ? PauseOwner.SAFETY : PauseOwner.SYSTEM,
-                    "arbiter:" + decision.reason());
+            PauseOwner pauseOwner = origin.safety() ? PauseOwner.SAFETY : PauseOwner.SYSTEM;
+            pauseFor(bot, pauseOwner, "arbiter:" + decision.reason(), false);
             ExecutionStack<Task> stack = executionStacks.get(uuid);
             preemptedFrameId = stack == null
                     ? null : stack.peek().map(ExecutionStack.Frame::frameId).orElse(null);
+            if (pauseOwner.automaticResumeAllowed() && currentOrigin != null) {
+                preemptedMissionId = currentOrigin.missionId();
+            }
         } else if (decision.action() == MissionArbiter.Action.REPLACE) {
             io.github.greytaiwolf.fakeaiplayer.coordination.IdleCoordinator.INSTANCE
                     .cancelClaimedJob(bot, "replaced_by:" + origin.kind());
@@ -110,41 +103,106 @@ public final class TaskManager {
             } catch (RuntimeException cleanupFailure) {
                 startFailure.addSuppressed(cleanupFailure);
             }
-            TaskStatus failed = TaskStatus.from(task);
-            boolean restoredPreemptedWork = false;
-            try {
-                restoredPreemptedWork = rollbackFailedPreemption(bot, preemptedFrameId);
-            } catch (RuntimeException rollbackFailure) {
-                startFailure.addSuppressed(rollbackFailure);
-            }
+            UUID rollbackFrameId = preemptedFrameId;
+            FailedStartResolution resolution = settleFailedStart(
+                    () -> rollbackFailedPreemption(bot, rollbackFrameId),
+                    () -> TaskStatus.from(task),
+                    startFailure);
             // A failed interrupt must not overwrite the restored owner's RUNNING status or leak a
             // bot-global pending failure that the old Mission/Brain would consume as its own.
-            if (!restoredPreemptedWork) {
+            TaskStatus failed = resolution.failedStatus();
+            if (!resolution.restoredPreemptedWork() && failed != null) {
                 lastStatus.put(uuid, failed);
                 if (failed.state() == TaskState.FAILED) {
-                    recordFailure(bot, task.name(), failed.failureReason(), bot.getServer().getTickCount());
+                    recordFailure(bot, incomingTaskName, failed.failureReason(),
+                            bot.getServer().getTickCount());
                 }
                 BotReporter.INSTANCE.onStatus(bot.getServer(), bot, failed);
             }
-            BotLog.error(bot, "task_start_failed", startFailure, "name", task.name());
+            BotLog.error(bot, "task_start_failed", startFailure, "name", incomingTaskName);
             throw startFailure;
         }
-        TaskStatus status = TaskStatus.from(task);
+        publishMissionInterruption(bot, preemptedMissionId);
+        AssignmentDiagnostics diagnostics = captureCommittedStatus(task, incomingTaskName);
+        TaskStatus status = diagnostics.status();
         lastStatus.put(uuid, status);
-        BotReporter.INSTANCE.onAssigned(bot, status);
-        BotLog.task(bot, "task_assigned", "name", task.name(), "params", task.describe(),
-                "origin", origin.kind(), "origin_reason", origin.reason(),
-                "arbiter", decision.action(), "arbiter_reason", decision.reason());
+        RuntimeException diagnosticFailure = diagnostics.failure();
+        diagnosticFailure = isolatePostStartDiagnostic(diagnosticFailure,
+                () -> BotReporter.INSTANCE.onAssigned(bot, status));
+        diagnosticFailure = isolatePostStartDiagnostic(diagnosticFailure,
+                () -> BotLog.task(bot, "task_assigned",
+                        "name", incomingTaskName,
+                        "params", status.description(),
+                        "origin", origin.kind(),
+                        "origin_reason", origin.reason(),
+                        "arbiter", decision.action(),
+                        "arbiter_reason", decision.reason()));
+        if (diagnosticFailure != null) {
+            try {
+                BotLog.error(bot, "task_assignment_diagnostics_failed", diagnosticFailure,
+                        "name", incomingTaskName);
+            } catch (RuntimeException loggingFailure) {
+                if (loggingFailure != diagnosticFailure) {
+                    diagnosticFailure.addSuppressed(loggingFailure);
+                }
+            }
+        }
         return new TaskAssignmentResult(true, decision.action(), decision.reason());
     }
 
-    private static MissionArbiter.WorkClaim workClaim(TaskOrigin origin) {
+    /**
+     * Side-effect-free preview of the exact central ownership gate. Callers may use this before
+     * reading mutable world preconditions, but {@link #assign} always rechecks atomically before
+     * installation.
+     */
+    public TaskAssignmentResult previewAssignment(AIPlayerEntity bot, TaskOrigin origin) {
+        if (bot == null || origin == null) {
+            throw new IllegalArgumentException("task_assignment_preview_incomplete");
+        }
+        MissionArbiter.Decision decision = previewDecision(
+                bot, origin, currentOwnerOrigin(bot.getUUID()));
+        return new TaskAssignmentResult(
+                decision.startsIncoming(), decision.action(), decision.reason());
+    }
+
+    private MissionArbiter.Decision previewDecision(AIPlayerEntity bot,
+                                                     TaskOrigin incoming,
+                                                     TaskOrigin current) {
+        String dimensionFailure = missionDimensionFailure(
+                incoming, bot.serverLevel().dimension().location().toString());
+        if (dimensionFailure != null) {
+            return new MissionArbiter.Decision(
+                    MissionArbiter.Action.REJECT, dimensionFailure);
+        }
+        String navigationLease = navigationSafetyLeases.get(bot.getUUID());
+        if (navigationLease != null && !incoming.safety()) {
+            return new MissionArbiter.Decision(
+                    MissionArbiter.Action.DEFER,
+                    "navigation_safety_active:" + navigationLease);
+        }
+        return MissionArbiter.decide(
+                current == null ? null : workClaim(current),
+                workClaim(incoming),
+                hasPersistentPause(bot));
+    }
+
+    private TaskOrigin currentOwnerOrigin(UUID botId) {
+        TaskOrigin current = activeOrigins.get(botId);
+        if (current != null) {
+            return current;
+        }
+        ExecutionStack<Task> stack = executionStacks.get(botId);
+        return stack == null ? null : stack.peek().map(ExecutionStack.Frame::origin).orElse(null);
+    }
+
+    static MissionArbiter.WorkClaim workClaim(TaskOrigin origin) {
         MissionArbiter.WorkKind kind = switch (origin.kind()) {
             case SAFETY -> MissionArbiter.WorkKind.SAFETY;
             case REFLEX -> MissionArbiter.WorkKind.REFLEX;
             case PLAYER_COMMAND, PLAYER_PANEL -> MissionArbiter.WorkKind.PLAYER;
             case VERIFY -> MissionArbiter.WorkKind.VERIFY;
-            case MISSION -> MissionArbiter.WorkKind.MISSION;
+            case MISSION -> origin.playerMission()
+                    ? MissionArbiter.WorkKind.PLAYER_MISSION : MissionArbiter.WorkKind.MISSION;
             case LLM_TOOL, LLM_SKILL -> MissionArbiter.WorkKind.AI_DIRECT;
             case JOB -> MissionArbiter.WorkKind.JOB;
             case SYSTEM_BACKGROUND -> MissionArbiter.WorkKind.BACKGROUND;
@@ -159,7 +217,11 @@ public final class TaskManager {
             case REFLEX -> 750;
             case PLAYER_COMMAND, PLAYER_PANEL -> 900;
             case VERIFY -> 800;
-            case MISSION -> 700;
+            // Goal priority is relative within the Mission band. Keeping the whole band at or
+            // below 700 ensures routine REFLEX (750), VERIFY (800), and SAFETY (850+) retain the
+            // ability to pause and later resume even a player-confirmed Mission.
+            case MISSION -> origin.goalPriority() == null
+                    ? 700 : 600 + origin.goalPriority();
             case LLM_TOOL, LLM_SKILL -> 600;
             case JOB -> 400;
             case SYSTEM_BACKGROUND -> 200;
@@ -168,7 +230,12 @@ public final class TaskManager {
             case MISSION, LLM_SKILL, JOB, REFLEX, SYSTEM_BACKGROUND -> true;
             default -> false;
         };
-        return new MissionArbiter.WorkClaim(kind, owner, priority, resumable);
+        return new MissionArbiter.WorkClaim(
+                kind,
+                owner,
+                priority,
+                resumable,
+                origin.kind() == TaskOrigin.Kind.MISSION ? origin.missionSource() : null);
     }
 
     private static int safetyPriority(String reason) {
@@ -194,6 +261,79 @@ public final class TaskManager {
             return false;
         }
         return INSTANCE.resumeTop(bot, frame -> frame.frameId().equals(preemptedFrameId));
+    }
+
+    /**
+     * Settles the state-owning half of a failed assignment before inspecting the incoming Task.
+     *
+     * <p>A Task that throws from {@code start()} is not trusted to have working diagnostic
+     * accessors either. Reading {@link TaskStatus#from(Task)} before restoring a preempted owner
+     * could therefore strand that owner in the execution stack. Once restoration succeeds the
+     * failed Task is deliberately not inspected at all, so its failure cannot overwrite the
+     * restored owner's status or failure channel.</p>
+     */
+    static FailedStartResolution settleFailedStart(BooleanSupplier rollback,
+                                                    Supplier<TaskStatus> failedStatus,
+                                                    RuntimeException startFailure) {
+        if (rollback == null || failedStatus == null || startFailure == null) {
+            throw new IllegalArgumentException("failed_start_transaction_incomplete");
+        }
+        boolean restoredPreemptedWork = false;
+        try {
+            restoredPreemptedWork = rollback.getAsBoolean();
+        } catch (RuntimeException rollbackFailure) {
+            startFailure.addSuppressed(rollbackFailure);
+        }
+        if (restoredPreemptedWork) {
+            return new FailedStartResolution(true, null);
+        }
+        try {
+            return new FailedStartResolution(false, failedStatus.get());
+        } catch (RuntimeException diagnosticFailure) {
+            startFailure.addSuppressed(diagnosticFailure);
+            return new FailedStartResolution(false, null);
+        }
+    }
+
+    record FailedStartResolution(boolean restoredPreemptedWork, TaskStatus failedStatus) {
+    }
+
+    /** Builds a non-throwing status snapshot after ownership has already been committed. */
+    static AssignmentDiagnostics captureCommittedStatus(Task task, String stableName) {
+        try {
+            return new AssignmentDiagnostics(TaskStatus.from(task), null);
+        } catch (RuntimeException diagnosticFailure) {
+            String detail = diagnosticFailure.getMessage();
+            String description = "Task active; diagnostics unavailable"
+                    + (detail == null || detail.isBlank() ? "" : ": " + detail);
+            return new AssignmentDiagnostics(new TaskStatus(
+                    stableName,
+                    description,
+                    TaskState.RUNNING,
+                    0.0D,
+                    "",
+                    0), diagnosticFailure);
+        }
+    }
+
+    /** Runs one non-critical observer without allowing it to roll back a committed owner. */
+    static RuntimeException isolatePostStartDiagnostic(RuntimeException previous,
+                                                       Runnable diagnostic) {
+        try {
+            diagnostic.run();
+            return previous;
+        } catch (RuntimeException failure) {
+            if (previous == null) {
+                return failure;
+            }
+            if (failure != previous) {
+                previous.addSuppressed(failure);
+            }
+            return previous;
+        }
+    }
+
+    record AssignmentDiagnostics(TaskStatus status, RuntimeException failure) {
     }
 
     public void abort(AIPlayerEntity bot) {
@@ -332,20 +472,18 @@ public final class TaskManager {
         return !cancelled.isEmpty();
     }
 
-    private static void cancelDetachedTask(AIPlayerEntity bot,
-                                           Task task,
-                                           String reason,
-                                           boolean preserveActiveActions) {
-        if (preserveActiveActions && task instanceof AbstractTask abstractTask
-                && task.state() == TaskState.PAUSED) {
-            // The Task's ActionPack work was already stopped when it entered the stack. Calling
-            // onAbort now would stop the unrelated safety/reflex Task that currently owns the
-            // shared ActionPack, so retire the detached frame without replaying global cleanup.
-            abstractTask.state = TaskState.CANCELLED;
-            abstractTask.failureReason = reason == null ? "" : reason;
-            return;
+    static void cancelDetachedTask(AIPlayerEntity bot,
+                                   Task task,
+                                   String reason,
+                                   boolean preserveActiveActions) {
+        if (preserveActiveActions) {
+            // The removed frame no longer owns the shared ActionPack. Its explicit detached
+            // callback can release private resources without stopping the safety/reflex Task that
+            // currently owns movement, mining and navigation.
+            task.cancelDetached(bot, reason);
+        } else {
+            task.cancel(bot, reason);
         }
-        task.cancel(bot, reason);
     }
 
     public Optional<Task> getActive(AIPlayerEntity bot) {
@@ -364,6 +502,29 @@ public final class TaskManager {
 
     public Optional<TaskOrigin> activeOrigin(AIPlayerEntity bot) {
         return Optional.ofNullable(activeOrigins.get(bot.getUUID()));
+    }
+
+    /** Propagates a stronger admission for the same Mission into active and paused Task frames. */
+    public boolean upgradeMissionAdmission(AIPlayerEntity bot, UUID missionId, GoalSpec goal) {
+        if (bot == null || missionId == null || goal == null) {
+            throw new IllegalArgumentException("mission_admission_upgrade_incomplete");
+        }
+        UUID botId = bot.getUUID();
+        boolean[] changed = {false};
+        activeOrigins.computeIfPresent(botId, (ignored, origin) -> {
+            if (!missionId.equals(origin.missionId())) {
+                return origin;
+            }
+            changed[0] = true;
+            return TaskOrigin.mission(missionId, origin.reason(), goal);
+        });
+        ExecutionStack<Task> stack = executionStacks.get(botId);
+        if (stack != null) {
+            changed[0] |= stack.replaceOrigins(
+                    origin -> missionId.equals(origin.missionId()),
+                    origin -> TaskOrigin.mission(missionId, origin.reason(), goal)) > 0;
+        }
+        return changed[0];
     }
 
     public boolean isUserPaused(AIPlayerEntity bot) {
@@ -460,6 +621,13 @@ public final class TaskManager {
     }
 
     public boolean pauseFor(AIPlayerEntity bot, PauseOwner pauseOwner, String why) {
+        return pauseFor(bot, pauseOwner, why, true);
+    }
+
+    private boolean pauseFor(AIPlayerEntity bot,
+                             PauseOwner pauseOwner,
+                             String why,
+                             boolean publishInterruption) {
         UUID uuid = bot.getUUID();
         boolean changed = acquirePauseLock(uuid, pauseOwner);
         if (pauseOwner.automaticResumeAllowed()) {
@@ -494,9 +662,8 @@ public final class TaskManager {
                 ? TaskOrigin.of(TaskOrigin.Kind.SYSTEM_BACKGROUND, "unknown_origin") : origin;
         ExecutionStack<Task> stack = executionStacks.computeIfAbsent(uuid, ignored -> new ExecutionStack<>());
         stack.push(current, preservedOrigin, pauseOwner);
-        if (pauseOwner.automaticResumeAllowed() && preservedOrigin.missionId() != null) {
-            missionInterruptions.computeIfAbsent(uuid, ignored -> ConcurrentHashMap.newKeySet())
-                    .add(preservedOrigin.missionId());
+        if (publishInterruption && pauseOwner.automaticResumeAllowed()) {
+            publishMissionInterruption(bot, preservedOrigin.missionId());
         }
         TaskStatus status = TaskStatus.from(current);
         lastStatus.put(bot.getUUID(), status);
@@ -505,6 +672,14 @@ public final class TaskManager {
                 "origin", preservedOrigin.kind(), "pause_owner", pauseOwner,
                 "stack_depth", stack.size());
         return true;
+    }
+
+    private void publishMissionInterruption(AIPlayerEntity bot, UUID missionId) {
+        if (missionId == null) {
+            return;
+        }
+        missionInterruptions.computeIfAbsent(bot.getUUID(), ignored -> ConcurrentHashMap.newKeySet())
+                .add(missionId);
     }
 
     /** Legacy automatic-unwind entry point. Manual USER/INVENTORY frames are intentionally ignored. */
@@ -640,7 +815,30 @@ public final class TaskManager {
             }
             AIPlayerEntity player = bot.get();
             TaskOrigin origin = activeOrigins.get(uuid);
-            if ((origin == null || !origin.safety()) && !isCritical(task)
+            String dimensionFailure = missionDimensionFailure(
+                    origin, player.serverLevel().dimension().location().toString());
+            boolean tickAllowed = dimensionFailure == null;
+            if (dimensionFailure != null && task.state() == TaskState.RUNNING) {
+                try {
+                    task.abort(player);
+                } catch (RuntimeException cleanupFailure) {
+                    BotLog.error(player, "mission_dimension_gate_cleanup_failed", cleanupFailure,
+                            "task", task.name(), "reason", dimensionFailure);
+                } finally {
+                    if (task instanceof AbstractTask abstractTask) {
+                        abstractTask.state = TaskState.FAILED;
+                        abstractTask.failureReason = dimensionFailure;
+                    }
+                }
+                BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.TASK,
+                        player,
+                        "mission_dimension_gate_abort",
+                        "task", task.name(),
+                        "expected_dimension", origin.missionDimension(),
+                        "actual_dimension", player.serverLevel().dimension().location());
+            }
+            if (task.state() == TaskState.RUNNING
+                    && (origin == null || !origin.safety()) && !isCritical(task)
                     && !TpsGuard.INSTANCE.shouldTickNonCriticalTask(server)) {
                 BotProfiler.INSTANCE.record(player, "task_tick_skipped", 0L);
                 continue;
@@ -657,7 +855,9 @@ public final class TaskManager {
             }
             long started = System.nanoTime();
             try {
-                task.tick(player);
+                if (tickAllowed) {
+                    task.tick(player);
+                }
             } catch (RuntimeException tickFailure) {
                 terminalizeTickFailure(player, task, tickFailure);
                 BotLog.error(player, "task_tick_failed", tickFailure,
@@ -704,6 +904,10 @@ public final class TaskManager {
                 }
             }
         }
+    }
+
+    static String missionDimensionFailure(TaskOrigin origin, String actualDimension) {
+        return origin == null ? null : origin.dimensionFailure(actualDimension);
     }
 
     public void recordFailure(AIPlayerEntity bot, String name, String reason, int tick) {

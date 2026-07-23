@@ -1126,7 +1126,8 @@ public final class GatherQuotaTask extends AbstractTask {
     // 觅食野食族:浆果 / 西瓜片(都是野生即取、可直接吃);采任一凑数(哪个近采哪个)。
     private static final Set<Item> FORAGE_FOODS = Set.of(Items.SWEET_BERRIES, Items.MELON_SLICE);
 
-    static Set<Item> acceptItemsFor(Item item, boolean exactItem) {
+    /** Shared with the Skill postcondition verifier so execution and evidence use one family. */
+    public static Set<Item> acceptItemsFor(Item item, boolean exactItem) {
         if (exactItem) {
             return Set.of(item);
         }

@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -87,6 +88,50 @@ class MissionPlanTest {
 
         assertEquals("duplicate_plan_node_id:node.1",
                 assertThrows(IllegalArgumentException.class, () -> plan(root)).getMessage());
+    }
+
+    @Test
+    void identityValidationTraversesEveryCompositeWrapper() {
+        PlanNode root = new PlanNode.AnyOf(List.of(
+                new PlanNode.Checkpoint(
+                        "first_attempt",
+                        new PlanNode.Skill("node.1", skill("call.same", "inventory"))),
+                new PlanNode.Timeout(
+                        new PlanNode.Retry(
+                                new PlanNode.Skill("node.2", skill("call.same", "explore")),
+                                2),
+                        20)));
+
+        assertEquals("duplicate_skill_invocation_id:call.same",
+                assertThrows(IllegalArgumentException.class, () -> plan(root)).getMessage());
+    }
+
+    @Test
+    void intentBindingSurvivesWorldReplanButChangesWithAuthorityOrPolicy() {
+        MissionPlan original = plan(new PlanNode.Skill(skill("gather_wood")));
+        MissionPlan replanned = new MissionPlan(
+                original.missionId(),
+                original.revision() + 1,
+                original.goal(),
+                new PlanNode.Skill(skill("mine_iron")),
+                "test-planner-v2");
+        GoalSpec elevated = new GoalSpec(
+                original.goal().type(),
+                GoalSpec.Source.PLAYER_CONFIRMED,
+                100,
+                original.goal().successPredicate(),
+                original.goal().dimension(),
+                new MissionPolicy(
+                        MissionPolicy.RiskLevel.BOLD,
+                        MissionPolicy.MutationScope.CONFIRMED_AREA,
+                        Integer.MAX_VALUE,
+                        Integer.MAX_VALUE,
+                        MissionPolicy.InterruptionPolicy.RESUME_AFTER_SAFETY),
+                original.goal().attributes());
+
+        assertEquals(original.intentFingerprint(), replanned.intentFingerprint());
+        assertNotEquals(original.fingerprint(), replanned.fingerprint());
+        assertNotEquals(original.intentFingerprint(), MissionPlan.intentFingerprint(elevated));
     }
 
     private static MissionPlan plan(PlanNode root) {

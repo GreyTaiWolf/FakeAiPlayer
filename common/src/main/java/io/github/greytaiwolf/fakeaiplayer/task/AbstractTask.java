@@ -66,6 +66,16 @@ public abstract class AbstractTask implements Task {
     }
 
     @Override
+    public final void cancelDetached(AIPlayerEntity bot, String reason) {
+        if (state == TaskState.COMPLETED || state == TaskState.FAILED || state == TaskState.CANCELLED) {
+            return;
+        }
+        state = TaskState.CANCELLED;
+        failureReason = reason == null ? "" : reason;
+        onDetachedCancel(bot);
+    }
+
+    @Override
     public TaskState state() {
         return state;
     }
@@ -110,5 +120,12 @@ public abstract class AbstractTask implements Task {
 
     protected void onAbort(AIPlayerEntity bot) {
         bot.getActionPack().stopAll();
+    }
+
+    /**
+     * Releases Task-private resources after this Task has lost shared-control ownership.
+     * Implementations must not mutate the bot's ActionPack or another shared executor here.
+     */
+    protected void onDetachedCancel(AIPlayerEntity bot) {
     }
 }

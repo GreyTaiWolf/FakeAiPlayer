@@ -51,70 +51,78 @@ tasks.withType(Test).configureEach {
             file('src/main/java/io/github/greytaiwolf/fakeaiplayer').absolutePath
 }
 
-// GameTest structure templates are binary NBT. Generate the small empty arena rather than
-// committing an opaque binary blob, then let both loader-specific GameTest source sets consume
-// exactly the same resource. This output is not attached to common/main or any production jar.
-def gameTestArenaFile = layout.buildDirectory.file(
-        'generated/gametest/resources/data/fakeaiplayer/structure/p0_arena.nbt')
+// GameTest structure templates are binary NBT. Generate empty, bounded arenas rather than
+// committing opaque blobs, then let both loader-specific GameTest source sets consume exactly the
+// same resources. These outputs are not attached to common/main or any production jar.
+def gameTestArenaDirectory = layout.buildDirectory.dir(
+        'generated/gametest/resources/data/fakeaiplayer/structure')
+def gameTestArenas = [
+        [name: 'p0_arena', size: [21, 12, 21]],
+        // P3's zero-inventory survival chain needs thirteen stone layers plus a four-log tree and
+        // canopy. Keeping all of it inside a dedicated 21-high template preserves GameTest cleanup
+        // and prevents dropped items or Task mutations from leaking across neighboring tests.
+        [name: 'p3_mission_arena', size: [21, 21, 21]]
+]
 
 tasks.register('generateGameTestStructures') {
     group = 'verification'
     description = 'Generates shared, test-only Minecraft structure templates for GameTest.'
-    outputs.file(gameTestArenaFile)
+    outputs.files(gameTestArenas.collect { arena ->
+        gameTestArenaDirectory.map { directory ->
+            directory.file("${arena['name']}.nbt")
+        }
+    })
 
     doLast {
-        File output = gameTestArenaFile.get().asFile
-        output.parentFile.mkdirs()
-        output.withOutputStream { rawStream ->
-            def stream = new DataOutputStream(
-                    new java.util.zip.GZIPOutputStream(rawStream))
+        gameTestArenas.each { arena ->
+            File output = gameTestArenaDirectory.get().file("${arena['name']}.nbt").asFile
+            output.parentFile.mkdirs()
+            output.withOutputStream { rawStream ->
+                def stream = new DataOutputStream(
+                        new java.util.zip.GZIPOutputStream(rawStream))
 
-            try {
-                // Root compound.
-                stream.writeByte(10)
-                stream.writeUTF('')
+                try {
+                    // Root compound.
+                    stream.writeByte(10)
+                    stream.writeUTF('')
 
-                // Minecraft 1.21.3 data version. The template contains no saved blocks, so the
-                // value only avoids unnecessary data-fixer work while its 21x12x21 bounds isolate
-                // fixtures.
-                stream.writeByte(3)
-                stream.writeUTF('DataVersion')
-                stream.writeInt(4082)
+                    // Minecraft 1.21.3 data version. Empty templates need only bounds and a valid
+                    // palette; the value avoids unnecessary data-fixer work.
+                    stream.writeByte(3)
+                    stream.writeUTF('DataVersion')
+                    stream.writeInt(4082)
 
-                stream.writeByte(9)
-                stream.writeUTF('size')
-                stream.writeByte(3)
-                stream.writeInt(3)
-                stream.writeInt(21)
-                stream.writeInt(12)
-                stream.writeInt(21)
+                    stream.writeByte(9)
+                    stream.writeUTF('size')
+                    stream.writeByte(3)
+                    stream.writeInt(3)
+                    arena['size'].each { dimension -> stream.writeInt(dimension as int) }
 
-                // A valid palette is retained even though the arena intentionally stores no
-                // blocks.
-                stream.writeByte(9)
-                stream.writeUTF('palette')
-                stream.writeByte(10)
-                stream.writeInt(1)
-                stream.writeByte(8)
-                stream.writeUTF('Name')
-                stream.writeUTF('minecraft:air')
-                stream.writeByte(0)
+                    stream.writeByte(9)
+                    stream.writeUTF('palette')
+                    stream.writeByte(10)
+                    stream.writeInt(1)
+                    stream.writeByte(8)
+                    stream.writeUTF('Name')
+                    stream.writeUTF('minecraft:air')
+                    stream.writeByte(0)
 
-                stream.writeByte(9)
-                stream.writeUTF('blocks')
-                stream.writeByte(10)
-                stream.writeInt(0)
+                    stream.writeByte(9)
+                    stream.writeUTF('blocks')
+                    stream.writeByte(10)
+                    stream.writeInt(0)
 
-                stream.writeByte(9)
-                stream.writeUTF('entities')
-                stream.writeByte(10)
-                stream.writeInt(0)
+                    stream.writeByte(9)
+                    stream.writeUTF('entities')
+                    stream.writeByte(10)
+                    stream.writeInt(0)
 
-                stream.writeByte(0)
-            } finally {
-                // Closing the outer stream writes the gzip trailer, so a successful task can
-                // never leave a syntactically incomplete template behind.
-                stream.close()
+                    stream.writeByte(0)
+                } finally {
+                    // Closing the outer stream writes the gzip trailer, so a successful task can
+                    // never leave a syntactically incomplete template behind.
+                    stream.close()
+                }
             }
         }
     }

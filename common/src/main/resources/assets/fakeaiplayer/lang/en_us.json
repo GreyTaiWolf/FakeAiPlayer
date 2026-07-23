@@ -112,6 +112,7 @@
   "goal.fakeaiplayer.evidence": "Acceptance evidence: %s / %s",
   "goal.fakeaiplayer.result.completed": "Accepted as complete",
   "goal.fakeaiplayer.result.partial": "Partially complete",
+  "goal.fakeaiplayer.result.blocked": "Blocked",
   "goal.fakeaiplayer.result.failed": "Acceptance failed",
   "goal.fakeaiplayer.result.cancelled": "Cancelled",
   "settings.fakeaiplayer.target": "Target: %s",

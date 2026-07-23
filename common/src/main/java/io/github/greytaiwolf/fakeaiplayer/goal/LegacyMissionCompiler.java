@@ -31,7 +31,35 @@ public final class LegacyMissionCompiler {
                                           GoalSpec.Source source,
                                           String dimension,
                                           List<GoalStep> steps) {
-        GoalSpec spec = goalSpec(goal, source, dimension);
+        GoalSpec.Source resolved = source == null ? GoalSpec.Source.LEGACY : source;
+        return compile(missionId, revision, goal, resolved,
+                GoalSpec.defaultPriority(resolved), dimension, steps);
+    }
+
+    public static CompiledMission compile(UUID missionId,
+                                          int revision,
+                                          Goal goal,
+                                          GoalSpec.Source source,
+                                          int priority,
+                                          String dimension,
+                                          List<GoalStep> steps) {
+        return compile(missionId, revision, goal, source, priority, dimension, null, steps);
+    }
+
+    /**
+     * Recompiles a persisted Mission with its original execution limits. A null override is the
+     * normal admission path and derives the policy from the Goal; a non-null value is used only by
+     * trusted runtime restore and plan repair so elapsed/recovery limits cannot reset on restart.
+     */
+    public static CompiledMission compile(UUID missionId,
+                                          int revision,
+                                          Goal goal,
+                                          GoalSpec.Source source,
+                                          int priority,
+                                          String dimension,
+                                          MissionPolicy policyOverride,
+                                          List<GoalStep> steps) {
+        GoalSpec spec = goalSpec(goal, source, priority, dimension, policyOverride);
         List<ExecutableSkill> executable = compileSkills(goal, steps);
         if (executable.isEmpty()) {
             throw new IllegalArgumentException("mission_plan_requires_skills");
@@ -63,6 +91,22 @@ public final class LegacyMissionCompiler {
     }
 
     static GoalSpec goalSpec(Goal goal, GoalSpec.Source source, String dimension) {
+        GoalSpec.Source resolved = source == null ? GoalSpec.Source.LEGACY : source;
+        return goalSpec(goal, resolved, GoalSpec.defaultPriority(resolved), dimension);
+    }
+
+    static GoalSpec goalSpec(Goal goal,
+                             GoalSpec.Source source,
+                             int priority,
+                             String dimension) {
+        return goalSpec(goal, source, priority, dimension, null);
+    }
+
+    static GoalSpec goalSpec(Goal goal,
+                             GoalSpec.Source source,
+                             int priority,
+                             String dimension,
+                             MissionPolicy policyOverride) {
         if (goal == null) {
             throw new IllegalArgumentException("goal_missing");
         }
@@ -79,14 +123,22 @@ public final class LegacyMissionCompiler {
             }
             boundDimension = build.dimension();
         }
-        return new GoalSpec(
+        GoalSpec canonical = new GoalSpec(
                 type,
                 resolvedSource,
-                GoalSpec.defaultPriority(resolvedSource),
+                priority,
                 successPredicate(goal),
                 boundDimension,
                 policy,
                 goalAttributes(goal));
+        return policyOverride == null ? canonical : new GoalSpec(
+                canonical.type(),
+                canonical.source(),
+                canonical.priority(),
+                canonical.successPredicate(),
+                canonical.dimension(),
+                policyOverride,
+                canonical.attributes());
     }
 
     private static SkillSpec skillSpec(GoalStep step, int index, Goal goal) {
@@ -99,15 +151,21 @@ public final class LegacyMissionCompiler {
                 preconditions(step),
                 List.of(successPredicate(step)),
                 SkillSpec.RetryPolicy.standard(),
-                mutationScope(step));
+                mutationScope(step),
+                requiredRisk(step));
     }
 
-    private static Map<String, String> stepParameters(GoalStep step, Goal goal) {
+    static Map<String, String> stepParameters(GoalStep step, Goal goal) {
         Map<String, String> params = new LinkedHashMap<>();
         params.put("quota", String.valueOf(step.count()));
         switch (step.kind()) {
             case GATHER, GATHER_EXACT, CRAFT, STOCKPILE -> params.put("item", itemId(step.item()));
-            case MINE, MINE_EXACT, FARM -> params.put("block", blockId(step.block()));
+            case MINE, MINE_EXACT -> params.put("block", blockId(step.block()));
+            case FARM -> {
+                params.put("block", blockId(step.block()));
+                params.put("seed", itemId(step.input()));
+                params.put("produce", itemId(step.item()));
+            }
             case MINE_ORE -> params.put("ores", blocks(step.ores()));
             case SMELT -> {
                 params.put("input", itemId(step.input()));
@@ -143,33 +201,42 @@ public final class LegacyMissionCompiler {
         return params;
     }
 
-    private static List<String> preconditions(GoalStep step) {
+    static List<String> preconditions(GoalStep step) {
         return switch (step.kind()) {
-            case GATHER, GATHER_EXACT -> List.of("world:observable_resource", "inventory:pickup_space");
-            case MINE, MINE_EXACT, MINE_ORE, DESCEND_TO_Y, MAKE_OBSIDIAN ->
-                    List.of("inventory:usable_tool", "world:safe_work_face");
-            case CRAFT -> List.of("inventory:recipe_inputs");
-            case SMELT, COOK_FOOD -> List.of("inventory:smelt_input", "inventory:fuel", "station:furnace");
-            case MOVE, MOVE_NON_MUTATING -> List.of("world:standable_interaction_route");
-            case FARM -> List.of("inventory:seed_and_hoe", "world:farmable_site");
-            case HUNT -> List.of("world:reachable_preys", "safety:combat_budget");
-            case MILK_COW -> List.of("inventory:bucket", "world:reachable_cow");
-            case EQUIP_LOADOUT -> List.of("inventory:owned_armor_and_weapon", "inventory:no_open_session");
-            case PLACE_STATIONS -> List.of("inventory:stations", "world:legal_placement_faces");
-            case STOCKPILE -> List.of("world:reachable_container");
-            case BUILD -> List.of("human:confirmed_blueprint", "inventory:building_materials",
+            case GATHER, GATHER_EXACT -> List.of(
+                    "world:bound_dimension", "inventory:pickup_space");
+            case MINE, MINE_EXACT, MINE_ORE, DESCEND_TO_Y, MAKE_OBSIDIAN -> List.of(
+                    "world:bound_dimension", "inventory:usable_tool", "world:safe_work_face");
+            case CRAFT -> List.of("world:bound_dimension", "inventory:recipe_inputs");
+            case SMELT, COOK_FOOD -> List.of(
+                    "world:bound_dimension", "inventory:smelt_input", "inventory:fuel", "station:furnace");
+            case MOVE, MOVE_NON_MUTATING -> List.of("world:bound_dimension");
+            case FARM -> List.of(
+                    "world:bound_dimension", "world:mature_crop_or_plantable_seed");
+            case HUNT -> List.of("world:bound_dimension", "safety:combat_budget");
+            case MILK_COW -> List.of("world:bound_dimension", "inventory:bucket");
+            case EQUIP_LOADOUT -> List.of(
+                    "world:bound_dimension", "inventory:owned_armor_and_weapon", "inventory:no_open_session");
+            case PLACE_STATIONS -> List.of("world:bound_dimension", "inventory:stations");
+            case STOCKPILE -> List.of("world:bound_dimension");
+            case BUILD -> List.of(
+                    "world:bound_dimension", "human:confirmed_blueprint", "inventory:building_materials",
                     "world:confirmed_dimension_and_anchor");
         };
     }
 
-    private static String successPredicate(GoalStep step) {
+    static String successPredicate(GoalStep step) {
         return switch (step.kind()) {
             case GATHER, GATHER_EXACT -> "inventory_delta(" + itemId(step.item()) + ")>=" + step.count();
             case MINE, MINE_EXACT -> "inventory_drop_delta("
                     + items(DigDownTask.targetDropsFor(step.block(), step.kind() == GoalStep.Kind.MINE_EXACT))
                     + ")>=" + step.count();
             case MINE_ORE -> "inventory_ore_drop_delta(" + blocks(step.ores()) + ")>=" + step.count();
-            case CRAFT -> "inventory(" + itemId(step.item()) + ")>=" + step.count();
+            case CRAFT -> (step.item() == net.minecraft.world.item.Items.CRAFTING_TABLE
+                    || step.item() == net.minecraft.world.item.Items.FURNACE)
+                    && step.count() == 1
+                    ? "utility_available(" + itemId(step.item()) + ")>=1"
+                    : "inventory(" + itemId(step.item()) + ")>=" + step.count();
             case SMELT -> "smelt_output_delta(" + itemId(step.output()) + ")>=" + step.count();
             case MOVE, MOVE_NON_MUTATING -> "position_reaches_interaction_pose";
             case FARM -> "inventory_crop_delta(" + itemId(step.item()) + ")>=" + step.count();
@@ -185,12 +252,20 @@ public final class LegacyMissionCompiler {
         };
     }
 
-    private static MissionPolicy.MutationScope mutationScope(GoalStep step) {
+    static MissionPolicy.MutationScope mutationScope(GoalStep step) {
         return switch (step.kind()) {
-            case MOVE_NON_MUTATING, HUNT, MILK_COW, EQUIP_LOADOUT, STOCKPILE ->
+            case MOVE_NON_MUTATING, MILK_COW, EQUIP_LOADOUT, STOCKPILE ->
                     MissionPolicy.MutationScope.NONE;
             case BUILD -> MissionPolicy.MutationScope.CONFIRMED_AREA;
             default -> MissionPolicy.MutationScope.SURVIVAL;
+        };
+    }
+
+    static MissionPolicy.RiskLevel requiredRisk(GoalStep step) {
+        return switch (step.kind()) {
+            case HUNT, MINE_ORE, DESCEND_TO_Y, MAKE_OBSIDIAN ->
+                    MissionPolicy.RiskLevel.BALANCED;
+            default -> MissionPolicy.RiskLevel.CONSERVATIVE;
         };
     }
 
@@ -236,6 +311,7 @@ public final class LegacyMissionCompiler {
             }
             case Goal.HarvestCrop g -> {
                 attributes.put("crop", blockId(g.crop()));
+                attributes.put("seed", itemId(g.seed()));
                 attributes.put("produce", itemId(g.produce()));
                 attributes.put("count", String.valueOf(g.count()));
             }
@@ -269,7 +345,9 @@ public final class LegacyMissionCompiler {
     private static MissionPolicy policyFor(Goal goal) {
         if (goal instanceof Goal.Build) {
             return new MissionPolicy(
-                    MissionPolicy.RiskLevel.CONSERVATIVE,
+                    // Construction itself is conservative, while material acquisition may
+                    // legitimately require the balanced mining Skills in the same Mission.
+                    MissionPolicy.RiskLevel.BALANCED,
                     MissionPolicy.MutationScope.CONFIRMED_AREA,
                     144_000,
                     64,
