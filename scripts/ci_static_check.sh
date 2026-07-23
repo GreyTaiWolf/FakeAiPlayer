@@ -860,8 +860,10 @@ if [[ "${CI_STATIC_CHECK_ARTIFACTS:-0}" == 1 ]]; then
     [[ -f "$neoforge_gametest_log" ]] \
       || fail 'Fabric GameTest evidence exists but the NeoForge latest.log is missing'
 
-    fabric_executed_total="$(grep -oE 'tests="[0-9]+"' "$fabric_gametest_report" \
-        | head -1 | tr -cd '0-9')"
+    # Fabric's SavingXmlTestReporter emits JUnit-like nested suites without a tests="N"
+    # aggregate attribute. Count authoritative testcase nodes instead.
+    fabric_executed_total="$(grep -oE '<testcase([[:space:]>])' "$fabric_gametest_report" \
+        | wc -l | tr -d '[:space:]')"
     [[ "$fabric_executed_total" == "$expected_fabric_gametests" ]] \
       || fail "Fabric executed GameTest count changed: expected $expected_fabric_gametests, found ${fabric_executed_total:-0}"
     neoforge_executed_total="$(grep -cE \
