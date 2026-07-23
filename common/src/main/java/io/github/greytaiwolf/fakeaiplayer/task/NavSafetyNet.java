@@ -123,7 +123,10 @@ public final class NavSafetyNet {
                     waterRescueSince.remove(bot.getUUID());
                     releaseTaskPauseLease(bot);
                     throttledLog(server, bot, "navsafe_drown_teleport", feet);
-                    return true;
+                    // Safety no longer owns movement after the teleport. Let GoalExecutor consume
+                    // the latched Mission interruption in this same coordinator tick, before the
+                    // resumed Task can receive another TaskManager tick.
+                    return false;
                 }
             }
             // 岸点:缓存的还有效就用,否则重找(最近"可站+脚头都是空气"的落点)。

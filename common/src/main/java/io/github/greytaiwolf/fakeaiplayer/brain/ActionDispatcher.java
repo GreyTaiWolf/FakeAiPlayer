@@ -22,6 +22,17 @@ public final class ActionDispatcher {
     private static final int GOAL_FAIL_GUARD_TICKS = 600; // 30s
     private static final java.util.Set<String> USER_PAUSED_ALLOWED_TOOLS = java.util.Set.of(
             "say", "inspect_focus", "get_task_status", "goal_status", "recall", "list_jobs", "pause", "resume", "stop", "cancel_all");
+    private static final java.util.Set<String> RECOVERY_READ_ONLY_TOOLS = java.util.Set.of(
+            "say",
+            "inspect_focus",
+            "get_task_status",
+            "goal_status",
+            "recall",
+            "list_jobs",
+            "inventory",
+            "plan_craft",
+            "building_preview_status",
+            "find_container");
 
     private final ToolRegistry registry;
 
@@ -103,6 +114,11 @@ public final class ActionDispatcher {
 
     private ToolDefinition.ToolResult invoke(AIPlayerEntity bot, ChatToolCall call) {
         try {
+            if (TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)
+                    && !isAllowedDuringRuntimeRecovery(call.name())) {
+                return new ToolDefinition.ToolResult(
+                        false, "blocked: runtime_recovery_read_only");
+            }
             if (TaskManager.INSTANCE.isUserPaused(bot) && !isAllowedWhileUserPaused(call.name())) {
                 return new ToolDefinition.ToolResult(false, "blocked: mission_user_paused");
             }
@@ -136,6 +152,10 @@ public final class ActionDispatcher {
 
     static boolean isAllowedWhileUserPaused(String toolName) {
         return USER_PAUSED_ALLOWED_TOOLS.contains(toolName);
+    }
+
+    static boolean isAllowedDuringRuntimeRecovery(String toolName) {
+        return RECOVERY_READ_ONLY_TOOLS.contains(toolName);
     }
 
     private static JsonObject sanitizedArguments(JsonObject args) {

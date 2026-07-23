@@ -212,8 +212,10 @@ public final class DangerWatcher {
         if (active.isEmpty()
                 && !bot.getActionPack().hasActiveActions()
                 && TaskManager.INSTANCE.hasPaused(bot)) {
-            TaskManager.INSTANCE.resumeSafetyPause(bot);
-            return true;
+            // A pending Mission interruption deliberately keeps its frame paused until
+            // GoalExecutor dispatches RESUME/REPLAN/CANCEL. Returning handled=true after a
+            // refused resume would starve that policy handoff forever.
+            return TaskManager.INSTANCE.resumeSafetyPause(bot);
         }
         return false;
     }

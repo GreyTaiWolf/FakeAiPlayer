@@ -35,6 +35,15 @@ public final class BotTickCoordinator {
                 IdleCoordinator.INSTANCE.cancelAmbient(bot, "inventory_open");
                 continue;
             }
+            if (TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)) {
+                // Navigation/danger safety already received the first opportunity. No ordinary
+                // Mission, ambient path or foreign action-only controller may run in recovery.
+                IdleCoordinator.INSTANCE.cancelAmbient(bot, "runtime_recovery_read_only");
+                if (!handled && !TaskManager.INSTANCE.hasSafetyOwnership(bot)) {
+                    bot.getActionPack().stopAll();
+                }
+                continue;
+            }
             StuckWatcher.INSTANCE.tickBot(server, bot);
             if (!handled && GoalExecutor.INSTANCE.tickBot(server, bot)) {
                 continue;

@@ -12,7 +12,7 @@ fail() {
 # These numbers describe the P3 release candidate. Any intentional test addition or removal must
 # update the baseline in the same reviewed change; an accidental loss of discovery must fail CI.
 readonly expected_junit_classes=95
-readonly expected_junit_tests=479
+readonly expected_junit_tests=480
 readonly expected_fabric_gametests=55
 readonly expected_neoforge_gametests=31
 readonly expected_p3_shared_gametests=6
@@ -298,6 +298,16 @@ grep -Fq 'frontiersStarted() == 1' "$p2_scenarios" \
 p3_scenarios=common/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/SharedP3MissionGameTestScenarios.java
 fabric_p3_tests=fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP3GameTests.java
 neoforge_p3_tests=neoforge/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSharedP3GameTests.java
+for invariant in \
+    'ResumeSideEffectTask mission = new ResumeSideEffectTask()' \
+    'mission.resumeCalls() == 0' \
+    'mission.resumeCalls() == 1' \
+    'TaskManager.INSTANCE.enterRuntimeRecoveryMode("p3_recovery_gate_fixture")' \
+    'Routine REFLEX bypassed read-only recovery' \
+    'Immediate SAFETY work was blocked by read-only recovery'; do
+  grep -Fq "$invariant" "$p3_scenarios" \
+    || fail "Shared P3 interruption scenario is missing onResume isolation evidence: $invariant"
+done
 grep -Fq '"io.github.greytaiwolf.fakeaiplayer.gametest.FakeAiPlayerSharedP3GameTests"' \
     fabric/src/gametest/resources/fabric.mod.json \
   || fail 'Fabric P3 GameTest entrypoint is not registered'
@@ -426,8 +436,15 @@ for invariant in \
     'if (!completion.accepted())' \
     'reconcileCursorActivation(server, bot, plan, advancedCursor' \
     'verifyStableCheckpointBoundary(active)' \
-    'if (active.replanAfterInterrupt)' \
+    'latchPendingInterruptionForPersistence(bot, active)' \
+    'TaskManager.INSTANCE.hasMissionInterruption(bot, active.missionId)' \
+    'canReuseUniqueRecompiledReservation(' \
+    'if (plan.replanAfterInterrupt' \
     'TaskManager.INSTANCE.hasNavigationSafetyLease(bot)' \
+    'missionCurrentlyPaused && !resumed' \
+    '!plan.restoredAdmissionPending' \
+    'restoredAdmissionReady(bot)' \
+    'runtime_recovery_goal_rejected' \
     'boolean restoredInterruptAwaitingReplan'; do
   grep -Fq "$invariant" "$goal_executor" \
     || fail "GoalExecutor P3 runtime bridge is missing invariant: $invariant"
@@ -441,18 +458,298 @@ dimension_order="$(grep -n -m1 'missionDimensionFailure(' <<< "$preview_body" | 
 navigation_order="$(grep -n -m1 'navigationSafetyLeases.get' <<< "$preview_body" | cut -d: -f1)"
 [[ -n "$dimension_order" && -n "$navigation_order" && "$dimension_order" -lt "$navigation_order" ]] \
   || fail 'Mission dimension admission must run before other Task assignment gates'
+grep -Fq 'origin.kind() == TaskOrigin.Kind.MISSION' "$task_manager" \
+  || fail 'Mission interruption quarantine can freeze a non-Mission compatibility origin'
+for invariant in \
+    'runtimeRecoveryMode' \
+    'runtimeRecoveryGateBlocks(' \
+    'runtimeRecoveryLockBypass(origin)' \
+    'runtime_recovery_lock_tick_skipped'; do
+  grep -Fq "$invariant" "$task_manager" \
+    || fail "Partial-restore execution lock is missing invariant: $invariant"
+done
+recovery_bypass_body="$(sed -n '/static boolean runtimeRecoveryLockBypass(/,/static boolean runtimeRecoveryGateBlocks(/p' \
+    "$task_manager")"
+grep -Fq 'return origin != null && origin.safety();' <<< "$recovery_bypass_body" \
+  || fail 'Read-only recovery bypass is broader than immediate SAFETY work'
+if grep -Fq 'TaskOrigin.Kind.REFLEX' <<< "$recovery_bypass_body"; then
+  fail 'Routine REFLEX work can mutate world/inventory during read-only recovery'
+fi
+idle_coordinator=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/coordination/IdleCoordinator.java
+grep -Fq 'TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)' "$idle_coordinator" \
+  || fail 'Idle ambient work can bypass the session-wide recovery gate'
+bot_tick_coordinator=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/task/BotTickCoordinator.java
+grep -Fq 'runtime_recovery_read_only' "$bot_tick_coordinator" \
+  || fail 'Action-only ambient work is not stopped by the recovery coordinator gate'
+action_dispatcher=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/brain/ActionDispatcher.java
+for invariant in \
+    'RECOVERY_READ_ONLY_TOOLS' \
+    'TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)' \
+    'blocked: runtime_recovery_read_only'; do
+  grep -Fq "$invariant" "$action_dispatcher" \
+    || fail "LLM tools can bypass read-only recovery: $invariant"
+done
+brain_coordinator=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/brain/BrainCoordinator.java
+for invariant in \
+    'runtime_recovery_brain_request_rejected' \
+    'TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)'; do
+  grep -Fq "$invariant" "$brain_coordinator" \
+    || fail "Brain decision lifecycle can bypass read-only recovery: $invariant"
+done
+brain_admission_body="$(sed -n '/public boolean handleMessage(/,/ensureConfigured();/p' \
+    "$brain_coordinator")"
+grep -Fq 'return false;' <<< "$brain_admission_body" \
+  || fail 'A rejected recovery Brain request can still be reported as queued'
+intent_controller=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/runtime/IntentController.java
+for invariant in \
+    'rejectRecoveryMutation(bot, origin, "cancel_current")' \
+    'rejectRecoveryMutation(bot, origin, "cancel_all")' \
+    'rejectRecoveryMutation(bot, origin, "replace")' \
+    'rejectRecoveryMutation(bot, origin, "pause")' \
+    'rejectRecoveryMutation(bot, origin, "resume")' \
+    'origin != ControlOrigin.SYSTEM'; do
+  grep -Fq "$invariant" "$intent_controller" \
+    || fail "User/LLM control can clear recovery isolation: $invariant"
+done
+inventory_sessions=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/inventory/BotInventorySessionManager.java
+grep -Fq 'TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)' "$inventory_sessions" \
+  || fail 'Bot inventory can be edited while its source snapshot is preserved read-only'
+ai_player_manager=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/manager/AIPlayerManager.java
+grep -Fq 'TaskManager.INSTANCE.runtimeRecoveryModeActive()' "$ai_player_manager" \
+  || fail 'A new Bot can be spawned after the runtime entered recovery mode'
+bot_command=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotCommand.java
+despawn_command_body="$(sed -n '/private static int despawn(/,/private static int list(/p' \
+    "$bot_command")"
+despawn_gate_order="$(grep -n -m1 'hasRuntimeRecoveryLock(bot.get())' \
+    <<< "$despawn_command_body" | cut -d: -f1)"
+despawn_mutation_order="$(grep -n -m1 'AIPlayerManager.INSTANCE.despawn' \
+    <<< "$despawn_command_body" | cut -d: -f1)"
+[[ -n "$despawn_gate_order" && -n "$despawn_mutation_order" \
+    && "$despawn_gate_order" -lt "$despawn_mutation_order" ]] \
+  || fail 'Bot deletion can mutate recovery state and falsely report a persistent delete'
+fabric_safety_tests=fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/FakeAiPlayerSafetyControlGameTests.java
+for invariant in \
+    'read-only recovery allowed a Bot inventory session' \
+    'read-only recovery allowed a newly spawned Bot'; do
+  grep -Fq "$invariant" "$fabric_safety_tests" \
+    || fail "Fabric recovery isolation behavior is missing: $invariant"
+done
 grep -Fq 'SmeltTask.hasUsableFurnaceSource(session.runtimeBot())' \
     common/src/main/java/io/github/greytaiwolf/fakeaiplayer/goal/LegacySkillVerifier.java \
   || fail 'Mission furnace preflight is narrower than the SmeltTask discovery envelope'
+submit_body="$(sed -n '/private boolean submit(/,/public boolean tickBot(/p' "$goal_executor")"
+restore_cancel_admission_order="$(grep -n -m1 'restoredCancellationRequired(' \
+    <<< "$submit_body" | cut -d: -f1)"
+build_admission_order="$(grep -n -m1 'BlueprintSchema verifiedBuildBlueprint' \
+    <<< "$submit_body" | cut -d: -f1)"
+initial_evaluation_order="$(grep -n -m1 'GoalEvaluation initialEvaluation' \
+    <<< "$submit_body" | cut -d: -f1)"
+[[ -n "$restore_cancel_admission_order" && -n "$build_admission_order" \
+    && -n "$initial_evaluation_order" \
+    && "$restore_cancel_admission_order" -lt "$build_admission_order" \
+    && "$restore_cancel_admission_order" -lt "$initial_evaluation_order" ]] \
+  || fail 'A restored CANCEL action must terminate before build admission or world evaluation'
 tick_body="$(sed -n '/public boolean tickBot(/,/public boolean hasActivePlan(/p' "$goal_executor")"
 budget_order="$(grep -n -m1 'missionTimeBudgetExhausted(' <<< "$tick_body" | cut -d: -f1)"
 reconcile_order="$(grep -n -m1 'reconcileCursorActivation(server, bot, plan, advancedCursor' \
     <<< "$tick_body" | cut -d: -f1)"
 [[ -n "$budget_order" && -n "$reconcile_order" && "$budget_order" -lt "$reconcile_order" ]] \
   || fail 'Mission time budget must fail before a Timeout fallback can start'
+interruption_peek_order="$(grep -n -m1 'hasMissionInterruption(bot, plan.missionId)' \
+    <<< "$tick_body" | cut -d: -f1)"
+interruption_consume_order="$(grep -n -m1 'consumeMissionInterruption(bot, plan.missionId)' \
+    <<< "$tick_body" | cut -d: -f1)"
+[[ -n "$interruption_peek_order" && -n "$interruption_consume_order" \
+    && "$interruption_peek_order" -lt "$interruption_consume_order" ]] \
+  || fail 'Mission interruption must be projected durably before the transient latch is consumed'
+restored_cancel_order="$(grep -n -m1 'mission_policy_cancel_after_restored_interrupt' \
+    <<< "$tick_body" | cut -d: -f1)"
+dimension_gate_order="$(grep -n -m1 'mission_bound_dimension_changed' \
+    <<< "$tick_body" | cut -d: -f1)"
+user_pause_order="$(grep -n -m1 'TaskManager.INSTANCE.isUserPaused(bot)' \
+    <<< "$tick_body" | cut -d: -f1)"
+[[ -n "$restored_cancel_order" && -n "$user_pause_order" \
+    && "$restored_cancel_order" -lt "$user_pause_order" ]] \
+  || fail 'A durable CANCEL_ON_INTERRUPT action must terminate before USER pause can short-circuit restore'
+[[ -n "$restored_cancel_order" && -n "$dimension_gate_order" \
+    && "$restored_cancel_order" -lt "$dimension_gate_order" ]] \
+  || fail 'A durable CANCEL_ON_INTERRUPT action must terminate before dimension mismatch classification'
+task_tick_body="$(sed -n '/public void tickAll(/,/static String missionDimensionFailure(/p' "$task_manager")"
+quarantine_order="$(grep -n -m1 'missionTickQuarantined(' <<< "$task_tick_body" | cut -d: -f1)"
+dimension_tick_order="$(grep -n -m1 'missionDimensionFailure(' <<< "$task_tick_body" | cut -d: -f1)"
+[[ -n "$quarantine_order" && -n "$dimension_tick_order" \
+    && "$quarantine_order" -lt "$dimension_tick_order" ]] \
+  || fail 'A resumed Mission Task must remain quarantined until its interruption policy is consumed'
+resume_top_body="$(sed -n '/private boolean resumeTop(AIPlayerEntity bot,/,/public boolean pauseUserIntent(/p' \
+    "$task_manager")"
+resume_quarantine_order="$(grep -n -m1 'missionTickQuarantined(' \
+    <<< "$resume_top_body" | cut -d: -f1)"
+task_resume_order="$(grep -n -m1 'task.resume(bot)' <<< "$resume_top_body" | cut -d: -f1)"
+[[ -n "$resume_quarantine_order" && -n "$task_resume_order" \
+    && "$resume_quarantine_order" -lt "$task_resume_order" ]] \
+  || fail 'Mission interruption quarantine must run before any Task onResume side effect'
+grep -Fq 'resumeMissionAfterInterruption(' "$goal_executor" \
+  || fail 'GoalExecutor has no explicit RESUME policy handoff for a quarantined Mission'
+nav_safety=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/task/NavSafetyNet.java
+emergency_release_body="$(sed -n '/if (emergencyTeleportToAir(/,/^[[:space:]]*}/p' "$nav_safety")"
+grep -Fq 'return false;' <<< "$emergency_release_body" \
+  || fail 'Emergency water rescue must hand the same coordinator tick back to GoalExecutor'
+danger_watcher=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/task/DangerWatcher.java
+grep -Fq 'return TaskManager.INSTANCE.resumeSafetyPause(bot);' "$danger_watcher" \
+  || fail 'A refused automatic resume must not starve GoalExecutor policy handoff'
+restore_runtime_body="$(sed -n '/public boolean restoreRuntime(/,/private static Map<String, String> checkpoint(/p' \
+    "$goal_executor")"
+grep -Fq 'return fullyAccounted;' <<< "$restore_runtime_body" \
+  || fail 'Mission restore accounting body was not extracted or does not return its outcome'
+if grep -Fq 'advanceQueue(bot)' <<< "$restore_runtime_body"; then
+  fail 'Restored queued work must wait for the first safety-ordered Bot tick'
+fi
+authenticated_cancel_order="$(grep -n -m1 'authenticatedRestoredCancellation(activeRecord)' \
+    <<< "$restore_runtime_body" | cut -d: -f1)"
+restore_seed_order="$(grep -n -m1 'restoreSeed(bot, restored.get(), activeRecord)' \
+    <<< "$restore_runtime_body" | cut -d: -f1)"
+[[ -n "$authenticated_cancel_order" && -n "$restore_seed_order" \
+    && "$authenticated_cancel_order" -lt "$restore_seed_order" ]] \
+  || fail 'Authenticated restored CANCEL must run before mutable restore seed/world reconstruction'
+authenticated_cancel_body="$(sed -n '/static Optional<UUID> authenticatedRestoredCancellation(/,/private static RestoreSeed restoreSeed(/p' \
+    "$goal_executor")"
+for invariant in \
+    'MissionCheckpointCodec.decode(checkpoint)' \
+    'persistedSpec.bindingValid()' \
+    'missionId.equals(runtime.missionId())' \
+    'restoredCancellationRequired(true, policy)'; do
+  grep -Fq "$invariant" <<< "$authenticated_cancel_body" \
+    || fail "Pre-world restored CANCEL authentication is missing invariant: $invariant"
+done
+if grep -Eq 'initialContext|validateAndLoadBuildGoal|serverLevel' <<< "$authenticated_cancel_body"; then
+  fail 'Authenticated restored CANCEL dispatcher reads mutable world state'
+fi
 grep -Fq "printf 'recovery_budget\\tnonzero_exact_restore\\n'" \
     scripts/persistence_restart_test.sh \
   || fail 'two-JVM restart evidence does not report nonzero recovery-budget restoration'
+grep -Fq "printf 'checkpoint\\tv3_accounting_exact_plan_cursor_rebased\\n'" \
+    scripts/persistence_restart_test.sh \
+  || fail 'two-JVM restart evidence does not distinguish exact accounting from a legal plan-cursor rebase'
+restart_harness=fabric/src/gametest/java/io/github/greytaiwolf/fakeaiplayer/gametest/AIBotRestartHarnessCommand.java
+for invariant in \
+    'decodedCheckpoint.checkpoint().completedSteps() == 1' \
+    'boolean cursorAdvanced' \
+    'boolean cursorContinuityValid' \
+    'boolean canonicalRestorePersisted' \
+    'restart_harness_probe_only' \
+    'GoalExecutor.INSTANCE.clearQueue(bot)' \
+    'queue_isolated_after_restore_proof'; do
+  grep -Fq "$invariant" "$restart_harness" \
+    || fail "two-JVM restart harness is missing strengthened evidence: $invariant"
+done
+bot_persistence=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/persist/BotPersistence.java
+restore_body="$(sed -n '/private int loadAndRespawnInternal(/,/public static BotRecord capture(/p' \
+    "$bot_persistence")"
+mission_restore_order="$(grep -n -m1 'GoalExecutor.INSTANCE.restoreRuntime' \
+    <<< "$restore_body" | cut -d: -f1)"
+canonical_save_order="$(grep -n -m1 'saveAll(server);' <<< "$restore_body" | cut -d: -f1)"
+[[ -n "$mission_restore_order" && -n "$canonical_save_order" \
+    && "$mission_restore_order" -lt "$canonical_save_order" ]] \
+  || fail 'canonical restore checkpoint must be saved synchronously after Mission and Job reconstruction'
+for invariant in \
+    'canonicalRestoreWriteAllowed(' \
+    'restoredJobIdentityMatches(migratedJobs, restoredJobs)' \
+    'restorableBotSubstate(BotRecord record)' \
+    'inventoryPayloadValid(record.inventoryNbt())' \
+    'BotMemoryStore.INSTANCE.persistedPayloadValid(record.memoryNbt())' \
+    'fullyAccounted &= missionAccounted' \
+    'quiescePendingWritesForRestore()' \
+    'drainPendingWrites();' \
+    'return lastWriterOperationSucceeded;' \
+    'runtime_restore_writer_quiesce_failed_read_only' \
+    'runtime_load_failure_read_only' \
+    'runtime_canonical_restore_save_failed_read_only' \
+    'TaskManager.INSTANCE.beginRuntimeSession()' \
+    'TaskManager.INSTANCE.enterRuntimeRecoveryMode(event)' \
+    'runtime_restore_unexpected_failure_read_only' \
+    'AIPlayerManager.INSTANCE.all()' \
+    'TaskBoard.INSTANCE.suspendClaims(event)' \
+    'TaskManager.INSTANCE.acquireRuntimeRecoveryLock' \
+    'bot.setInvulnerable(true)' \
+    'GameType.SPECTATOR' \
+    'runtime_partial_restore_read_only' \
+    'source_snapshot_preserved; repair_or_remove_isolated_records'; do
+  grep -Fq "$invariant" "$bot_persistence" \
+    || fail "Partial restore can overwrite an unaccounted source record: $invariant"
+done
+ai_player_restore_body="$(sed -n '/public Optional<AIPlayerEntity> respawnFromRecord(/,/public boolean despawn(/p' \
+    "$ai_player_manager")"
+for invariant in \
+    'if (!BotPersistence.restorableBotSubstate(record))' \
+    'boolean inventoryRestored' \
+    'boolean memoryRestored' \
+    'if (!inventoryRestored || !memoryRestored)' \
+    'return Optional.empty();'; do
+  grep -Fq "$invariant" <<< "$ai_player_restore_body" \
+    || fail "Bot substate restore can be silently canonicalized after failure: $invariant"
+done
+memory_store=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/memory/BotMemoryStore.java
+for invariant in \
+    'public boolean loadString(' \
+    'public boolean persistedPayloadValid(' \
+    'persistedRootValid(' \
+    'non_exact_round_trip'; do
+  grep -Fq "$invariant" "$memory_store" \
+    || fail "Bot memory restore can silently drop persisted state: $invariant"
+done
+for invariant in \
+    'public static boolean applyInventory(' \
+    'root.get(INVENTORY_KEY) instanceof ListTag inventory' \
+    'inventory.getElementType() == Tag.TAG_COMPOUND' \
+    'non_exact_round_trip'; do
+  grep -Fq "$invariant" "$bot_persistence" \
+    || fail "Bot inventory restore can silently drop persisted state: $invariant"
+done
+load_respawn_body="$(sed -n '/public int loadAndRespawn(/,/public int reloadIfIdle(/p' \
+    "$bot_persistence")"
+grep -Fq 'catch (RuntimeException restoreFailure)' <<< "$load_respawn_body" \
+  || fail 'Unexpected restore reconstruction failures can escape without the global read-only gate'
+unexpected_gate_order="$(grep -n -m1 'runtime_restore_unexpected_failure_read_only' \
+    <<< "$load_respawn_body" | cut -d: -f1)"
+unexpected_return_order="$(grep -n 'return 0;' <<< "$load_respawn_body" | tail -1 | cut -d: -f1)"
+[[ -n "$unexpected_gate_order" && -n "$unexpected_return_order" \
+    && "$unexpected_gate_order" -lt "$unexpected_return_order" ]] \
+  || fail 'Unexpected restore failure returns before installing the global read-only gate'
+signal_event_body="$(sed -n '/public boolean signalMissionEvent(/,/public void clear(/p' \
+    "$goal_executor")"
+grep -Fq 'plan.currentTask == null && !plan.restoredAdmissionPending' \
+    <<< "$signal_event_body" \
+  || fail 'A restored WAITING Mission event can start a Skill before first-tick safety admission'
+if sed -n '/private boolean quiescePendingWritesForRestore(/,/private void enterRestoreReadOnly(/p' \
+    "$bot_persistence" | grep -Fq 'pendingAsync.set(null)'; then
+  fail 'Restore quiesce discards a pending deletion/update instead of draining it'
+fi
+grep -Fq 'pendingAsync.get() != null || asyncDrainScheduled.get()' "$bot_persistence" \
+  || fail 'Live reload can flush a pre-repair pending snapshot over an authoritative repaired source'
+task_board=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/coordination/TaskBoard.java
+for invariant in \
+    'if (claimsSuspended)' \
+    'throw new IllegalStateException("runtime_recovery_read_only")' \
+    'public void suspendClaims(' \
+    'claimsSuspended = false'; do
+  grep -Fq "$invariant" "$task_board" \
+    || fail "Partial restore does not suspend Job claims: $invariant"
+done
+persist_command=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotPersistSubcommand.java
+grep -Fq 'BotPersistence.INSTANCE.readOnlyRecoveryActive()' "$persist_command" \
+  || fail 'Persist reload command can report success after fail-closed recovery'
+runtime_lifecycle=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/runtime/RuntimeLifecycleCoordinator.java
+grep -Fq 'server_runtime_recovery_read_only' "$runtime_lifecycle" \
+  || fail 'Server startup reports runtime ready after restore entered read-only recovery'
+task_command=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotTaskSubcommand.java
+brain_command=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotBrainSubcommand.java
+job_command=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotJobSubcommand.java
+for recovery_entry in "$task_command" "$brain_command"; do
+  grep -Fq 'TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)' "$recovery_entry" \
+    || fail "$recovery_entry can report a rejected recovery mutation as successful"
+done
+grep -Fq 'if (!queued)' "$job_command" \
+  || fail 'Operator tell can report an unqueued Brain request as successful'
 
 grep -Fq 'record Exact' common/src/main/java/io/github/greytaiwolf/fakeaiplayer/pathfinding/NavGoal.java \
   || fail 'P2 NavGoal.Exact contract is missing'
@@ -602,6 +899,20 @@ client_manager=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/client/cr
 setup_screen=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/client/screen/BotAiSetupScreen.java
 chat_router=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/brain/chat/BotChatRouter.java
 social_coordinator=common/src/main/java/io/github/greytaiwolf/fakeaiplayer/brain/social/BotSocialCoordinator.java
+
+set_option_body="$(sed -n '/public void handleSetOption(/,/public void handleTeleport(/p' \
+    "$server_networking")"
+grep -Fq 'rejectRecoveryControl(player, target' <<< "$set_option_body" \
+  || fail 'Panel options can mutate runtime state during read-only recovery'
+teleport_body="$(sed -n '/public void handleTeleport(/,/private static boolean rejectRecoveryControl(/p' \
+    "$server_networking")"
+grep -Fq 'rejectRecoveryControl(player, target' <<< "$teleport_body" \
+  || fail 'Panel teleport can mutate runtime state during read-only recovery'
+teleport_gate_order="$(grep -n -m1 'rejectRecoveryControl(player, target' <<< "$teleport_body" | cut -d: -f1)"
+teleport_world_order="$(grep -n -m1 'CapabilityRuntime.decide' <<< "$teleport_body" | cut -d: -f1)"
+[[ -n "$teleport_gate_order" && -n "$teleport_world_order" \
+    && "$teleport_gate_order" -lt "$teleport_world_order" ]] \
+  || fail 'Panel teleport recovery gate must run before capability/world reads'
 
 grep -Fq '.then(AIBotAiSubcommand.build())' \
   common/src/main/java/io/github/greytaiwolf/fakeaiplayer/command/AIBotCommand.java \

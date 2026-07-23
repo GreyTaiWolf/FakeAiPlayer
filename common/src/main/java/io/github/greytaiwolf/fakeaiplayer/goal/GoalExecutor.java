@@ -105,6 +105,12 @@ public final class GoalExecutor {
                            GoalSpec.Source source,
                            int priority,
                            RestoreSeed restore) {
+        if (restore == null && TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)) {
+            BotLog.security("runtime_recovery_goal_rejected",
+                    "bot_uuid", bot.getUUID(),
+                    "goal", goal == null ? "null" : goal.getClass().getSimpleName());
+            return false;
+        }
         GoalSpec.Source resolvedSource = restore == null
                 ? (source == null ? GoalSpec.Source.LEGACY : source)
                 : restore.source();
@@ -114,6 +120,38 @@ public final class GoalExecutor {
         }
         UUID missionId = restore == null ? UUID.randomUUID() : restore.missionId();
         int startedTick = restore == null ? bot.getServer().getTickCount() : restore.startedTick();
+        GoalSpec incomingGoalSpec = LegacyMissionCompiler.goalSpec(
+                goal,
+                resolvedSource,
+                resolvedPriority,
+                bot.serverLevel().dimension().location().toString(),
+                restore == null ? null : restore.policy());
+        if (restore != null && restore.intentFingerprint() != null
+                && !restore.intentFingerprint().equals(
+                        MissionPlan.intentFingerprint(incomingGoalSpec))) {
+            BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE, bot,
+                    "mission_restore_isolated",
+                    "mission_id", missionId,
+                    "reason", "mission_intent_binding_mismatch");
+            return false;
+        }
+        if (restore != null && restoredCancellationRequired(
+                restore.replanAfterInterrupt(), restore.policy())) {
+            // The V3 bit represents a policy action that was already decided before the crash.
+            // CANCEL must win before blueprint admission, world satisfaction or planning can
+            // relabel that terminal result as BLOCKED/COMPLETED.
+            String reason = "mission_policy_cancel_after_restored_interrupt";
+            recordImmediateResult(
+                    bot,
+                    missionId,
+                    goal,
+                    startedTick,
+                    GoalEvaluation.unknown(reason),
+                    GoalResult.Status.CANCELLED,
+                    reason,
+                    SkillOutcome.cancelled(reason, 0));
+            return true;
+        }
         BlueprintSchema verifiedBuildBlueprint = null;
         if (goal instanceof Goal.Build build) {
             try {
@@ -142,21 +180,6 @@ public final class GoalExecutor {
                                 bot.serverLevel().dimension().location().toString())));
                 return false;
             }
-        }
-        GoalSpec incomingGoalSpec = LegacyMissionCompiler.goalSpec(
-                goal,
-                resolvedSource,
-                resolvedPriority,
-                bot.serverLevel().dimension().location().toString(),
-                restore == null ? null : restore.policy());
-        if (restore != null && restore.intentFingerprint() != null
-                && !restore.intentFingerprint().equals(
-                        MissionPlan.intentFingerprint(incomingGoalSpec))) {
-            BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE, bot,
-                    "mission_restore_isolated",
-                    "mission_id", missionId,
-                    "reason", "mission_intent_binding_mismatch");
-            return false;
         }
         // GOALFIX-GF3:幂等——同一 bot 已有相同目标的活跃计划时,忽略重复 submit
         //(防大脑连点 mine_ore/achieve_goal 覆盖计划、打断进行中的步骤)。
@@ -262,6 +285,7 @@ public final class GoalExecutor {
                 bot.serverLevel().dimension().location().toString(),
                 restore == null ? null : restore.policy(),
                 plan.steps());
+        boolean restoredPlanRecompiledWithCursor = false;
         if (restore != null && restore.planFingerprint() != null) {
             OptionalInt resolvedRevision = resolveRestoredPlanRevision(
                     restoredPlanRevision,
@@ -287,6 +311,7 @@ public final class GoalExecutor {
                         bot.serverLevel().dimension().location().toString(),
                         restore.policy(),
                         plan.steps());
+                restoredPlanRecompiledWithCursor = restore.cursorCheckpoint() != null;
                 BotLog.task(bot, "mission_restore_replanned",
                         "mission_id", missionId,
                         "old_revision", restoredPlanRevision,
@@ -313,7 +338,9 @@ public final class GoalExecutor {
                     alignedStepLabels(List.of(), restoredCompletedSteps, remainingStepLabels),
                     restore == null ? RecoveryLedger.Snapshot.empty() : restore.recovery(),
                     restoredCursor, restoredElapsedTicks,
-                    restore != null && restore.replanAfterInterrupt());
+                    restore != null && restore.replanAfterInterrupt(),
+                    restoredPlanRecompiledWithCursor,
+                    restore != null);
         } catch (IllegalArgumentException invalidRecoverySnapshot) {
             BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE, bot,
                     "mission_runtime_budget_rejected",
@@ -355,10 +382,10 @@ public final class GoalExecutor {
         userGoal.putIfAbsent(bot.getUUID(), goal); // B:首个目标记为"用户原始目标";后续前置子目标被上面拦下,换目标由用户消息清空
         BotLog.task(bot, "goal_plan", "goal", goal, "steps", plan.describeSteps());
         report(bot, "我会按 " + plan.steps().size() + " 步完成目标。");
-        if (active.replanAfterInterrupt) {
-            // A crash may happen after safety publishes the durable replan obligation but before
-            // the safety frame unwinds. Never restart the stale child in that window; tickBot will
-            // consume exactly one INTERRUPT_REPLAN budget and rebuild from the current world.
+        if (restore != null) {
+            // Restored work is admitted but never starts from the server-start callback. The first
+            // Bot tick gives NavSafetyNet priority, then tickBot either consumes a durable
+            // interruption obligation or installs the reserved Skill from a safe world state.
             active.transition(MissionState.SUSPENDED);
         } else {
             assignNext(bot, active);
@@ -369,6 +396,39 @@ public final class GoalExecutor {
 
     public boolean tickBot(MinecraftServer server, AIPlayerEntity bot) {
         ActivePlan plan = activePlans.get(bot.getUUID());
+        if (TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)) {
+            // A partially accounted or unreadable snapshot puts the entire runtime in recovery
+            // mode. Safety/REFLEX Tasks may still run through TaskManager, but Mission state and
+            // budgets stay byte-stable until an operator repairs the source snapshot.
+            return plan != null || queuedGoalCount(bot) > 0;
+        }
+        boolean missionInterruptionPending = plan != null
+                && TaskManager.INSTANCE.hasMissionInterruption(bot, plan.missionId);
+        boolean missionCurrentlyPaused = plan != null
+                && TaskManager.INSTANCE.isMissionAutomaticallyPaused(bot, plan.missionId);
+        boolean durableCancellationPending = plan != null
+                && plan.replanAfterInterrupt;
+        if (plan != null
+                && plan.missionPlan.goal().policy().interruptionPolicy()
+                == MissionPolicy.InterruptionPolicy.CANCEL_ON_INTERRUPT
+                && (durableCancellationPending
+                || missionInterruptionPending
+                || missionCurrentlyPaused)) {
+            // A bound terminal policy action outranks dimension/world evaluation and USER pause.
+            // Cancellation does not need a fallible world snapshot.
+            String reason = durableCancellationPending
+                    ? "mission_policy_cancel_after_restored_interrupt"
+                    : "mission_policy_cancel_on_interrupt";
+            plan.terminalOutcome = SkillOutcome.cancelled(reason, 0);
+            TaskManager.INSTANCE.cancelMissionTasks(
+                    bot, plan.missionId, reason);
+            finishActive(bot, plan, GoalEvaluation.unknown(reason), reason,
+                    true, false, GoalResult.Status.CANCELLED);
+            if (missionInterruptionPending) {
+                TaskManager.INSTANCE.consumeMissionInterruption(bot, plan.missionId);
+            }
+            return false;
+        }
         String actualDimension = bot.serverLevel().dimension().location().toString();
         if (plan != null && plan.missionPlan.goal().dimension() != null
                 && !plan.missionPlan.goal().dimension().equals(actualDimension)) {
@@ -385,22 +445,76 @@ public final class GoalExecutor {
                     reason, false, false, GoalResult.Status.BLOCKED);
             return false;
         }
-        boolean missionInterrupted = plan != null
-                && TaskManager.INSTANCE.consumeMissionInterruption(bot, plan.missionId);
-        boolean missionCurrentlyPaused = plan != null
-                && TaskManager.INSTANCE.isMissionAutomaticallyPaused(bot, plan.missionId);
-        if (plan != null && (missionInterrupted || missionCurrentlyPaused) && !plan.state.terminal()) {
+        boolean interruptionObservedThisTick = missionInterruptionPending;
+        if (plan != null
+                && (missionInterruptionPending || missionCurrentlyPaused)
+                && !plan.state.terminal()) {
             switch (plan.missionPlan.goal().policy().interruptionPolicy()) {
                 case CANCEL_ON_INTERRUPT -> {
-                    TaskManager.INSTANCE.cancelMissionTasks(
-                            bot, plan.missionId, "mission_policy_cancel_on_interrupt");
-                    finishActive(bot, plan, evaluate(bot, plan),
-                            "mission_policy_cancel_on_interrupt", true, false,
-                            GoalResult.Status.CANCELLED);
-                    return false;
+                    throw new IllegalStateException(
+                            "mission_cancel_dispatch_order_broken");
                 }
-                case REPLAN_AFTER_SAFETY -> plan.replanAfterInterrupt = true;
+                case REPLAN_AFTER_SAFETY -> {
+                    plan.replanAfterInterrupt = true;
+                    Optional<Task> interruptingTask = TaskManager.INSTANCE.getActive(bot)
+                            .filter(task -> task != plan.currentTask);
+                    if (interruptingTask.isPresent()) {
+                        // Keep the latch and paused frame intact. Generic unwind is quarantined,
+                        // so the old Task cannot run onResume before the interrupting owner exits.
+                        if (plan.state == MissionState.RUNNING
+                                || plan.state == MissionState.RECOVERING
+                                || plan.state == MissionState.PLANNED) {
+                            plan.transition(MissionState.SUSPENDED);
+                        }
+                        if (missionInterruptionPending) {
+                            markDirty(bot);
+                        }
+                        return true;
+                    }
+                }
                 case RESUME_AFTER_SAFETY -> {
+                    // This is the only path allowed to invoke onResume while the interruption
+                    // latch exists. User/inventory locks may still keep the frame paused.
+                    try {
+                        boolean resumed =
+                                TaskManager.INSTANCE.resumeMissionAfterInterruption(
+                                        bot, plan.missionId);
+                        if (missionCurrentlyPaused && !resumed) {
+                            // The interrupting Task or a persistent owner still blocks the exact
+                            // frame. Keep the latch so a later generic unwind cannot bypass this
+                            // exception-contained policy handoff.
+                            if (plan.state == MissionState.RUNNING
+                                    || plan.state == MissionState.RECOVERING
+                                    || plan.state == MissionState.PLANNED) {
+                                plan.transition(MissionState.SUSPENDED);
+                            }
+                            if (missionInterruptionPending) {
+                                markDirty(bot);
+                            }
+                            return true;
+                        }
+                    } catch (RuntimeException resumeFailure) {
+                        plan.terminalOutcome =
+                                interruptionResumeFailureOutcome(resumeFailure);
+                        String reason = plan.terminalOutcome.reason();
+                        TaskManager.INSTANCE.cancelMissionTasks(
+                                bot, plan.missionId, reason);
+                        finishActive(
+                                bot,
+                                plan,
+                                GoalEvaluation.unknown(reason),
+                                reason,
+                                false,
+                                false,
+                                GoalResult.Status.FAILED);
+                        if (missionInterruptionPending) {
+                            TaskManager.INSTANCE.consumeMissionInterruption(
+                                    bot, plan.missionId);
+                        }
+                        BotLog.error(bot, "mission_resume_after_interrupt_failed",
+                                resumeFailure, "mission_id", plan.missionId);
+                        return false;
+                    }
                 }
             }
             if (plan.state == MissionState.RUNNING
@@ -408,15 +522,19 @@ public final class GoalExecutor {
                     || plan.state == MissionState.PLANNED) {
                 plan.transition(MissionState.SUSPENDED);
             }
-            if (missionInterrupted) {
-                // Persist the policy obligation at the same stable cursor/attempt boundary as
-                // the paused Task. REPLAN_AFTER_SAFETY must survive a crash before resume.
+            if (missionInterruptionPending) {
+                // Project the policy decision into the durable Mission before clearing the
+                // transient TaskManager latch. REPLAN/CANCEL must survive a crash at this handoff.
                 markDirty(bot);
+                TaskManager.INSTANCE.consumeMissionInterruption(bot, plan.missionId);
             }
         }
         PlanCursor.Snapshot advancedCursor = null;
         boolean persistAdvancedCursor = false;
-        if (plan != null && shouldChargeMissionBudget(bot, plan)) {
+        if (plan != null
+                && !interruptionObservedThisTick
+                && !plan.restoredAdmissionPending
+                && shouldChargeMissionBudget(bot, plan)) {
             plan.elapsedMissionTicks = incrementMissionTicks(plan.elapsedMissionTicks);
             advancedCursor = plan.planCursor.advanceTo(plan.elapsedMissionTicks);
             persistAdvancedCursor = shouldPersistRuntimeCheckpoint(plan.elapsedMissionTicks);
@@ -472,6 +590,11 @@ public final class GoalExecutor {
                 && active.isEmpty()
                 && !TaskManager.INSTANCE.hasPaused(bot)
                 && plan.currentTask.state() != TaskState.PAUSED;
+        boolean pausedMissionChildAfterInterrupt = plan.state == MissionState.SUSPENDED
+                && plan.currentTask != null
+                && active.isEmpty()
+                && TaskManager.INSTANCE.isMissionAutomaticallyPaused(
+                bot, plan.missionId);
         boolean restoredInterruptAwaitingReplan = plan.state == MissionState.SUSPENDED
                 && plan.currentTask == null
                 && active.isEmpty()
@@ -479,6 +602,7 @@ public final class GoalExecutor {
         if (plan.replanAfterInterrupt
                 && (resumedMissionChild
                 || terminalMissionChildAfterInterrupt
+                || pausedMissionChildAfterInterrupt
                 || restoredInterruptAwaitingReplan)) {
             boolean verifiedChildProgress = false;
             SkillOutcome interruptedChildOutcome = null;
@@ -563,6 +687,9 @@ public final class GoalExecutor {
             plan.terminalOutcome = null;
             plan.replanAfterInterrupt = false;
             plan.transition(MissionState.RECOVERING);
+            if (restoredAdmissionReady(bot)) {
+                plan.restoredAdmissionPending = false;
+            }
             assignNext(bot, plan);
             return true;
         }
@@ -603,6 +730,13 @@ public final class GoalExecutor {
             return true;
         }
         if (plan.current == null) {
+            // The first safety-ordered Goal tick has now admitted this restored plan. READY
+            // frontiers clear the flag again on successful Task assignment; WAITING/RUNNING
+            // composite frontiers must also begin advancing their durable clock next tick.
+            if (plan.restoredAdmissionPending && !restoredAdmissionReady(bot)) {
+                return true;
+            }
+            plan.restoredAdmissionPending = false;
             assignNext(bot, plan);
             return true;
         }
@@ -668,6 +802,9 @@ public final class GoalExecutor {
 
     /** Delivers one edge-triggered event to a waiting composite Mission plan. */
     public boolean signalMissionEvent(AIPlayerEntity bot, String eventKey) {
+        if (TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)) {
+            return false;
+        }
         ActivePlan plan = activePlans.get(bot.getUUID());
         if (plan == null || plan.state.terminal()) {
             return false;
@@ -680,9 +817,11 @@ public final class GoalExecutor {
         PlanCursor.Snapshot after = plan.planCursor.signalEvent(eventKey, plan.elapsedMissionTicks);
         boolean consumed = !before.equals(after);
         if (consumed) {
-            if (plan.currentTask == null) {
+            if (plan.currentTask == null && !plan.restoredAdmissionPending) {
                 assignNext(bot, plan);
             } else {
+                // A restored WAITING cursor may accept the event, but the first Skill still waits
+                // for the normal Bot tick where navigation safety and recovery gates run first.
                 markDirty(bot);
             }
         }
@@ -778,6 +917,7 @@ public final class GoalExecutor {
         ActivePlan active = activePlans.get(bot.getUUID());
         if (active != null) {
             captureTaskEvidence(active);
+            latchPendingInterruptionForPersistence(bot, active);
         }
         MissionRecord activeRecord = active == null ? null : new MissionRecord(
                 active.missionId.toString(), MissionSpec.fromGoal(
@@ -795,10 +935,17 @@ public final class GoalExecutor {
                 hasPersistableMission && TaskManager.INSTANCE.isUserPaused(bot));
     }
 
-    public void restoreRuntime(AIPlayerEntity bot, MissionRuntimeRecord runtime) {
+    /**
+     * Restores every persisted Mission entry for one Bot.
+     *
+     * @return true only when every active/queued record was either restored or deliberately
+     * terminalized; false means the source snapshot must remain read-only to prevent data loss.
+     */
+    public boolean restoreRuntime(AIPlayerEntity bot, MissionRuntimeRecord runtime) {
         if (runtime == null) {
-            return;
+            return false;
         }
+        boolean fullyAccounted = true;
         MissionRecord activeRecord = runtime.active();
         boolean restorePaused = runtime.userPaused()
                 && (activeRecord != null || !runtime.queue().isEmpty());
@@ -807,23 +954,57 @@ public final class GoalExecutor {
             // effects. The arbiter will keep restored work planned until the user resumes.
             TaskManager.INSTANCE.pauseUserIntent(bot, "restore_persisted_pause");
         }
-        if (activeRecord != null && activeRecord.spec() != null) {
-            Optional<Goal> restored = activeRecord.spec().toGoal();
-            if (restored.isPresent()) {
-                try {
-                    // Recovery itself re-reads and verifies the persisted generated blueprint.
-                    // submit performs the same check again after seed construction, closing the
-                    // restore-time file replacement window.
-                    RestoreSeed seed = restoreSeed(bot, restored.get(), activeRecord);
-                    submit(bot, restored.get(), seed.source(), seed.priority(), seed);
-                } catch (IOException exception) {
+        if (activeRecord != null) {
+            if (activeRecord.spec() == null) {
+                BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE, bot,
+                        "mission_restore_isolated", "type", "unknown",
+                        "reason", "mission_spec_missing");
+                fullyAccounted = false;
+            } else {
+                Optional<Goal> restored = activeRecord.spec().toGoal();
+                if (restored.isPresent()) {
+                    try {
+                        Optional<UUID> cancellation =
+                                authenticatedRestoredCancellation(activeRecord);
+                        if (cancellation.isPresent()) {
+                            // This terminal dispatcher uses only checksum-bound checkpoint data,
+                            // the self-bound MissionSpec and matching Mission ID. It deliberately
+                            // runs before world/context/blueprint reads, so a persisted CANCEL
+                            // cannot be relabelled or isolated by changed world state.
+                            String reason = "mission_policy_cancel_after_restored_interrupt";
+                            recordImmediateResult(
+                                    bot,
+                                    cancellation.get(),
+                                    restored.get(),
+                                    bot.getServer().getTickCount(),
+                                    GoalEvaluation.unknown(reason),
+                                    GoalResult.Status.CANCELLED,
+                                    reason,
+                                    SkillOutcome.cancelled(reason, 0));
+                        } else {
+                            // Recovery itself re-reads and verifies persisted world bindings.
+                            // submit repeats Build validation after seed construction, closing the
+                            // restore-time file replacement window.
+                            RestoreSeed seed = restoreSeed(bot, restored.get(), activeRecord);
+                            boolean accepted = submit(
+                                    bot, restored.get(), seed.source(), seed.priority(), seed);
+                            if (!accepted
+                                    && !hasTerminalResult(bot, seed.missionId())) {
+                                fullyAccounted = false;
+                            }
+                        }
+                    } catch (IOException | RuntimeException exception) {
+                        fullyAccounted = false;
+                        BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE, bot,
+                                "mission_restore_isolated", "type", activeRecord.spec().type(),
+                                "reason", exception.getMessage());
+                    }
+                } else {
+                    fullyAccounted = false;
                     BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE, bot,
                             "mission_restore_isolated", "type", activeRecord.spec().type(),
-                            "reason", exception.getMessage());
+                            "reason", "invalid_spec");
                 }
-            } else if (restored.isEmpty()) {
-                BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE, bot,
-                        "mission_restore_isolated", "type", activeRecord.spec().type(), "reason", "invalid_spec");
             }
         }
         java.util.Deque<GoalRequest> restoredQueue = goalQueue.computeIfAbsent(
@@ -844,6 +1025,7 @@ public final class GoalExecutor {
                         restoredPriority,
                         submissionSequence.incrementAndGet()));
             } else {
+                fullyAccounted = false;
                 BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE, bot,
                         "mission_queue_restore_isolated", "type", spec.type(),
                         "reason", restoredGoal.isEmpty()
@@ -852,13 +1034,20 @@ public final class GoalExecutor {
         }
         if (restoredQueue.isEmpty()) {
             goalQueue.remove(bot.getUUID(), restoredQueue);
-        } else if (!hasActivePlan(bot)) {
-            advanceQueue(bot);
         }
+        // Never start queued restored work from the server-start callback. The first Bot tick runs
+        // NavSafetyNet before tickBot drains this queue, matching the deferral used for an active
+        // restored Mission.
         if (restorePaused && !hasActivePlan(bot) && queuedGoalCount(bot) == 0) {
             // Every persisted entry was invalid; do not leave an otherwise idle bot user-locked.
             TaskManager.INSTANCE.resumeUserIntent(bot, "restore_persisted_pause_empty");
         }
+        return fullyAccounted;
+    }
+
+    private boolean hasTerminalResult(AIPlayerEntity bot, UUID missionId) {
+        GoalResult result = lastResults.get(bot.getUUID());
+        return result != null && missionId.equals(result.missionId());
     }
 
     private static Map<String, String> checkpoint(ActivePlan active) {
@@ -897,13 +1086,61 @@ public final class GoalExecutor {
                 active.planCursor.checkpoint()));
     }
 
+    private static void latchPendingInterruptionForPersistence(
+            AIPlayerEntity bot,
+            ActivePlan active) {
+        if (!TaskManager.INSTANCE.hasMissionInterruption(bot, active.missionId)
+                && !TaskManager.INSTANCE.isMissionAutomaticallyPaused(
+                bot, active.missionId)) {
+            return;
+        }
+        MissionPolicy.InterruptionPolicy policy =
+                active.missionPlan.goal().policy().interruptionPolicy();
+        if (requiresDurableInterruptionAction(policy)) {
+            // The V3 field predates CANCEL_ON_INTERRUPT and retains its historical name. It now
+            // serves as the durable "policy action pending" bit; restore dispatches the actual
+            // action from the bound MissionPolicy before any Skill can start.
+            active.replanAfterInterrupt = true;
+        }
+    }
+
+    static boolean requiresDurableInterruptionAction(
+            MissionPolicy.InterruptionPolicy policy) {
+        return policy == MissionPolicy.InterruptionPolicy.REPLAN_AFTER_SAFETY
+                || policy == MissionPolicy.InterruptionPolicy.CANCEL_ON_INTERRUPT;
+    }
+
+    static boolean restoredCancellationRequired(
+            boolean pendingPolicyAction,
+            MissionPolicy policy) {
+        return pendingPolicyAction
+                && policy != null
+                && policy.interruptionPolicy()
+                == MissionPolicy.InterruptionPolicy.CANCEL_ON_INTERRUPT;
+    }
+
+    static SkillOutcome interruptionResumeFailureOutcome(
+            RuntimeException failure) {
+        if (failure == null) {
+            throw new IllegalArgumentException("resume_failure_missing");
+        }
+        String reason = "mission_resume_after_interrupt_failed:"
+                + failure.getClass().getSimpleName();
+        return new SkillOutcome(
+                SkillOutcome.Status.FATAL_FAILURE,
+                SkillOutcome.FailureKind.INTERNAL,
+                reason,
+                0,
+                Map.of("phase", "interruption_resume"));
+    }
+
     /**
      * A READY cursor is durable only together with the attempt reservation for that exact
      * activation. Running and arbiter-deferred Tasks deliberately restore through the same
      * reservation path, so no JVM-local Task identity is persisted; every other mixed cursor/Task
      * state is rejected before it can become a V3 checkpoint. The sole exception is a durable
-     * REPLAN_AFTER_SAFETY obligation: its cursor is intentionally discarded before execution and
-     * therefore must not consume a new-plan attempt merely to survive another restart.
+     * post-interruption policy obligation: its cursor may be discarded by REPLAN or terminated by
+     * CANCEL before execution and therefore needs no new-plan attempt merely to survive restart.
      */
     private static void verifyStableCheckpointBoundary(ActivePlan active) {
         PlanCursor.Snapshot cursor = active.planCursor.snapshot();
@@ -940,6 +1177,45 @@ public final class GoalExecutor {
                 || active.pendingAttemptReservation) {
             throw new IllegalStateException("mission_checkpoint_cursor_task_mismatch");
         }
+    }
+
+    /**
+     * Authenticates a pending terminal policy action without consulting mutable world state.
+     * A mixed-but-individually-valid spec/checkpoint can only cause cancellation, never execution.
+     */
+    static Optional<UUID> authenticatedRestoredCancellation(
+            MissionRecord record) throws IOException {
+        Map<String, String> checkpoint = record.checkpoint() == null
+                ? Map.of() : record.checkpoint();
+        MissionCheckpointCodec.DecodeResult decoded = MissionCheckpointCodec.decode(checkpoint);
+        if (!decoded.valid()) {
+            throw new IOException("mission_checkpoint_" + decoded.status().name().toLowerCase(
+                    java.util.Locale.ROOT) + ':' + decoded.reason());
+        }
+        MissionCheckpointCodec.Checkpoint runtime = decoded.checkpoint();
+        if (!runtime.current() || !runtime.replanAfterInterrupt()) {
+            return Optional.empty();
+        }
+        MissionSpec persistedSpec = record.spec();
+        if (!runtime.bound() || persistedSpec == null || !persistedSpec.bindingValid()) {
+            throw new IOException("mission_cancel_binding_invalid");
+        }
+        UUID missionId;
+        try {
+            missionId = UUID.fromString(record.missionId());
+        } catch (RuntimeException exception) {
+            throw new IOException("mission_record_id_invalid", exception);
+        }
+        if (!missionId.equals(runtime.missionId())) {
+            throw new IOException("mission_checkpoint_id_mismatch");
+        }
+        if (!persistedSpec.policyPresent()) {
+            throw new IOException("mission_cancel_policy_missing");
+        }
+        MissionPolicy policy = persistedSpec.persistedPolicy().orElseThrow(
+                () -> new IOException("mission_policy_invalid"));
+        return restoredCancellationRequired(true, policy)
+                ? Optional.of(missionId) : Optional.empty();
     }
 
     private static RestoreSeed restoreSeed(AIPlayerEntity bot,
@@ -1465,7 +1741,7 @@ public final class GoalExecutor {
         plan.currentUsesPendingAttemptReservation = plan.pendingAttemptReservation;
         plan.pendingAttemptReservation = false;
         RecoveryLedger.AttemptDecision attempt = plan.currentUsesPendingAttemptReservation
-                ? restoredAttemptDecision(plan.recoveryLedger, executable.spec())
+                ? plan.recoveryLedger.reuseReservedAttempt(executable.spec())
                 : plan.recoveryLedger.beginAttempt(executable.spec());
         if (!attempt.allowed()) {
             BotLog.task(bot, "mission_skill_attempt_denied",
@@ -1565,6 +1841,9 @@ public final class GoalExecutor {
             markDirty(bot);
             return;
         }
+        // The first restored Skill now owns a real Task. Starting with the next server tick, its
+        // execution may consume the durable Mission time budget.
+        plan.restoredAdmissionPending = false;
         BotLog.task(bot, "mission_skill_attempt_started",
                 "mission_id", plan.missionId,
                 "skill", executable.spec().invocationId(),
@@ -2303,6 +2582,15 @@ public final class GoalExecutor {
                 && !bot.getActionPack().hasActiveActions();
     }
 
+    private static boolean restoredAdmissionReady(AIPlayerEntity bot) {
+        return !TaskManager.INSTANCE.hasPersistentPause(bot)
+                && !TaskManager.INSTANCE.hasNavigationSafetyLease(bot)
+                && !TaskManager.INSTANCE.hasPaused(bot)
+                && !TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)
+                && TaskManager.INSTANCE.getActive(bot).isEmpty()
+                && !bot.getActionPack().hasActiveActions();
+    }
+
     static boolean missionTimeBudgetExhausted(int elapsedMissionTicks, int timeBudgetTicks) {
         return elapsedMissionTicks >= timeBudgetTicks;
     }
@@ -2401,25 +2689,19 @@ public final class GoalExecutor {
                 ? OptionalInt.empty() : OptionalInt.of(currentRevision + 1);
     }
 
-    private static RecoveryLedger.AttemptDecision restoredAttemptDecision(
-            RecoveryLedger ledger,
-            SkillSpec skill) {
-        int reserved = ledger.attemptsFor(skill);
-        int maximum = skill.retryPolicy().maxAttempts();
-        if (reserved < 1 || reserved > maximum) {
-            return new RecoveryLedger.AttemptDecision(
-                    false,
-                    RecoveryLedger.fingerprint(skill),
-                    Math.max(0, reserved),
-                    maximum,
-                    "restored_skill_attempt_reservation_invalid");
+    static boolean canReuseUniqueRecompiledReservation(
+            RecoveryLedger.Snapshot restored,
+            SkillSpec recompiledReadySkill,
+            boolean replanAfterInterrupt) {
+        if (restored == null || recompiledReadySkill == null || replanAfterInterrupt
+                || restored.attemptsBySkill().size() != 1) {
+            return false;
         }
-        return new RecoveryLedger.AttemptDecision(
-                true,
-                RecoveryLedger.fingerprint(skill),
-                reserved,
-                maximum,
-                "restored_attempt_reservation_reused");
+        Integer reserved = restored.attemptsBySkill().get(
+                RecoveryLedger.fingerprint(recompiledReadySkill));
+        return reserved != null
+                && reserved >= 1
+                && reserved <= recompiledReadySkill.retryPolicy().maxAttempts();
     }
 
     static SkillOutcome attemptDeniedOutcome(RecoveryLedger.AttemptDecision attempt) {
@@ -2497,6 +2779,7 @@ public final class GoalExecutor {
         private int snapTargetCount;   // 上次 replan 时目标产物库存计数
         private int snapX, snapY, snapZ; // 上次 replan 时 bot 坐标(横向位移/下潜=进展判据)
         private boolean replanAfterInterrupt;
+        private boolean restoredAdmissionPending;
 
         private ActivePlan(UUID missionId,
                            int startedTick,
@@ -2510,7 +2793,9 @@ public final class GoalExecutor {
                            RecoveryLedger.Snapshot restoredRecovery,
                            CursorCheckpoint restoredCursor,
                            int cursorStartTick,
-                           boolean restoredReplanAfterInterrupt) {
+                           boolean restoredReplanAfterInterrupt,
+                           boolean restoredPlanRecompiledWithCursor,
+                           boolean restoredMission) {
             if (stepLabels == null || stepLabels.size() != totalSteps) {
                 throw new IllegalArgumentException("mission_step_labels_misaligned");
             }
@@ -2543,6 +2828,7 @@ public final class GoalExecutor {
             this.recoveryLedger = new RecoveryLedger(
                     missionPlan.goal().policy().recoveryBudget(), restoredRecovery);
             this.replanAfterInterrupt = restoredReplanAfterInterrupt;
+            this.restoredAdmissionPending = restoredMission;
             if (restoredCursor != null) {
                 PlanCursor.Snapshot restoredSnapshot = this.planCursor.snapshot();
                 if (restoredSnapshot.state() == PlanCursor.State.READY) {
@@ -2559,6 +2845,37 @@ public final class GoalExecutor {
                         throw new IllegalArgumentException(
                                 "restored_skill_attempt_reservation_invalid");
                     }
+                }
+            } else if (restoredPlanRecompiledWithCursor) {
+                PlanCursor.Snapshot recompiledSnapshot = this.planCursor.snapshot();
+                if (recompiledSnapshot.state() == PlanCursor.State.READY
+                        && recompiledSnapshot.readySkills().size() == 1
+                        && canReuseUniqueRecompiledReservation(
+                        restoredRecovery,
+                        recompiledSnapshot.readySkills().getFirst().spec(),
+                        restoredReplanAfterInterrupt)) {
+                    // V3 does not persist the old SkillSpec beside its cursor. A unique semantic
+                    // attempt is the only unambiguous proof that the new one-item frontier is the
+                    // same paused activation; ambiguous multi-entry ledgers remain fail-closed and
+                    // reserve a new attempt.
+                    this.pendingAttemptReservation = true;
+                }
+            }
+            if (restoredMission && !restoredReplanAfterInterrupt
+                    && !this.pendingAttemptReservation) {
+                PlanCursor.Snapshot restoredSnapshot = this.planCursor.snapshot();
+                if (restoredSnapshot.state() == PlanCursor.State.READY) {
+                    if (restoredSnapshot.readySkills().size() != 1) {
+                        throw new IllegalArgumentException(
+                                "restored_skill_ready_cardinality_invalid");
+                    }
+                    RecoveryLedger.AttemptDecision reservation =
+                            this.recoveryLedger.beginAttempt(
+                                    restoredSnapshot.readySkills().getFirst().spec());
+                    if (!reservation.allowed()) {
+                        throw new IllegalArgumentException(reservation.reason());
+                    }
+                    this.pendingAttemptReservation = true;
                 }
             }
         }

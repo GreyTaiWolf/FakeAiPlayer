@@ -46,6 +46,10 @@ public final class IdleCoordinator {
 
     /** Runs ambient state every tick while expensive job sampling remains background-throttled. */
     public boolean tickBot(AIPlayerEntity bot, boolean allowJobClaim) {
+        if (TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)) {
+            IdleBehaviorController.INSTANCE.cancel(bot, "runtime_recovery_read_only");
+            return false;
+        }
         if (TaskManager.INSTANCE.hasPersistentPause(bot)
                 || TaskManager.INSTANCE.getActive(bot).isPresent()
                 || TaskManager.INSTANCE.hasPaused(bot)) {

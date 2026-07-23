@@ -2,11 +2,22 @@ package io.github.greytaiwolf.fakeaiplayer.goal;
 
 import io.github.greytaiwolf.fakeaiplayer.mission.SkillOutcome;
 import io.github.greytaiwolf.fakeaiplayer.mission.RecoveryLedger;
+import io.github.greytaiwolf.fakeaiplayer.mission.CursorCheckpoint;
+import io.github.greytaiwolf.fakeaiplayer.mission.GoalSpec;
+import io.github.greytaiwolf.fakeaiplayer.mission.MissionPolicy;
+import io.github.greytaiwolf.fakeaiplayer.mission.SkillSpec;
+import io.github.greytaiwolf.fakeaiplayer.persist.MissionCheckpointCodec;
+import io.github.greytaiwolf.fakeaiplayer.persist.MissionRecord;
+import io.github.greytaiwolf.fakeaiplayer.persist.MissionSpec;
 import io.github.greytaiwolf.fakeaiplayer.task.TaskState;
 import io.github.greytaiwolf.fakeaiplayer.task.TaskStatus;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -154,7 +165,7 @@ class GoalExecutorOutcomeTest {
     }
 
     @Test
-    void attemptCapacityFailureIsFatalWhileAConsumedSkillBudgetIsBlocked() {
+    void attemptCapacityFailureIsFatalWhileAConsumedSkillBudgetIsBlocked() throws Exception {
         String fingerprint = "a".repeat(64);
         SkillOutcome capacity = GoalExecutor.attemptDeniedOutcome(
                 new RecoveryLedger.AttemptDecision(false, fingerprint, 0, 3,
@@ -169,5 +180,137 @@ class GoalExecutorOutcomeTest {
         assertEquals(SkillOutcome.FailureKind.PRECONDITION, consumed.failureKind());
         assertThrows(IllegalArgumentException.class,
                 () -> GoalExecutor.attemptDeniedOutcome(null));
+
+        SkillSpec torch = new SkillSpec(
+                "step.0.legacy.craft",
+                "legacy.craft",
+                1,
+                Map.of("item", "minecraft:torch", "quota", "4"),
+                List.of("inventory:recipe_inputs"),
+                List.of("inventory(minecraft:torch)>=4"),
+                SkillSpec.RetryPolicy.standard(),
+                MissionPolicy.MutationScope.SURVIVAL);
+        String torchFingerprint = RecoveryLedger.fingerprint(torch);
+        RecoveryLedger.Snapshot unique = new RecoveryLedger.Snapshot(
+                Map.of(torchFingerprint, 1), 1, 0, 0);
+
+        assertTrue(GoalExecutor.canReuseUniqueRecompiledReservation(
+                unique, torch, false));
+        assertFalse(GoalExecutor.canReuseUniqueRecompiledReservation(
+                unique, torch, true));
+        assertFalse(GoalExecutor.canReuseUniqueRecompiledReservation(
+                new RecoveryLedger.Snapshot(
+                        Map.of(torchFingerprint, 1, "a".repeat(64), 1), 1, 0, 0),
+                torch,
+                false));
+
+        SkillSpec table = new SkillSpec(
+                "step.0.legacy.craft",
+                "legacy.craft",
+                1,
+                Map.of("item", "minecraft:crafting_table", "quota", "1"),
+                List.of("inventory:recipe_inputs"),
+                List.of("inventory(minecraft:crafting_table)>=1"),
+                new SkillSpec.RetryPolicy(3, Set.of(SkillOutcome.FailureKind.PRECONDITION)),
+                MissionPolicy.MutationScope.SURVIVAL);
+        assertFalse(GoalExecutor.canReuseUniqueRecompiledReservation(
+                unique, table, false));
+        assertTrue(GoalExecutor.requiresDurableInterruptionAction(
+                MissionPolicy.InterruptionPolicy.REPLAN_AFTER_SAFETY));
+        assertTrue(GoalExecutor.requiresDurableInterruptionAction(
+                MissionPolicy.InterruptionPolicy.CANCEL_ON_INTERRUPT));
+        assertFalse(GoalExecutor.requiresDurableInterruptionAction(
+                MissionPolicy.InterruptionPolicy.RESUME_AFTER_SAFETY));
+        assertFalse(GoalExecutor.requiresDurableInterruptionAction(null));
+        MissionPolicy cancelPolicy = new MissionPolicy(
+                MissionPolicy.RiskLevel.BALANCED,
+                MissionPolicy.MutationScope.SURVIVAL,
+                1_000,
+                2,
+                MissionPolicy.InterruptionPolicy.CANCEL_ON_INTERRUPT);
+        assertTrue(GoalExecutor.restoredCancellationRequired(true, cancelPolicy));
+        assertFalse(GoalExecutor.restoredCancellationRequired(false, cancelPolicy));
+        assertFalse(GoalExecutor.restoredCancellationRequired(true, MissionPolicy.standard()));
+        assertFalse(GoalExecutor.restoredCancellationRequired(true, null));
+        SkillOutcome resumeFailure = GoalExecutor.interruptionResumeFailureOutcome(
+                new IllegalStateException("injected"));
+        assertEquals(SkillOutcome.Status.FATAL_FAILURE, resumeFailure.status());
+        assertEquals(SkillOutcome.FailureKind.INTERNAL, resumeFailure.failureKind());
+        assertEquals("mission_resume_after_interrupt_failed:IllegalStateException",
+                resumeFailure.reason());
+
+        UUID missionId = UUID.randomUUID();
+        String planFingerprint = "b".repeat(64);
+        CursorCheckpoint cursor = new CursorCheckpoint(
+                CursorCheckpoint.CURRENT_VERSION,
+                missionId,
+                0,
+                planFingerprint,
+                0,
+                Map.of("root", new CursorCheckpoint.NodeState(
+                        CursorCheckpoint.NodePhase.ACTIVE,
+                        0,
+                        0,
+                        -1,
+                        -1,
+                        false,
+                        null,
+                        null)),
+                Map.of("step.one", 1),
+                Set.of(),
+                Set.of());
+        MissionCheckpointCodec.Checkpoint pendingCancel =
+                new MissionCheckpointCodec.Checkpoint(
+                        missionId,
+                        0,
+                        planFingerprint,
+                        "c".repeat(64),
+                        "d".repeat(64),
+                        0,
+                        0,
+                        RecoveryLedger.Snapshot.empty(),
+                        MissionCheckpointCodec.ProgressSnapshot.legacy(0),
+                        true,
+                        cursor);
+        MissionSpec cancelSpec = MissionSpec.fromGoal(
+                new Goal.Food(1),
+                GoalSpec.Source.PLAYER_COMMAND,
+                90,
+                cancelPolicy);
+        MissionRecord authenticatedCancel = new MissionRecord(
+                missionId.toString(),
+                cancelSpec,
+                MissionCheckpointCodec.encode(Map.of(), pendingCancel));
+
+        assertEquals(Optional.of(missionId),
+                GoalExecutor.authenticatedRestoredCancellation(authenticatedCancel));
+        assertThrows(java.io.IOException.class,
+                () -> GoalExecutor.authenticatedRestoredCancellation(new MissionRecord(
+                        UUID.randomUUID().toString(),
+                        cancelSpec,
+                        authenticatedCancel.checkpoint())));
+        MissionSpec unboundCancel = new MissionSpec(
+                cancelSpec.type(),
+                cancelSpec.params(),
+                cancelSpec.values(),
+                cancelSpec.source(),
+                cancelSpec.priority(),
+                cancelSpec.policy(),
+                "");
+        assertThrows(java.io.IOException.class,
+                () -> GoalExecutor.authenticatedRestoredCancellation(new MissionRecord(
+                        missionId.toString(),
+                        unboundCancel,
+                        authenticatedCancel.checkpoint())));
+
+        MissionSpec resumeSpec = MissionSpec.fromGoal(
+                new Goal.Food(1),
+                GoalSpec.Source.PLAYER_COMMAND,
+                90,
+                MissionPolicy.standard());
+        assertTrue(GoalExecutor.authenticatedRestoredCancellation(new MissionRecord(
+                missionId.toString(),
+                resumeSpec,
+                authenticatedCancel.checkpoint())).isEmpty());
     }
 }

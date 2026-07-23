@@ -24,6 +24,9 @@ public final class IntentController {
                                                           ControlOrigin origin,
                                                           String reason) {
         requireServerThread(bot);
+        if (rejectRecoveryMutation(bot, origin, "cancel_current")) {
+            return unchangedOutcome();
+        }
         rejectInventoryOwnedMutation(bot);
         return cancel(bot, origin, reason, IntentControlTransaction.Scope.CURRENT);
     }
@@ -32,6 +35,9 @@ public final class IntentController {
                                                       ControlOrigin origin,
                                                       String reason) {
         requireServerThread(bot);
+        if (rejectRecoveryMutation(bot, origin, "cancel_all")) {
+            return unchangedOutcome();
+        }
         rejectInventoryOwnedMutation(bot);
         return cancel(bot, origin, reason, IntentControlTransaction.Scope.ALL);
     }
@@ -43,6 +49,9 @@ public final class IntentController {
         requireServerThread(bot);
         Objects.requireNonNull(origin, "origin");
         Objects.requireNonNull(startReplacement, "startReplacement");
+        if (rejectRecoveryMutation(bot, origin, "replace")) {
+            return new ReplaceResult(unchangedOutcome(), false);
+        }
         rejectInventoryOwnedMutation(bot);
         if (TaskManager.INSTANCE.hasSafetyOwnership(bot)) {
             String normalized = normalizeReason(origin, reason);
@@ -80,6 +89,9 @@ public final class IntentController {
     public boolean pause(AIPlayerEntity bot, ControlOrigin origin, String reason) {
         requireServerThread(bot);
         String normalized = normalizeReason(origin, reason);
+        if (rejectRecoveryMutation(bot, origin, "pause")) {
+            return false;
+        }
         if (TaskManager.INSTANCE.isUserPaused(bot)) {
             return false;
         }
@@ -106,6 +118,9 @@ public final class IntentController {
     public boolean resume(AIPlayerEntity bot, ControlOrigin origin, String reason) {
         requireServerThread(bot);
         String normalized = normalizeReason(origin, reason);
+        if (rejectRecoveryMutation(bot, origin, "resume")) {
+            return false;
+        }
         if (!TaskManager.INSTANCE.isUserPaused(bot)) {
             return false;
         }
@@ -166,6 +181,31 @@ public final class IntentController {
                 false,
                 false,
                 false);
+    }
+
+    static boolean recoveryControlBlocked(boolean recoveryMode, ControlOrigin origin) {
+        return recoveryMode && origin != ControlOrigin.SYSTEM;
+    }
+
+    private static boolean rejectRecoveryMutation(AIPlayerEntity bot,
+                                                  ControlOrigin origin,
+                                                  String operation) {
+        Objects.requireNonNull(origin, "origin");
+        if (!recoveryControlBlocked(
+                TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot), origin)) {
+            return false;
+        }
+        BotLog.security("runtime_recovery_control_rejected",
+                "bot_uuid", bot.getUUID(),
+                "origin", origin,
+                "operation", operation);
+        if (origin.notifiesUser()) {
+            BrainCoordinator.INSTANCE.sendPanelChat(
+                    bot,
+                    "system",
+                    "运行时存档正在只读恢复保护中；修复 runtime.json 并重启服务器后才能修改任务。");
+        }
+        return true;
     }
 
     private static void requireServerThread(AIPlayerEntity bot) {

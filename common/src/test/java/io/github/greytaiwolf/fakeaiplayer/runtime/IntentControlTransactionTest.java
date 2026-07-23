@@ -75,6 +75,14 @@ final class IntentControlTransactionTest {
 
         assertFalse(outcome.changed());
         assertFalse(port.events.stream().anyMatch(event -> event.startsWith("publish:")));
+        assertTrue(IntentController.recoveryControlBlocked(
+                true, IntentController.ControlOrigin.PLAYER_COMMAND));
+        assertTrue(IntentController.recoveryControlBlocked(
+                true, IntentController.ControlOrigin.LLM_TOOL));
+        assertFalse(IntentController.recoveryControlBlocked(
+                true, IntentController.ControlOrigin.SYSTEM));
+        assertFalse(IntentController.recoveryControlBlocked(
+                false, IntentController.ControlOrigin.PLAYER_COMMAND));
     }
 
     private static final class FakePort implements IntentControlTransaction.Port {

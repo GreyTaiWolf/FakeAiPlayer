@@ -11,6 +11,7 @@ import io.github.greytaiwolf.fakeaiplayer.memory.BotMemoryStore;
 import io.github.greytaiwolf.fakeaiplayer.runtime.IntentController;
 import io.github.greytaiwolf.fakeaiplayer.runtime.TaskOrigin;
 import io.github.greytaiwolf.fakeaiplayer.task.MoveTask;
+import io.github.greytaiwolf.fakeaiplayer.task.TaskManager;
 import java.util.Arrays;
 import java.util.Optional;
 import net.minecraft.commands.CommandSourceStack;
@@ -191,8 +192,15 @@ public final class AIBotMemorySubcommand {
                                                 String name,
                                                 BotAuthorizationPolicy.Operation operation,
                                                 String action) {
-        return BotAuthorizationGate.INSTANCE.resolveAuthorized(
+        Optional<AIPlayerEntity> resolved = BotAuthorizationGate.INSTANCE.resolveAuthorized(
                 source, name, operation, "command:memory_" + action);
+        if (operation == BotAuthorizationPolicy.Operation.COMMAND
+                && resolved.filter(TaskManager.INSTANCE::hasRuntimeRecoveryLock).isPresent()) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] memory mutation rejected: runtime recovery is read-only"));
+            return Optional.empty();
+        }
+        return resolved;
     }
 
     private static BotMemory memory(AIPlayerEntity bot) {

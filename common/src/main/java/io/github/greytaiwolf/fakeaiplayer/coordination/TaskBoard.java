@@ -19,6 +19,7 @@ public final class TaskBoard {
 
     private final Map<UUID, Job> jobs = new ConcurrentHashMap<>();
     private volatile UUID runtimeSessionId = UUID.randomUUID();
+    private volatile boolean claimsSuspended;
 
     private TaskBoard() {
     }
@@ -32,6 +33,9 @@ public final class TaskBoard {
     }
 
     private UUID post(Job.Scope scope, UUID ownerUuid, String kind, Map<String, String> params, String role) {
+        if (claimsSuspended) {
+            throw new IllegalStateException("runtime_recovery_read_only");
+        }
         UUID id = UUID.randomUUID();
         Job job = new Job(id, clean(kind), Map.copyOf(params), clean(role), scope, ownerUuid,
                 Job.Status.OPEN, null, null, null, "");
@@ -42,6 +46,9 @@ public final class TaskBoard {
     }
 
     public Optional<Job> claimNext(AIPlayerEntity bot, Set<String> roles) {
+        if (claimsSuspended) {
+            return Optional.empty();
+        }
         UUID ownerUuid = AIPlayerManager.INSTANCE.ownerOf(bot).orElse(null);
         for (Job job : snapshot()) {
             if (job.status() != Job.Status.OPEN || !job.claimableBy(ownerUuid) || !roleMatches(job.role(), roles)) {
@@ -124,7 +131,18 @@ public final class TaskBoard {
 
     public UUID beginRuntimeSession() {
         runtimeSessionId = UUID.randomUUID();
+        claimsSuspended = false;
         return runtimeSessionId;
+    }
+
+    public void suspendClaims(String reason) {
+        claimsSuspended = true;
+        BotLog.security("job_claims_suspended",
+                "reason", reason == null ? "runtime_restore_unaccounted" : reason);
+    }
+
+    public boolean claimsSuspended() {
+        return claimsSuspended;
     }
 
     public UUID runtimeSessionId() {

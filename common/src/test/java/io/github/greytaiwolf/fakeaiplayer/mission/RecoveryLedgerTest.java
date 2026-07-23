@@ -208,6 +208,22 @@ class RecoveryLedgerTest {
         assertEquals(2, restored.consecutiveNoProgressRecoveries());
         assertEquals(1, restored.postconditionRecoveriesConsumed());
         assertEquals(3, restored.beginAttempt(recompiled).attempt());
+
+        SkillSpec beforeRestart = skill("step.1", "legacy.craft", 1,
+                Map.of("item", "minecraft:torch", "quota", "4"), 3);
+        RecoveryLedger beforePending = new RecoveryLedger(4);
+        assertEquals(1, beforePending.beginAttempt(beforeRestart).attempt());
+
+        RecoveryLedger restoredPending = new RecoveryLedger(4, beforePending.snapshot());
+        SkillSpec afterRecompile = skill("step.0", "legacy.craft", 1,
+                Map.of("quota", "4", "item", "minecraft:torch"), 3);
+        RecoveryLedger.AttemptDecision reused =
+                restoredPending.reuseReservedAttempt(afterRecompile);
+
+        assertTrue(reused.allowed());
+        assertEquals(1, reused.attempt());
+        assertEquals("restored_attempt_reservation_reused", reused.reason());
+        assertEquals(beforePending.snapshot(), restoredPending.snapshot());
     }
 
     @Test

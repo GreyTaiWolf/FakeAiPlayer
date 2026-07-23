@@ -69,6 +69,24 @@ public final class RecoveryLedger {
     }
 
     /**
+     * Reuses a reservation whose semantic identity was already proven by the restoring runtime.
+     * This method is read-only so a paused activation cannot consume another attempt merely
+     * because its plan path changed across a restart.
+     */
+    public AttemptDecision reuseReservedAttempt(SkillSpec skill) {
+        Objects.requireNonNull(skill, "skill");
+        String fingerprint = fingerprint(skill);
+        int reserved = attemptsBySkill.getOrDefault(fingerprint, 0);
+        int limit = skill.retryPolicy().maxAttempts();
+        if (reserved < 1 || reserved > limit) {
+            return new AttemptDecision(false, fingerprint, Math.max(0, reserved), limit,
+                    "restored_skill_attempt_reservation_invalid");
+        }
+        return new AttemptDecision(true, fingerprint, reserved, limit,
+                "restored_attempt_reservation_reused");
+    }
+
+    /**
      * Rolls back the most recent reservation when the central arbiter defers installation. A
      * Skill whose {@code start} method was entered is a real attempt and must not be rolled back.
      */

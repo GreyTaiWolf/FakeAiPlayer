@@ -1,6 +1,7 @@
 package io.github.greytaiwolf.fakeaiplayer.gametest;
 
 import io.github.greytaiwolf.fakeaiplayer.action.InventoryAction;
+import io.github.greytaiwolf.fakeaiplayer.coordination.IdleCoordinator;
 import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.goal.Goal;
 import io.github.greytaiwolf.fakeaiplayer.goal.GoalEvaluation;
@@ -68,7 +69,7 @@ public final class SharedP3MissionGameTestScenarios {
                             && TaskManager.INSTANCE.getActive(bot).isEmpty(),
                     "Wrong-dimension Mission produced start side effects");
             UUID missionId = UUID.randomUUID();
-            HoldTask mission = new HoldTask();
+            ResumeSideEffectTask mission = new ResumeSideEffectTask();
             HoldTask reflex = new HoldTask();
 
             TaskAssignmentResult missionStart = TaskManager.INSTANCE.assign(
@@ -89,20 +90,65 @@ public final class SharedP3MissionGameTestScenarios {
                     "Mission pause ownership was not queryable");
 
             TaskManager.INSTANCE.abort(bot);
-            require(TaskManager.INSTANCE.getActive(bot).orElse(null) == mission,
-                    "Aborting the reflex did not restore the exact Mission Task");
-            require(mission.state() == TaskState.RUNNING,
-                    "Restored Mission is not running: " + mission.state());
+            require(TaskManager.INSTANCE.getActive(bot).isEmpty()
+                            && mission.state() == TaskState.PAUSED,
+                    "Generic reflex unwind resumed Mission before policy handoff");
+            require(TaskManager.INSTANCE.pausedDepth(bot) == 1,
+                    "Mission frame disappeared before policy handoff");
+            require(TaskManager.INSTANCE.hasMissionInterruption(bot, missionId),
+                    "Mission interruption could not be observed before durable handoff");
+            require(mission.resumeCalls() == 0,
+                    "Generic reflex unwind invoked Mission onResume before policy handoff");
+            require(TaskManager.INSTANCE.resumeMissionAfterInterruption(bot, missionId),
+                    "Explicit RESUME policy did not restore the paused Mission");
+            require(TaskManager.INSTANCE.getActive(bot).orElse(null) == mission
+                            && mission.state() == TaskState.RUNNING,
+                    "RESUME policy did not restore the exact Mission Task");
+            require(mission.resumeCalls() == 1,
+                    "Explicit RESUME policy did not invoke Mission onResume exactly once");
             require(TaskManager.INSTANCE.pausedDepth(bot) == 0,
-                    "SYSTEM pause frame leaked after reflex abort");
+                    "SYSTEM pause frame leaked after policy handoff");
             require(TaskManager.INSTANCE.activeOrigin(bot)
                             .map(origin -> missionId.equals(origin.missionId()))
                             .orElse(false),
                     "Restored Mission lost its origin identity");
             require(TaskManager.INSTANCE.consumeMissionInterruption(bot, missionId),
                     "Goal layer could not observe the completed interruption");
+            require(!TaskManager.INSTANCE.hasMissionInterruption(bot, missionId),
+                    "Consumed Mission interruption remained observable");
             require(!TaskManager.INSTANCE.consumeMissionInterruption(bot, missionId),
                     "Mission interruption latch was not single-consumer");
+
+            TaskManager.INSTANCE.cancelIntentTasks(bot, "p3_recovery_gate_fixture");
+            TaskManager.INSTANCE.enterRuntimeRecoveryMode("p3_recovery_gate_fixture");
+            try {
+                HoldTask blockedReflex = new HoldTask();
+                TaskAssignmentResult reflexDuringRecovery = TaskManager.INSTANCE.assign(
+                        bot,
+                        blockedReflex,
+                        TaskOrigin.of(TaskOrigin.Kind.REFLEX, "p3_routine_resupply"));
+                require(!reflexDuringRecovery.started()
+                                && reflexDuringRecovery.action() == MissionArbiter.Action.DEFER
+                                && blockedReflex.state() == TaskState.PENDING,
+                        "Routine REFLEX bypassed read-only recovery");
+                require(!IdleCoordinator.INSTANCE.tickBot(bot, true)
+                                && !IdleCoordinator.INSTANCE.ownsAmbientAction(bot),
+                        "Idle work bypassed read-only recovery");
+
+                HoldTask emergencySafety = new HoldTask();
+                TaskAssignmentResult safetyDuringRecovery = TaskManager.INSTANCE.assign(
+                        bot,
+                        emergencySafety,
+                        TaskOrigin.safety("p3_lava_escape"));
+                require(safetyDuringRecovery.started()
+                                && emergencySafety.state() == TaskState.RUNNING,
+                        "Immediate SAFETY work was blocked by read-only recovery");
+                TaskManager.INSTANCE.abort(bot);
+            } finally {
+                TaskManager.INSTANCE.beginRuntimeSession();
+                TaskManager.INSTANCE.cancelIntentTasks(bot, "p3_recovery_gate_cleanup");
+                IdleCoordinator.INSTANCE.cancelAmbient(bot, "p3_recovery_gate_cleanup");
+            }
         });
     }
 
@@ -279,6 +325,32 @@ public final class SharedP3MissionGameTestScenarios {
                     "Throwing resume consumed the preserved frame");
             require(TaskManager.INSTANCE.isUserPaused(bot),
                     "Throwing resume released the persistent USER lock");
+
+            TaskManager.INSTANCE.resetToIdle(bot);
+            UUID interruptedMissionId = UUID.randomUUID();
+            ThrowingTransitionTask policyResumeFailure =
+                    new ThrowingTransitionTask(false, true);
+            require(TaskManager.INSTANCE.assign(
+                            bot,
+                            policyResumeFailure,
+                            TaskOrigin.mission(
+                                    interruptedMissionId,
+                                    "p3_policy_resume_failure"))
+                    .started(), "Policy-resume fixture did not start");
+            require(TaskManager.INSTANCE.pauseFor(
+                            bot,
+                            PauseOwner.SYSTEM,
+                            "p3_prepare_policy_resume_failure"),
+                    "Policy-resume fixture did not pause");
+            require(TaskManager.INSTANCE.hasMissionInterruption(
+                            bot, interruptedMissionId),
+                    "Policy-resume fixture lost its interruption latch");
+            expectFailure(() -> TaskManager.INSTANCE.resumeMissionAfterInterruption(
+                    bot, interruptedMissionId));
+            require(TaskManager.INSTANCE.getActive(bot).isEmpty()
+                            && policyResumeFailure.state() == TaskState.PAUSED
+                            && TaskManager.INSTANCE.pausedDepth(bot) == 1,
+                    "Throwing policy resume escaped its transactional pause frame");
         });
     }
 
@@ -677,6 +749,50 @@ public final class SharedP3MissionGameTestScenarios {
                     + ",smelt=" + smeltTick
                     + ",wood_pick=" + woodenPickaxeTick
                     + ",stone_pick=" + stonePickaxeTick;
+        }
+    }
+
+    private static final class ResumeSideEffectTask extends AbstractTask {
+        private int resumeCalls;
+
+        @Override
+        public String name() {
+            return "resume_side_effect";
+        }
+
+        @Override
+        public String describe() {
+            return "Records policy-authorized Mission resume side effects";
+        }
+
+        @Override
+        public double progress() {
+            return 0.5D;
+        }
+
+        @Override
+        public boolean isWaiting() {
+            return true;
+        }
+
+        @Override
+        protected void onStart(AIPlayerEntity bot) {
+            bot.getActionPack().stopAll();
+        }
+
+        @Override
+        protected void onTick(AIPlayerEntity bot) {
+            bot.getActionPack().stopMovement();
+        }
+
+        @Override
+        protected void onResume(AIPlayerEntity bot) {
+            resumeCalls++;
+            bot.getActionPack().setForward(1.0F);
+        }
+
+        private int resumeCalls() {
+            return resumeCalls;
         }
     }
 

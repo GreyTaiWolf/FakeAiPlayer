@@ -34,6 +34,8 @@ public final class TaskManager {
     private final Map<UUID, FailureRecord> pendingFailure = new ConcurrentHashMap<>();
     private final Map<UUID, String> navigationSafetyLeases = new ConcurrentHashMap<>();
     private final Map<UUID, Set<UUID>> missionInterruptions = new ConcurrentHashMap<>();
+    private final Set<UUID> runtimeRecoveryLocks = ConcurrentHashMap.newKeySet();
+    private volatile boolean runtimeRecoveryMode;
 
     private TaskManager() {
     }
@@ -174,6 +176,14 @@ public final class TaskManager {
             return new MissionArbiter.Decision(
                     MissionArbiter.Action.REJECT, dimensionFailure);
         }
+        if (runtimeRecoveryGateBlocks(
+                runtimeRecoveryMode,
+                runtimeRecoveryLocks.contains(bot.getUUID()),
+                incoming)) {
+            return new MissionArbiter.Decision(
+                    MissionArbiter.Action.DEFER,
+                    "runtime_partial_restore_read_only");
+        }
         String navigationLease = navigationSafetyLeases.get(bot.getUUID());
         if (navigationLease != null && !incoming.safety()) {
             return new MissionArbiter.Decision(
@@ -236,6 +246,16 @@ public final class TaskManager {
                 priority,
                 resumable,
                 origin.kind() == TaskOrigin.Kind.MISSION ? origin.missionSource() : null);
+    }
+
+    static boolean runtimeRecoveryLockBypass(TaskOrigin origin) {
+        return origin != null && origin.safety();
+    }
+
+    static boolean runtimeRecoveryGateBlocks(boolean globalMode,
+                                             boolean botLocked,
+                                             TaskOrigin origin) {
+        return (globalMode || botLocked) && !runtimeRecoveryLockBypass(origin);
     }
 
     private static int safetyPriority(String reason) {
@@ -558,6 +578,43 @@ public final class TaskManager {
         return bot != null && navigationSafetyLeases.containsKey(bot.getUUID());
     }
 
+    /** Fail-closed lock used when the source runtime snapshot could not be fully accounted. */
+    public void acquireRuntimeRecoveryLock(AIPlayerEntity bot) {
+        if (bot == null) {
+            return;
+        }
+        runtimeRecoveryLocks.add(bot.getUUID());
+        BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE,
+                bot,
+                "runtime_recovery_lock_acquired",
+                "reason", "partial_restore_read_only");
+    }
+
+    /**
+     * Freezes ordinary work for the whole runtime session. Per-Bot locks remain useful diagnostics,
+     * but this global gate also covers Bots created after an unreadable or partial restore.
+     */
+    public void enterRuntimeRecoveryMode(String reason) {
+        runtimeRecoveryMode = true;
+        BotLog.security("runtime_recovery_mode_entered",
+                "reason", reason == null ? "runtime_restore_unaccounted" : reason);
+    }
+
+    /** Opens a new restore admission epoch before any persisted work is reconstructed. */
+    public void beginRuntimeSession() {
+        runtimeRecoveryMode = false;
+        runtimeRecoveryLocks.clear();
+    }
+
+    public boolean runtimeRecoveryModeActive() {
+        return runtimeRecoveryMode;
+    }
+
+    public boolean hasRuntimeRecoveryLock(AIPlayerEntity bot) {
+        return runtimeRecoveryMode
+                || (bot != null && runtimeRecoveryLocks.contains(bot.getUUID()));
+    }
+
     public boolean hasSafetyOwnership(AIPlayerEntity bot) {
         if (bot == null) {
             return false;
@@ -584,6 +641,15 @@ public final class TaskManager {
     }
 
     /** Returns a latched preemption even if the interrupt already resumed before GoalExecutor ran. */
+    public boolean hasMissionInterruption(AIPlayerEntity bot, UUID missionId) {
+        if (bot == null || missionId == null) {
+            return false;
+        }
+        Set<UUID> interrupted = missionInterruptions.get(bot.getUUID());
+        return interrupted != null && interrupted.contains(missionId);
+    }
+
+    /** Returns and clears a latched preemption after the Mission has made it durable. */
     public boolean consumeMissionInterruption(AIPlayerEntity bot, UUID missionId) {
         if (bot == null || missionId == null) {
             return false;
@@ -699,6 +765,24 @@ public final class TaskManager {
         return resumeAutomaticOwnedPause(bot, PauseOwner.SYSTEM);
     }
 
+    /**
+     * GoalExecutor-only handoff after it has applied the bound Mission interruption policy.
+     * Generic safety/system unwind paths deliberately cannot call onResume while the transient
+     * Mission interruption latch is still pending.
+     */
+    public boolean resumeMissionAfterInterruption(AIPlayerEntity bot, UUID missionId) {
+        if (bot == null || missionId == null) {
+            return false;
+        }
+        if (!hasMissionInterruption(bot, missionId)) {
+            return false;
+        }
+        return resumeTop(bot, frame ->
+                frame.pauseOwner().automaticResumeAllowed()
+                        && frame.origin().kind() == TaskOrigin.Kind.MISSION
+                        && missionId.equals(frame.origin().missionId()), true);
+    }
+
     private boolean resumeAutomaticOwnedPause(AIPlayerEntity bot, PauseOwner owner) {
         boolean released = releasePauseLock(bot.getUUID(), owner);
         boolean resumed = resumeTop(bot, frame -> frame.pauseOwner() == owner);
@@ -733,6 +817,12 @@ public final class TaskManager {
 
     private boolean resumeTop(AIPlayerEntity bot,
                               java.util.function.Predicate<ExecutionStack.Frame<Task>> allowed) {
+        return resumeTop(bot, allowed, false);
+    }
+
+    private boolean resumeTop(AIPlayerEntity bot,
+                              java.util.function.Predicate<ExecutionStack.Frame<Task>> allowed,
+                              boolean missionPolicyAuthorized) {
         UUID uuid = bot.getUUID();
         if (active.containsKey(uuid)) {
             return false;
@@ -752,6 +842,19 @@ public final class TaskManager {
             return false;
         }
         ExecutionStack.Frame<Task> frame = top.orElseThrow();
+        if (runtimeRecoveryGateBlocks(
+                runtimeRecoveryMode,
+                runtimeRecoveryLocks.contains(uuid),
+                frame.origin())) {
+            return false;
+        }
+        if (!missionPolicyAuthorized
+                && missionTickQuarantined(frame.origin(), missionInterruptions.get(uuid))) {
+            // onResume is not observational: MoveTask and mining/drop-recovery adapters can start
+            // paths or child Tasks immediately. Leave the exact frame paused until GoalExecutor
+            // has dispatched RESUME/REPLAN/CANCEL from the bound MissionPolicy.
+            return false;
+        }
         Task task = frame.work();
         try {
             task.resume(bot);
@@ -794,6 +897,12 @@ public final class TaskManager {
     }
 
     public boolean resumeUserIntent(AIPlayerEntity bot, String why) {
+        if (hasRuntimeRecoveryLock(bot)) {
+            BotLog.security("runtime_recovery_resume_rejected",
+                    "bot_uuid", bot.getUUID(),
+                    "reason", why == null ? "user_resume" : why);
+            return false;
+        }
         boolean changed = resumeOwnedPause(bot, PauseOwner.USER);
         BotLog.task(bot, "mission_user_resumed", "why", why, "stack_depth", pausedDepth(bot));
         return changed;
@@ -811,10 +920,27 @@ public final class TaskManager {
                 pauseLocks.remove(uuid);
                 navigationSafetyLeases.remove(uuid);
                 missionInterruptions.remove(uuid);
+                runtimeRecoveryLocks.remove(uuid);
                 continue;
             }
             AIPlayerEntity player = bot.get();
             TaskOrigin origin = activeOrigins.get(uuid);
+            if (runtimeRecoveryGateBlocks(
+                    runtimeRecoveryMode,
+                    runtimeRecoveryLocks.contains(uuid),
+                    origin)) {
+                BotProfiler.INSTANCE.record(
+                        player, "runtime_recovery_lock_tick_skipped", 0L);
+                continue;
+            }
+            if (task.state() == TaskState.RUNNING
+                    && missionTickQuarantined(origin, missionInterruptions.get(uuid))) {
+                // A safety unwind may have restored the Task after TaskManager already ran in the
+                // current server tick. Do not give that Task another world-mutating tick until
+                // GoalExecutor has consumed and applied the Mission's interruption policy.
+                BotProfiler.INSTANCE.record(player, "mission_tick_quarantined", 0L);
+                continue;
+            }
             String dimensionFailure = missionDimensionFailure(
                     origin, player.serverLevel().dimension().location().toString());
             boolean tickAllowed = dimensionFailure == null;
@@ -910,6 +1036,14 @@ public final class TaskManager {
         return origin == null ? null : origin.dimensionFailure(actualDimension);
     }
 
+    static boolean missionTickQuarantined(TaskOrigin origin, Set<UUID> interruptions) {
+        return origin != null
+                && origin.kind() == TaskOrigin.Kind.MISSION
+                && origin.missionId() != null
+                && interruptions != null
+                && interruptions.contains(origin.missionId());
+    }
+
     public void recordFailure(AIPlayerEntity bot, String name, String reason, int tick) {
         UUID uuid = bot.getUUID();
         FailureRecord previous = lastFailure.get(uuid);
@@ -942,6 +1076,8 @@ public final class TaskManager {
         pendingFailure.clear();
         navigationSafetyLeases.clear();
         missionInterruptions.clear();
+        runtimeRecoveryLocks.clear();
+        runtimeRecoveryMode = false;
         BotLog.task(null, "tasks_cleared");
     }
 
@@ -955,6 +1091,7 @@ public final class TaskManager {
         pendingFailure.remove(bot.getUUID());
         navigationSafetyLeases.remove(bot.getUUID());
         missionInterruptions.remove(bot.getUUID());
+        runtimeRecoveryLocks.remove(bot.getUUID());
         BotReporter.INSTANCE.onCleared(bot);
     }
 
@@ -968,6 +1105,8 @@ public final class TaskManager {
         pendingFailure.clear();
         navigationSafetyLeases.clear();
         missionInterruptions.clear();
+        runtimeRecoveryLocks.clear();
+        runtimeRecoveryMode = false;
     }
 
     public int activeCount() {

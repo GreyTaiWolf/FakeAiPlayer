@@ -47,8 +47,16 @@ public final class RuntimeLifecycleCoordinator {
         RuntimeRecipeIndex.rebuild(server);
         KnowledgeBase.INSTANCE.attachServer(server);
         int restored = BotPersistence.INSTANCE.loadAndRespawn(server);
-        BotLog.lifecycle("server_runtime_ready", "restored_bots", restored,
-                "runtime_session", TaskBoard.INSTANCE.runtimeSessionId());
+        if (BotPersistence.INSTANCE.readOnlyRecoveryActive()) {
+            BotLog.error("server_runtime_recovery_read_only", null,
+                    "restored_bots", restored,
+                    "runtime_session", TaskBoard.INSTANCE.runtimeSessionId(),
+                    "reason", BotPersistence.INSTANCE.readOnlyRecoveryReason(),
+                    "recovery", "repair_runtime_json_and_restart");
+        } else {
+            BotLog.lifecycle("server_runtime_ready", "restored_bots", restored,
+                    "runtime_session", TaskBoard.INSTANCE.runtimeSessionId());
+        }
     }
 
     public void onServerStopping(MinecraftServer server) {
@@ -65,6 +73,14 @@ public final class RuntimeLifecycleCoordinator {
     }
 
     public void resetBot(AIPlayerEntity bot, IntentController.ControlOrigin origin, String reason) {
+        if (IntentController.recoveryControlBlocked(
+                TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot), origin)) {
+            BotLog.security("runtime_recovery_reset_rejected",
+                    "bot_uuid", bot.getUUID(),
+                    "origin", origin,
+                    "reason", reason == null ? "runtime_reset" : reason);
+            return;
+        }
         IntentController.INSTANCE.cancelAll(bot, origin, reason);
         BrainCoordinator.INSTANCE.reset(bot);
         GoalExecutor.INSTANCE.unload(bot);

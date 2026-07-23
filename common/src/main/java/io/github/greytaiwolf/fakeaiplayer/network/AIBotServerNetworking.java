@@ -458,6 +458,9 @@ public final class AIBotServerNetworking {
             sendSystem(player, "", "找不到该 Bot 或无权限。");
             return;
         }
+        if (rejectRecoveryControl(player, bot.get(), "执行面板命令")) {
+            return;
+        }
         try {
             dispatch(player, bot.get(), payload);
         } catch (RuntimeException exception) {
@@ -479,6 +482,9 @@ public final class AIBotServerNetworking {
             return;
         }
         AIPlayerEntity target = bot.get();
+        if (rejectRecoveryControl(player, target, "修改运行选项")) {
+            return;
+        }
         switch (payload.key()) {
             case "manual" -> BrainCoordinator.INSTANCE.setManualMode(target, payload.value());
             case "memory" -> BotRuntimeOptions.INSTANCE.setMemoryToolsEnabled(target, payload.value());
@@ -503,6 +509,9 @@ public final class AIBotServerNetworking {
             return;
         }
         AIPlayerEntity target = bot.get();
+        if (rejectRecoveryControl(player, target, "执行传送")) {
+            return;
+        }
         if (!io.github.greytaiwolf.fakeaiplayer.mode.CapabilityRuntime.decide(
                 target, io.github.greytaiwolf.fakeaiplayer.mode.PrivilegedCapability.MANUAL_TELEPORT,
                 "network_manual_teleport").allowed()) {
@@ -528,6 +537,19 @@ public final class AIBotServerNetworking {
         } else {
             sendSystem(player, target.getGameProfile().getName(), "无效的传送方向。");
         }
+    }
+
+    private static boolean rejectRecoveryControl(ServerPlayer player,
+                                                 AIPlayerEntity bot,
+                                                 String operation) {
+        if (!TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)) {
+            return false;
+        }
+        sendSystem(
+                player,
+                bot.getGameProfile().getName(),
+                "运行时存档处于只读恢复保护中，无法" + operation + "；修复 runtime.json 后请重启服务器。");
+        return true;
     }
 
     public void handleOpenInventory(ServerPlayer player, OpenBotInventoryC2S payload) {

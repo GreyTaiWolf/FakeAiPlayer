@@ -8,6 +8,7 @@ import io.github.greytaiwolf.fakeaiplayer.coordination.TaskBoard;
 import io.github.greytaiwolf.fakeaiplayer.goal.Goal;
 import io.github.greytaiwolf.fakeaiplayer.goal.GoalExecutor;
 import io.github.greytaiwolf.fakeaiplayer.goal.GoalResult;
+import io.github.greytaiwolf.fakeaiplayer.mission.CursorCheckpoint;
 import io.github.greytaiwolf.fakeaiplayer.mission.GoalSpec;
 import io.github.greytaiwolf.fakeaiplayer.manager.AIPlayerManager;
 import io.github.greytaiwolf.fakeaiplayer.mode.CapabilityPolicy;
@@ -174,7 +175,10 @@ public final class AIBotRestartHarnessCommand {
             bot.setHealth(bot.getMaxHealth());
             recoveryFaultObserved = true;
         }
-        if (parseNonNegative(active.checkpoint().get(CHECKPOINT_REVISION)) < 1) {
+        if (parseNonNegative(active.checkpoint().get(CHECKPOINT_REVISION)) < 1
+                || decoded.checkpoint().completedSteps() < 1
+                || InventoryAction.countItem(bot, Items.STICK) < 4
+                || InventoryAction.countItem(bot, Items.TORCH) > 0) {
             return;
         }
         IntentController.INSTANCE.pause(
@@ -199,10 +203,16 @@ public final class AIBotRestartHarnessCommand {
                 MissionCheckpointCodec.decode(active.checkpoint());
         int activeRecoveries = activeCheckpoint.valid()
                 ? activeCheckpoint.checkpoint().recovery().recoveriesConsumed() : 0;
-        if (revision < 1 || activeRecoveries < 1) {
+        boolean firstStepVerified = activeCheckpoint.valid()
+                && activeCheckpoint.checkpoint().completedSteps() == 1
+                && advancedCraftCursor(activeCheckpoint.checkpoint().cursor())
+                && InventoryAction.countItem(bot, Items.STICK) >= 4
+                && InventoryAction.countItem(bot, Items.TORCH) == 0;
+        if (revision < 1 || activeRecoveries < 1 || !firstStepVerified) {
             source.sendSuccess(() -> Component.literal("[FakeAiPlayer Harness] restart-stage-check WAITING revision="
                     + revision
                     + " recoveries_consumed=" + activeRecoveries
+                    + " first_step_verified=" + firstStepVerified
                     + " step=" + GoalExecutor.INSTANCE.describeActiveStep(bot)), false);
             return 1;
         }
@@ -213,6 +223,9 @@ public final class AIBotRestartHarnessCommand {
         Map<String, String> checkpoint = pausedActive == null ? Map.of() : pausedActive.checkpoint();
         MissionCheckpointCodec.DecodeResult decodedCheckpoint =
                 MissionCheckpointCodec.decode(checkpoint);
+        CursorCheckpoint cursor = decodedCheckpoint.valid()
+                ? decodedCheckpoint.checkpoint().cursor() : null;
+        boolean cursorAdvanced = advancedCraftCursor(cursor);
         boolean exactShape = checkpoint.keySet().equals(Set.of(
                 CHECKPOINT_ORIGIN,
                 CHECKPOINT_STARTED_TICK,
@@ -240,6 +253,8 @@ public final class AIBotRestartHarnessCommand {
                 && decodedCheckpoint.checkpoint().cursor() != null
                 && decodedCheckpoint.checkpoint().cursor().tick()
                 == decodedCheckpoint.checkpoint().elapsedMissionTicks()
+                && decodedCheckpoint.checkpoint().completedSteps() == 1
+                && cursorAdvanced
                 && !decodedCheckpoint.checkpoint().recovery().attemptsBySkill().isEmpty()
                 && decodedCheckpoint.checkpoint().recovery().recoveriesConsumed() >= 1;
         boolean missionShape = pausedActive != null
@@ -261,6 +276,7 @@ public final class AIBotRestartHarnessCommand {
                 == GoalSpec.defaultPriority(GoalSpec.Source.LEGACY)
                 && pausedRuntime.queue().getFirst().bindingValid()
                 && pausedRuntime.userPaused()
+                && InventoryAction.countItem(bot, Items.STICK) >= 4
                 && InventoryAction.countItem(bot, Items.TORCH) == 0;
         if (!nonDefaultCheckpoint || !missionShape) {
             source.sendFailure(Component.literal("[FakeAiPlayer Harness] restart-stage-check FAIL"
@@ -308,8 +324,9 @@ public final class AIBotRestartHarnessCommand {
                 pausedActive.spec().policy().recoveryBudget()));
         expected.put("policy_interruption", pausedActive.spec().policy().interruptionPolicy());
         TaskBoard.INSTANCE.clear();
-        TaskBoard.INSTANCE.postGlobal(PROBE_JOB_KIND, expected, "worker");
-        Optional<Job> claimed = TaskBoard.INSTANCE.claimNext(bot, AIPlayerManager.INSTANCE.roles(bot));
+        String probeOnlyRole = "restart_harness_probe_only";
+        TaskBoard.INSTANCE.postGlobal(PROBE_JOB_KIND, expected, probeOnlyRole);
+        Optional<Job> claimed = TaskBoard.INSTANCE.claimNext(bot, java.util.Set.of(probeOnlyRole));
         boolean leaseClaimed = claimed.isPresent()
                 && claimed.get().status() == Job.Status.CLAIMED
                 && bot.getUUID().equals(claimed.get().claimant())
@@ -326,6 +343,8 @@ public final class AIBotRestartHarnessCommand {
                 + " lease_claimed=" + leaseClaimed
                 + " mission_id=" + pausedActive.missionId()
                 + " revision=" + checkpoint.get(CHECKPOINT_REVISION)
+                + " completed_steps=" + decodedCheckpoint.checkpoint().completedSteps()
+                + " cursor_advanced=" + cursorAdvanced
                 + " elapsed_mission_ticks=" + checkpoint.get(CHECKPOINT_ELAPSED_MISSION_TICKS)
                 + " recoveries_consumed="
                 + decodedCheckpoint.checkpoint().recovery().recoveriesConsumed()
@@ -358,7 +377,7 @@ public final class AIBotRestartHarnessCommand {
                 .map(job -> parseNonNegative(
                         job.params().get("consecutive_no_progress_recoveries")))
                 .orElse(0);
-        boolean runtimeStateExact = expectedRuntime.valid()
+        boolean runtimeAccountingExact = expectedRuntime.valid()
                 && expectedRuntime.version() == MissionCheckpointCodec.CURRENT_VERSION
                 && restoredCheckpoint.valid()
                 && restoredCheckpoint.version() == MissionCheckpointCodec.CURRENT_VERSION
@@ -373,10 +392,45 @@ public final class AIBotRestartHarnessCommand {
                 && restoredCheckpoint.checkpoint().contextFingerprint().equals(
                 expectedRuntime.checkpoint().contextFingerprint())
                 && restoredCheckpoint.checkpoint().replanAfterInterrupt()
-                == expectedRuntime.checkpoint().replanAfterInterrupt()
-                && restoredCheckpoint.checkpoint().cursor().equals(
-                expectedRuntime.checkpoint().cursor());
-        boolean recoveryBudgetExact = runtimeStateExact
+                == expectedRuntime.checkpoint().replanAfterInterrupt();
+        boolean samePlanFingerprint = expectedRuntime.valid()
+                && restoredCheckpoint.valid()
+                && expectedRuntime.checkpoint().planFingerprint().equals(
+                restoredCheckpoint.checkpoint().planFingerprint());
+        boolean planRecompiled = expectedRuntime.valid()
+                && restoredCheckpoint.valid()
+                && !samePlanFingerprint;
+        boolean planRevisionValid = expectedRuntime.valid()
+                && restoredCheckpoint.valid()
+                && (samePlanFingerprint
+                ? restoredCheckpoint.checkpoint().planRevision()
+                == expectedRuntime.checkpoint().planRevision()
+                : expectedRuntime.checkpoint().planRevision() < Integer.MAX_VALUE
+                && restoredCheckpoint.checkpoint().planRevision()
+                == expectedRuntime.checkpoint().planRevision() + 1);
+        boolean cursorContinuityValid = expectedRuntime.valid()
+                && restoredCheckpoint.valid()
+                && expectedRuntime.checkpoint().cursor() != null
+                && restoredCheckpoint.checkpoint().cursor() != null
+                && (samePlanFingerprint
+                ? restoredCheckpoint.checkpoint().cursor().equals(
+                expectedRuntime.checkpoint().cursor())
+                : planRevisionValid
+                && restoredCheckpoint.checkpoint().cursor().missionId().equals(
+                expectedRuntime.checkpoint().missionId())
+                && restoredCheckpoint.checkpoint().cursor().planRevision()
+                == restoredCheckpoint.checkpoint().planRevision()
+                && restoredCheckpoint.checkpoint().cursor().planFingerprint().equals(
+                restoredCheckpoint.checkpoint().planFingerprint())
+                && restoredCheckpoint.checkpoint().cursor().tick()
+                == expectedRuntime.checkpoint().cursor().tick());
+        // An authoritative restart replan may remove a completed prefix and therefore cannot
+        // preserve the old tree paths byte-for-byte. In that case accounting remains exact while
+        // the fresh cursor must be bound to the single +1 plan revision at the same Mission tick.
+        boolean runtimeStateExact = runtimeAccountingExact
+                && planRevisionValid
+                && cursorContinuityValid;
+        boolean recoveryBudgetExact = runtimeAccountingExact
                 && expectedRecoveries >= 1
                 && expectedRuntime.checkpoint().recovery().recoveriesConsumed()
                 == expectedRecoveries
@@ -385,17 +439,6 @@ public final class AIBotRestartHarnessCommand {
         boolean checkpointMetadataExact = active != null
                 && checkpointMetadata(active.checkpoint()).equals(
                 checkpointMetadata(expectedCheckpoint));
-        boolean samePlanFingerprint = runtimeStateExact
-                && expectedRuntime.checkpoint().planFingerprint().equals(
-                restoredCheckpoint.checkpoint().planFingerprint());
-        boolean planRevisionValid = runtimeStateExact
-                && (samePlanFingerprint
-                ? restoredCheckpoint.checkpoint().planRevision()
-                == expectedRuntime.checkpoint().planRevision()
-                : expectedRuntime.checkpoint().planRevision() < Integer.MAX_VALUE
-                && restoredCheckpoint.checkpoint().planRevision()
-                == expectedRuntime.checkpoint().planRevision() + 1);
-        boolean planRecompiled = runtimeStateExact && !samePlanFingerprint;
         boolean planProvenanceValid = runtimeStateExact
                 && expectedRuntime.checkpoint().bound()
                 && restoredCheckpoint.checkpoint().bound()
@@ -483,13 +526,22 @@ public final class AIBotRestartHarnessCommand {
                 && probeJob.get().leaseSessionId() == null
                 && probeJob.get().leaseId() == null
                 && "recovered_stale_claim".equals(probeJob.get().failureReason());
+        boolean canonicalRestorePersisted = BotPersistence.INSTANCE.lastSaveSucceeded();
         boolean restoredExactly = missionRestored
                 && checkpointMetadataExact
                 && runtimeStateExact
                 && recoveryBudgetExact
                 && planProvenanceValid
-                && staleLeaseReopened;
+                && staleLeaseReopened
+                && canonicalRestorePersisted;
+        // Queue restoration was already proved above. Remove the deliberately under-provisioned
+        // crafting-table goal before resuming so it cannot synchronously publish BLOCKED and
+        // overwrite the single terminal-result slot for the torch Mission under test.
+        int isolatedQueuedGoals = restoredExactly
+                ? GoalExecutor.INSTANCE.clearQueue(bot) : 0;
+        boolean queueIsolated = isolatedQueuedGoals == 1;
         boolean resumed = restoredExactly
+                && queueIsolated
                 && IntentController.INSTANCE.resume(
                         bot, IntentController.ControlOrigin.SYSTEM, "restart_probe_resume")
                 && !TaskManager.INSTANCE.isUserPaused(bot);
@@ -501,6 +553,7 @@ public final class AIBotRestartHarnessCommand {
                 + " recovery_budget_exact=" + recoveryBudgetExact
                 + " plan_provenance_valid=" + planProvenanceValid
                 + " plan_recompiled=" + planRecompiled
+                + " cursor_continuity_valid=" + cursorContinuityValid
                 + " recoveries_consumed="
                 + (restoredCheckpoint.valid()
                 ? restoredCheckpoint.checkpoint().recovery().recoveriesConsumed() : -1)
@@ -510,6 +563,8 @@ public final class AIBotRestartHarnessCommand {
                 + " queue_exact=" + queueExact
                 + " paused_restored=" + restored.userPaused()
                 + " stale_job_reopened=" + staleLeaseReopened
+                + " canonical_restore_persisted=" + canonicalRestorePersisted
+                + " queue_isolated_after_restore_proof=" + queueIsolated
                 + " resumed=" + resumed
                 + " expected_checkpoint=" + expectedCheckpoint
                 + " actual_checkpoint=" + (active == null ? Map.of() : active.checkpoint())), false);
@@ -593,6 +648,22 @@ public final class AIBotRestartHarnessCommand {
         // clock lives inside the V3 payload and must remain exact instead.
         metadata.remove(CHECKPOINT_STARTED_TICK);
         return Map.copyOf(metadata);
+    }
+
+    private static boolean advancedCraftCursor(CursorCheckpoint cursor) {
+        return cursor != null
+                && cursor.nodeStates().get("root") != null
+                && cursor.nodeStates().get("root").childIndex() == 1
+                && cursor.nodeStates().get("root/0") != null
+                && cursor.nodeStates().get("root/0").phase()
+                == CursorCheckpoint.NodePhase.SUCCEEDED
+                && cursor.nodeStates().get("root/1") != null
+                && cursor.nodeStates().get("root/1").phase()
+                == CursorCheckpoint.NodePhase.ACTIVE
+                && cursor.activationCounts().getOrDefault(
+                "step.0.legacy.craft", 0) >= 1
+                && cursor.activationCounts().getOrDefault(
+                "step.1.legacy.craft", 0) >= 1;
     }
 
     private static boolean validFingerprint(String fingerprint) {

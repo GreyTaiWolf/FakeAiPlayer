@@ -93,6 +93,12 @@ public final class AIBotCommand {
         if (bot.isEmpty()) {
             return 0;
         }
+        if (io.github.greytaiwolf.fakeaiplayer.task.TaskManager.INSTANCE
+                .hasRuntimeRecoveryLock(bot.get())) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] role change rejected: runtime recovery is read-only"));
+            return 0;
+        }
         AIPlayerManager.INSTANCE.setRole(bot.get(), role);
         source.sendSuccess(() -> Component.literal("[FakeAiPlayer] " + name + " role=" + AIPlayerManager.INSTANCE.role(bot.get())), false);
         return 1;
@@ -104,13 +110,19 @@ public final class AIBotCommand {
         if (bot.isEmpty()) {
             return 0;
         }
+        if (io.github.greytaiwolf.fakeaiplayer.task.TaskManager.INSTANCE
+                .hasRuntimeRecoveryLock(bot.get())) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] 运行时存档处于只读恢复保护中，无法删除 Bot；修复 runtime.json 后请重启服务器"));
+            return 0;
+        }
         boolean removed = AIPlayerManager.INSTANCE.despawn(source.getServer(), name);
         if (removed) {
-            source.sendSuccess(() -> Component.literal("[FakeAiPlayer] Despawned " + name), true);
+            source.sendSuccess(() -> Component.literal("[FakeAiPlayer] 已删除 " + name), true);
             return 1;
         }
 
-        source.sendFailure(Component.literal("[FakeAiPlayer] No such bot: " + name));
+        source.sendFailure(Component.literal("[FakeAiPlayer] 找不到 Bot: " + name));
         return 0;
     }
 

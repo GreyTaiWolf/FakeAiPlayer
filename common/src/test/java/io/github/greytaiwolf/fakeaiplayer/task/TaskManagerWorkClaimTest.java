@@ -9,6 +9,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -80,6 +81,21 @@ class TaskManagerWorkClaimTest {
                 TaskOrigin.mission(UUID.randomUUID(), "legacy"), "minecraft:the_nether"));
         assertEquals(null, TaskManager.missionDimensionFailure(
                 TaskOrigin.safety("lava_escape"), "minecraft:the_nether"));
+
+        UUID missionId = bound.missionId();
+        assertTrue(TaskManager.missionTickQuarantined(bound, java.util.Set.of(missionId)),
+                "a resumed Mission Task must wait for its interruption policy");
+        assertFalse(TaskManager.missionTickQuarantined(bound, java.util.Set.of()));
+        assertFalse(TaskManager.missionTickQuarantined(
+                TaskOrigin.safety("lava_escape"), java.util.Set.of(missionId)));
+        assertFalse(TaskManager.missionTickQuarantined(
+                new TaskOrigin(
+                        TaskOrigin.Kind.PLAYER_COMMAND,
+                        missionId,
+                        null,
+                        "compatibility_origin"),
+                java.util.Set.of(missionId)),
+                "a non-Mission compatibility origin has no GoalExecutor policy consumer");
     }
 
     @Test
@@ -113,6 +129,32 @@ class TaskManagerWorkClaimTest {
                     player, TaskManager.workClaim(interrupt), false);
             assertEquals(MissionArbiter.Action.PREEMPT, decision.action(), interrupt.toString());
         }
+        assertTrue(TaskManager.runtimeRecoveryLockBypass(
+                TaskOrigin.safety("lava_escape")));
+        assertFalse(TaskManager.runtimeRecoveryLockBypass(
+                TaskOrigin.of(TaskOrigin.Kind.REFLEX, "routine_resupply")),
+                "non-critical REFLEX work may mutate inventory/world in read-only recovery");
+        assertFalse(TaskManager.runtimeRecoveryLockBypass(
+                TaskOrigin.mission(UUID.randomUUID(), "ordinary_mission")));
+        assertFalse(TaskManager.runtimeRecoveryLockBypass(
+                TaskOrigin.of(TaskOrigin.Kind.PLAYER_COMMAND, "ordinary_command")));
+        assertTrue(TaskManager.runtimeRecoveryGateBlocks(
+                true,
+                false,
+                TaskOrigin.mission(UUID.randomUUID(), "future_bot_mission")),
+                "the session-wide gate must cover Bots created after restore");
+        assertFalse(TaskManager.runtimeRecoveryGateBlocks(
+                true,
+                false,
+                TaskOrigin.safety("future_bot_lava_escape")));
+        assertTrue(TaskManager.runtimeRecoveryGateBlocks(
+                true,
+                false,
+                TaskOrigin.of(TaskOrigin.Kind.REFLEX, "future_bot_resupply")));
+        assertTrue(TaskManager.runtimeRecoveryGateBlocks(
+                false,
+                true,
+                TaskOrigin.of(TaskOrigin.Kind.PLAYER_COMMAND, "restored_bot_command")));
     }
 
     @Test
