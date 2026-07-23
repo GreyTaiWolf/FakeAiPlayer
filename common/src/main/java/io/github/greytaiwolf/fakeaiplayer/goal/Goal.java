@@ -10,6 +10,9 @@ import net.minecraft.world.level.block.Block;
 public sealed interface Goal permits Goal.HaveItem, Goal.HavePickaxeTier, Goal.MineOre, Goal.HarvestCrop, Goal.Armor, Goal.Workstation, Goal.Stockpile, Goal.Food, Goal.Build {
     record HaveItem(Item item, int count) implements Goal {
         public HaveItem {
+            if (item == null) {
+                throw new IllegalArgumentException("goal_item_missing:have_item");
+            }
             count = Math.max(1, count);
         }
     }
@@ -22,7 +25,13 @@ public sealed interface Goal permits Goal.HaveItem, Goal.HavePickaxeTier, Goal.M
 
     record MineOre(Set<Block> ores, int count) implements Goal {
         public MineOre {
+            if (ores != null && ores.stream().anyMatch(java.util.Objects::isNull)) {
+                throw new IllegalArgumentException("goal_ores_invalid:mine_ore");
+            }
             ores = ores == null ? Set.of() : Set.copyOf(ores);
+            if (ores.isEmpty()) {
+                throw new IllegalArgumentException("goal_ores_missing:mine_ore");
+            }
             count = Math.max(1, count);
         }
     }
@@ -30,6 +39,15 @@ public sealed interface Goal permits Goal.HaveItem, Goal.HavePickaxeTier, Goal.M
     /** P3:收获 N 个作物(小麦/胡萝卜/土豆)。倒推:有锄头(+种子)→ 开垦/播种/等熟/收割。 */
     record HarvestCrop(Block crop, Item seed, Item produce, int count) implements Goal {
         public HarvestCrop {
+            if (crop == null) {
+                throw new IllegalArgumentException("goal_crop_missing:harvest_crop");
+            }
+            if (seed == null) {
+                throw new IllegalArgumentException("goal_seed_missing:harvest_crop");
+            }
+            if (produce == null) {
+                throw new IllegalArgumentException("goal_produce_missing:harvest_crop");
+            }
             count = Math.max(1, count);
         }
     }
@@ -45,6 +63,9 @@ public sealed interface Goal permits Goal.HaveItem, Goal.HavePickaxeTier, Goal.M
     /** Phase3:囤货——获取 count 个 item,并(尽力)存进附近箱子。 */
     record Stockpile(Item item, int count) implements Goal {
         public Stockpile {
+            if (item == null) {
+                throw new IllegalArgumentException("goal_item_missing:stockpile");
+            }
             count = Math.max(1, count);
         }
     }
@@ -70,6 +91,9 @@ public sealed interface Goal permits Goal.HaveItem, Goal.HavePickaxeTier, Goal.M
                  String dimension,
                  String blueprintDigest) implements Goal {
         public Build {
+            if (blueprint == null || blueprint.isBlank()) {
+                throw new IllegalArgumentException("goal_blueprint_missing:build");
+            }
             anchor = anchor == null ? null : anchor.immutable();
             if (dimension == null || dimension.isBlank()) {
                 dimension = null;

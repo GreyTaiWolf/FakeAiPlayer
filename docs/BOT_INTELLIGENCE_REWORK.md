@@ -2,7 +2,7 @@
 
 状态：Active / 设计与实施规格
 
-基线日期：2026-07-21
+基线日期：2026-07-22
 
 目标版本：Minecraft `1.21.3`、Java `21`、Fabric Loader `0.18.4`、Fabric API `0.114.1+1.21.3`、NeoForge `21.3.96`
 
@@ -16,14 +16,17 @@
 
 | 阶段 | 当前状态 | 可以声称什么 | 不能声称什么 |
 |---|---|---|---|
-| P0 | **代码实现完成 / 待 Java 21 双加载器运行验证** | 结构化导航观测、共享 GameTest fixture、Fabric/NeoForge 薄注册层、NeoForge GameTest server 与 CI/static gate 已进入工作树 | 不能声称新增场景已经编译或通过，也不能用历史 Fabric 24/24 代表本轮或 NeoForge |
-| P1 | **代码实现完成 / 待 Java 21 双加载器运行验证** | 交互姿态、路径进度修复、非破坏导航和整树采伐竖切及对应源码级回归已进入工作树 | 不能声称寻路已彻底重构、全部 P1 验收场景已覆盖、所有任务已迁移或复杂树型已经全部支持 |
-| P2–P10 | 开放目标 / 未完成 | 可作为后续实施顺序与验收依据 | 不能因为已有局部类或旧功能就把阶段标记完成 |
+| P0 | **实现完成 / 提交绑定 CI 通过** | 提交 `9155c9c` 的 CI #106 已通过 Java 21、JUnit、Fabric 35/35、NeoForge 11/11、双端构建、持久化和 strict evidence | 未显式 pin 发布 baseline，不能称为 `VERIFIED` 发布证据；真实客户端与更宽兼容矩阵仍属 P10 |
+| P1 | **实现完成 / 提交绑定 CI 通过** | 同一提交与 CI #106 已运行交互姿态、路径进度、非破坏导航、整树承诺及 11 个双端共享场景 | 不能声称所有树型、真实怪物/`NavSafetyNet` 端到端链路或所有业务任务均已覆盖 |
+| P2 | **实现完成 / 提交绑定 CI 通过** | 正式目标/句柄/结果契约、单 frontier 多目标 A*、确定性预算、分段证明路径、动态重规划和 world revision 失效已实现；代码提交 `2450e13` 的 CI #129 已通过当前完整 JUnit 及 14 个双端共享场景 | 未显式 pin 发布 baseline；受控 GameTest 不能替代真实客户端、复杂地形或长期运行证据 |
+| P3 | **实现完成 / 待当前提交 CI** | 声明式 Goal/Skill、组合计划执行器、activation lease、运行门禁、唯一仲裁、类型化结果、恢复预算和 V2 计划绑定检查点均已落地；旧链通过适配器运行，并有双端零库存至铁锭黄金链 | 完整生产/挖矿迁移属于 P5，世界事实属于 P4，分阶段建筑属于 P7；在当前提交 Java 21 与双端 GameTest 通过前不能称为提交绑定 CI 通过 |
+| P4–P10 | 开放目标 / 未完成 | 可作为后续实施顺序与验收依据 | 不能因为已有局部类或旧功能就把阶段标记完成 |
 
-“代码已写入工作树”“能够编译”和“某个受控场景通过”分别是不同证据等级。阶段只有在
-干净提交上完成其验收矩阵，并生成包含提交 SHA、版本、配置、种子、加载器和完整结果的证据后，
-才允许改为 `VERIFIED`。当前 P0/P1 的代码实现已完成，但尚未在本工作树上使用 Java 21 运行
-`common:test`、Fabric GameTest 与 NeoForge GameTest server，因此均保持“待 Java 21 双加载器运行验证”。
+“代码已写入工作树”“能够编译”“提交绑定 CI 通过”和“已 pin 发布证据”分别是不同证据等级。
+P0/P1 在提交 [`9155c9c`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/9155c9ca18cb1c8021bf50d453bbafe84f2c1489)
+的 [CI #106](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29862817627) 中通过 Java 21、
+完整 JUnit、Fabric 35/35、NeoForge 11/11、双端生产构建与产物检查、两进程持久化和
+strict-survival runtime/evidence。P2 在代码提交 [`2450e13`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/2450e1352f27e3768e0f2d0ceeed98c7d7a71c4a) 的 [CI #129](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29879516182) 中进一步通过 Java 21、当前 79 个 JUnit 类/312 个 `@Test`、Fabric 49/49、NeoForge 25/25、双端生产构建与产物检查、两进程持久化及 strict-survival runtime/evidence。14 个 P2 场景在两端使用相同共享实现、batch 和阈值。由于 `reports/baselines/index.tsv` 尚未显式 pin 上述结果，这里只称为提交绑定 CI 通过，不称为 `VERIFIED` 发布基线。
 
 ## 2. 北极星与核心原则
 
@@ -127,7 +130,7 @@ Minecraft 世界
 
 ## 6. P0：可复现基线与导航观测
 
-**状态：代码实现完成 / 待 Java 21 双加载器运行验证**
+**状态：实现完成 / 提交 `9155c9c` 的 CI #106 通过；发布 baseline 未 pin**
 
 ### 范围
 
@@ -167,7 +170,7 @@ NeoForge 1.21.3 的 GameTest 注册与 `gameTestServer` 配置以
 11. exact 橡木配额在整树中途满足后，经 `TaskManager` 的 10 Tick `SAFETY` 暂停/恢复仍保持
    同一 `TreeId`、不增加 `EpisodeMemory` 排除项、完成已提交的 4 根原木，并保持旁边独立树不变。
 
-这 11 个场景已经完成共享源码、Fabric 注册和 NeoForge 注册接线，但尚未在本工作树上运行。
+这 11 个场景已在提交 `9155c9c` 的 CI #106 中随 Fabric 35/35 与 NeoForge 11/11 运行通过。
 当前每项使用独立 batch 且保持默认单次尝试；涉及单调放置证据的场景不得直接启用原位 retry，
 未来若设置 `attempts`/`requiredSuccesses`，必须同时提供隔离坐标或重建账本/世界的夹具。
 第 9 项验证 2×2/斜枝的检测、exact 边界与首次规划，不等同于整棵复杂树已实际采伐完成；
@@ -198,7 +201,7 @@ NeoForge 1.21.3 的 GameTest 注册与 `gameTestServer` 配置以
 
 ## 7. P1：交互姿态、路径进度与整树采伐竖切
 
-**状态：代码实现完成 / 待 Java 21 双加载器运行验证**
+**状态：实现完成 / 提交 `9155c9c` 的 CI #106 通过；发布 baseline 未 pin**
 
 ### 范围
 
@@ -272,7 +275,8 @@ NeoForge 1.21.3 的 GameTest 注册与 `gameTestServer` 配置以
 - exact 橡木任务不会破坏旁边云杉；
 - 普通移动与工作位导航不会静默破坏夹具墙体；
 - 上述场景在 Fabric 与 NeoForge 上使用同一场景实现通过；
-- P1 未完成 Java 21 双加载器运行与证据封存前保持“代码实现完成 / 待双加载器运行验证”。
+- P1 的 Java 21 JUnit、11 个共享场景、双端生产构建、持久化与 strict evidence 已由 CI #106
+  绑定提交 `9155c9c` 运行通过；显式 pin 发布 baseline 前不称为 `VERIFIED`。
 
 ### 依赖
 
@@ -280,18 +284,37 @@ NeoForge 1.21.3 的 GameTest 注册与 `gameTestServer` 配置以
 
 ## 8. P2：正式导航契约与多终点路径
 
-**状态：开放目标 / 未完成**
+**状态：实现完成 / 代码提交 `2450e13` 的 CI #129 通过；发布 baseline 未 pin**
 
 ### 范围
 
-- 定义 `NavGoal`：`Exact`、`Near`、`Interaction`、`FollowRing`、`Flee`、`Composite`；
-- 定义 `NavigationHandle`，明确 `PLANNING`、`FOLLOWING`、`ARRIVED`、`BLOCKED`、`STALE_WORLD`、`PREEMPTED`、`CANCELLED`、`FAILED`；
-- 多个工作姿态由一次多终点搜索直接选择总成本最低者，避免逐候选同步 A*；
-- 路径结果带 resolved goal、成本、失败分类、世界版本与 request id；
-- 执行器把终止结果保留给任务消费，不能再通过“是否空闲”猜结果；
-- 缓存键纳入世界/维度、策略、目标集合、权限和世界失效版本；
-- 动态方块、实体碰撞和危险变化触发局部失效与有界重规划；
-- 长距离目标采用分段路径与安全中继，不在服务器主线程做无界搜索。
+- `NavGoal` 以 sealed variants 定义 `Exact`、`Near`、`Interaction`、`FollowRing`、`Flee`、
+  `Composite`；构造器约束逃生目标、策略和有界搜索范围，动态目标不进入全局不可达记忆；
+- `NavigationRequest`、`NavigationHandle` 与 `NavigationResult` 形成 request-scoped 生命周期，
+  明确 `PLANNING`、`FOLLOWING`、`ARRIVED`、`BLOCKED`、`STALE_WORLD`、`PREEMPTED`、
+  `CANCELLED`、`FAILED`，并保留 resolved goal、成本、失败分类、世界版本、request id、
+  搜索指标和证据作用域，任务不再通过“是否空闲”猜终止结果；
+- `MultiGoalAStarPathfinder` 在一个 heading-aware、cost-sensitive frontier 中直接比较多个合法终点，
+  保留方向/转弯成本、可采纳启发式和已关闭状态重开，避免逐候选重复同步 A*；
+- `NavigationSearchBudget` 对每 Bot、每 Tick 和全服务器使用确定性、可观测预算；搜索耗尽返回
+  inconclusive `SEARCH_BUDGET`，不会伪装成真实不可达，也不会写入错误排除记忆；
+- 缓存键纳入世界/维度、策略、目标指纹、约束、权限和 world revision；服务端成功
+  `Level#setBlock` 后使 A*、多目标和站立性缓存失效，旧路线不能跨世界修改继续命中；
+- `ProvenRoute` 保存一次有界 A* 证明的完整路径和后缀；长路线只执行安全中继前缀，后续 segment
+  复用同一证明后缀、request id、heading 和累计成本，不为每段新开 frontier；起点合法性、
+  goal fingerprint 或 world revision 改变时放弃后缀并重新规划；
+- `PathExecutor` 的 string-pull 进度提交对 WALK/DIAGONAL 保持有界容差，对 JUMP/DROP 要求精确，
+  DIG/PILLAR 不预提交；动态封路、交互目标失效和危险变化触发保留原约束的有界局部重规划；
+- `FollowRing` 按稳定 cadence 跟随移动实体，在刷新窗口间继续执行仍安全的旧路线；动态刷新不耗尽
+  失败重规划额度。`Flee` 只在显式有界 escape policy 下运行；
+- 旧 `ActionPack` 导航入口通过事务适配器映射到同一 handle/result，不改变 legacy snapped
+  interaction endpoint 的语义，也不允许通用走路隐式升级为破坏世界。
+
+P2 当前新增 **14 个** loader-neutral 共享 GameTest：目标 variants、单 frontier 全局最低成本、
+交互姿态一次搜索、策略门禁、搜索上限分类、world revision 缓存失效、handle 生命周期、
+`ProvenRoute` 中继、动态封路替代终点、过期交互目标、移动 `FollowRing`、有界 `Flee`、同 handle
+长路线分段和 legacy `ActionPack` 适配。Fabric 与 NeoForge 使用同一测试体、batch 和阈值；当前
+源码总数为 79 个 JUnit 类、312 个 `@Test`、Fabric 49 项、NeoForge 25 项。
 
 ### 非目标
 
@@ -307,7 +330,10 @@ NeoForge 1.21.3 的 GameTest 注册与 `gameTestServer` 配置以
 - `PREEMPTED`、`CANCELLED`、`STALE_WORLD` 不写入不可达记忆；
 - 动态封路后在预算内重新规划，且不会穿过新障碍；
 - 普通、逃生、涉水和可变更世界的导航策略拥有独立门禁与测试；
-- 每 Bot、每 Tick 和全服务器搜索预算可观测并受限。
+- 每 Bot、每 Tick 和全服务器搜索预算可观测并受限；
+- 长路线各 segment 复用一次完整证明的后缀与同一 request id，不以中继目标冒充最终到达；
+- 上述 14 个场景在 Fabric 与 NeoForge 上使用相同共享实现、batch 和阈值，并已随
+  代码提交 `2450e13` 的 [CI #129](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29879516182) 以 Fabric 49/49、NeoForge 25/25 通过。
 
 ### 依赖
 
@@ -316,7 +342,39 @@ NeoForge 1.21.3 的 GameTest 注册与 `gameTestServer` 配置以
 
 ## 9. P3：任务组合、技能契约与唯一仲裁器
 
-**状态：开放目标 / 未完成**
+**状态：实现完成 / 待当前提交 Java 21 与双加载器 CI**
+
+### 已落地
+
+- `GoalSpec`、`MissionPolicy`、`MissionLifecycle`、`MissionPlan`、`SkillSpec` 与类型化
+  `SkillOutcome`；Skill capability 与具体 invocation 分离，计划节点拥有唯一身份；
+- `Sequence`、`AllOf`、`AnyOf`、`Retry`、`Timeout`、`Checkpoint` 与 `WaitForEvent` 均由
+  `PlanCursor` 确定性执行；Skill 完成回调绑定 activation attempt，迟到结果不能完成新的重试实例；
+- `SkillRuntimeGate` 在安装前强制检查 capability、前置条件、风险和修改范围，完成后重新验证
+  success predicate；未知谓词、适配器异常和矛盾结果均失败关闭；
+- `MissionArbiter` 成为 Task 安装的单一入口，区分安全、反射、玩家、验证、Mission、AI、Job
+  与后台工作；临时反射结束后恢复精确 Mission frame，并把中断事件锁存给 Goal 层；
+- 旧 `GoalPlanner` 输出经 `LegacyMissionCompiler` 编译为版本化 Skill 调用；普通移动与无损移动、
+  挖掘掉落族、建筑确认绑定使用真实执行语义；
+- `achieve_armor` 在合成后执行穿戴 Skill，验收真实 HEAD/CHEST/LEGS/FEET 与主手剑，遵守绑定诅咒、
+  耐久与材质层级；
+- `resume_mining` 作为“返回作业面 → 从新基线继续挖”的单一可恢复 Skill，不再让第二个任务覆盖返程；
+- 资源点、危险区与死亡事件增加维度绑定，跨维度查询失败关闭；
+- `RecoveryLedger` 按完整 Skill 语义指纹持久记录 attempt/recovery/postcondition 预算，服务器重启不会
+  退回第一次尝试；V3 checkpoint 进一步绑定 Mission id、计划 revision、计划/意图/上下文指纹、
+  精确 `PlanCursor` 与安全打断后的重规划义务，损坏或串线快照隔离，权威重规划则显式递增 revision；
+  V0/V1/V2 只保留受限迁移读取；
+- Goal 来源和优先级进入仲裁；玩家/安全等高权威工作能够替换或抢占低权威 Mission，恢复时保留原
+  policy、预算、完成步数和展示索引；
+- P3 双加载器共享 GameTest 覆盖跨维度 Task 启动前拒绝、精确 Mission 恢复、权威装备槽、pause/resume 异常事务边界、
+  Task tick 异常隔离，以及从空背包砍树、合成木镐/石镐、采石/采铁、熔炼铁锭的完整黄金链。
+
+### 后续阶段边界
+
+- 带来源、TTL、置信度和 world revision 的 `WorldFact` 属于 P4；
+- 资源预留、容器账本以及完整采集/生产/挖矿技能迁移属于 P5；
+- 分阶段建筑、工区聚类与大型施工恢复属于 P7；
+- 真人示范轨迹与 Utility 参数调优可在 P5–P8 逐步加入，不执行模型生成代码。
 
 ### 范围
 
@@ -609,10 +667,10 @@ NeoForge 1.21.3 的 GameTest 注册与 `gameTestServer` 配置以
 
 - P0–P9 的功能、测试与证据均已达到各自门槛。
 
-## 17. P0/P1 当前实施检查表
+## 17. P0/P1/P2/P3 当前实施检查表
 
-下列勾选项区分“源码/静态接线存在”和“Java 21 运行结果”。勾选源码项不代表编译、
-GameTest 或 evidence 已通过；本轮未运行的结果项保持未勾选。
+下列勾选项区分“源码/静态接线存在”“提交绑定 Java 21 运行结果”和“显式 pin 发布 baseline”。
+P0/P1 的运行勾选绑定提交 `9155c9c` 与 CI #106；P2 的运行勾选绑定代码提交 `2450e13` 与 CI #129。提交绑定通过仍不能代替显式 pin 的发布 baseline。
 
 ### P0
 
@@ -622,11 +680,11 @@ GameTest 或 evidence 已通过；本轮未运行的结果项保持未勾选。
 - [x] 11 个共享场景由 Fabric 与 NeoForge 薄 wrapper 使用相同方法和 batch id 注册；
 - [x] NeoForge `gameTestServer`、测试命名空间、隔离资源和运行目录已在 Gradle 中接线；
 - [x] CI/static gate 源码已要求 Fabric 与 NeoForge GameTest，并保留两端日志/crash report；
-- [ ] `common:test` 在本轮 Java 21 工作树上通过；
-- [ ] Fabric 共享场景 GameTest 通过；
-- [ ] NeoForge 等价 GameTest server 通过；
-- [ ] 本轮构建后的双端生产 JAR 隔离检查通过；
-- [ ] 干净提交 evidence 已封存。
+- [x] `common:test` 在提交 `9155c9c` 的 Java 21 CI #106 通过；
+- [x] Fabric 共享场景随 35/35 GameTest 通过；
+- [x] NeoForge 等价 11/11 GameTest server 通过；
+- [x] Fabric/NeoForge 生产构建、JAR 隔离检查、两进程持久化和 strict evidence gate 通过；
+- [ ] CI #106 结果已由 `reports/baselines/index.tsv` 显式 pin 为发布 baseline。
 
 ### P1
 
@@ -644,14 +702,43 @@ GameTest 或 evidence 已通过；本轮未运行的结果项保持未勾选。
   最终账本 flush 成功后删除；证据不可写时观察范围内的原木放置会被拒绝，空基线
   只能由管理员显式确认或离线安装；
 - [x] 树会话的暂停/恢复重验、取消/抢占结果分类及非真实失败不拉黑路径已进入源码；
-- [ ] 本轮新增 P1 JUnit 在 Java 21 下通过；
-- [ ] 简单树整树承诺与连续采伐共享 GameTest 运行通过；
-- [ ] 地面可达 2×2 树与斜枝通过；
-- [ ] `TaskManager` SAFETY 暂停后恢复同一树且不错误拉黑的共享运行场景通过；
+- [x] 新增 P1 JUnit 在 Java 21 CI #106 下通过；
+- [x] 简单树整树承诺与连续采伐共享 GameTest 运行通过；
+- [x] 地面可达 2×2 树、斜枝检测、exact 边界与首次规划场景通过；
+- [x] `TaskManager` SAFETY 暂停后恢复同一树且不错误拉黑的共享运行场景通过；
 - [ ] 真实怪物/`NavSafetyNet` 触发、恢复和不拉黑端到端场景通过；
-- [ ] exact 树种与非破坏导航在双加载器运行通过；
-- [ ] Fabric 与 NeoForge 使用同一场景语义通过；
-- [ ] 干净提交 evidence 已封存。
+- [x] exact 树种与非破坏导航在双加载器运行通过；
+- [x] Fabric 与 NeoForge 使用同一组 11 个共享场景语义通过；
+- [ ] CI #106 结果已由 `reports/baselines/index.tsv` 显式 pin 为发布 baseline。
+
+### P2
+
+- [x] `NavGoal` 六种 variants 与请求构造约束已进入源码；
+- [x] `NavigationHandle`/`NavigationResult` 已提供 request-scoped 生命周期、结构化失败和证据作用域；
+- [x] heading-aware、cost-sensitive 单 frontier 多目标 A* 与确定性 per-Bot/per-Tick/server 预算已进入源码；
+- [x] `ProvenRoute` 保存完整证明后缀，同一 handle 分段执行并在 world/goal/start 失效时回退新规划；
+- [x] 动态封路、过期交互目标、`FollowRing`、`Flee` 与 legacy `ActionPack` 适配已进入源码；
+- [x] `Level#setBlock` 成功写入触发 world revision，使 A*、多目标和站立性缓存失效；
+- [x] 14 个 P2 场景由 Fabric 与 NeoForge 薄 wrapper 使用相同共享实现、batch 和阈值注册；
+- [x] 当前 79 个 JUnit 类、312 个 `@Test` 在代码提交 `2450e13` 的 Java 21 CI #129 下全部通过；
+- [x] Fabric 当前 49/49 GameTest（含 P2 增量 14 项）通过；
+- [x] NeoForge 当前 25/25 GameTest（含 P2 增量 14 项）通过；
+- [x] P2 相关双端生产构建、产物隔离、两进程持久化与 strict evidence gate 通过；
+- [ ] CI #129 结果已由 `reports/baselines/index.tsv` 显式 pin 为发布 baseline。
+
+### P3
+
+- [x] Goal/Skill/PlanNode/Outcome 契约、唯一 invocation 身份与确定性计划指纹进入源码；
+- [x] `PlanCursor` 执行 Sequence/AllOf/AnyOf/Retry/Timeout/Checkpoint/WaitForEvent，并以
+  activation attempt lease 拒绝迟到回调；
+- [x] `SkillRuntimeGate` 强制 capability、前置条件、成功谓词、风险与修改范围；
+- [x] `MissionArbiter` 是 Task 安装的唯一入口，并覆盖优先级、暂停、抢占与精确恢复；
+- [x] `RecoveryLedger` 与 V3 checkpoint 持久保存 retry/recovery 预算、精确 PlanCursor、重规划义务与 Mission/计划/上下文身份；V0/V1/V2 仅用于受限迁移读取；
+- [x] 旧 GoalPlanner 适配器、权威装备验收、可恢复挖矿续接及跨维度记忆隔离进入源码；
+- [x] 两端注册相同 6 个 P3 共享场景，包含从零库存到铁锭的权威黄金链；
+- [ ] 当前 P3 完成提交的 Java 21 JUnit、Fabric 55/55 与 NeoForge 31/31 GameTest 通过；
+- [ ] 当前 P3 完成提交的双端生产构建、JAR 隔离、两 JVM checkpoint 恢复与 strict evidence gate 通过；
+- [ ] P3 提交绑定结果已由 `reports/baselines/index.tsv` 显式 pin 为发布 baseline。
 
 ## 18. 阶段状态变更规则
 
@@ -662,7 +749,8 @@ GameTest 或 evidence 已通过；本轮未运行的结果项保持未勾选。
   → 实现中
   → 待单元/编译验证
   → 待双加载器运行验证
-  → VERIFIED
+  → 提交绑定 CI 通过 / 待显式 pin
+  → VERIFIED 发布基线
 ```
 
 若出现以下任一情况，应退回前一状态：
@@ -675,4 +763,6 @@ GameTest 或 evidence 已通过；本轮未运行的结果项保持未勾选。
 - 新提交改变相关代码但旧 evidence 未重新运行；
 - 依赖许可证、迁移或安全审查尚未完成。
 
-P0/P1 当前状态因此保持：**代码实现完成 / 待 Java 21 双加载器运行验证**。
+当前状态：P0/P1 为**实现完成 / 提交 `9155c9c` 的 CI #106 通过 / 发布 baseline 未 pin**；
+P2 为**实现完成 / 代码提交 `2450e13` 的 CI #129 通过 / 发布 baseline 未 pin**；P3 为
+**实现完成 / 待当前提交 Java 21 与双加载器 CI**；P4–P10 保持开放。

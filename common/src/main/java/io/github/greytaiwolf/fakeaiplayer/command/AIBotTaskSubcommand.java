@@ -352,9 +352,16 @@ public final class AIBotTaskSubcommand {
         if (bot.isEmpty()) {
             return 0;
         }
-        IntentController.INSTANCE.cancelAll(
+        if (rejectRecoveryControl(context, bot.get(), "中止任务")) {
+            return 0;
+        }
+        var outcome = IntentController.INSTANCE.cancelAll(
                 bot.get(), IntentController.ControlOrigin.PLAYER_COMMAND, "command_task_abort");
-        context.getSource().sendSuccess(() -> Component.literal("[FakeAiPlayer] task aborted"), false);
+        if (!outcome.changed()) {
+            context.getSource().sendFailure(Component.literal("[FakeAiPlayer] 当前没有可中止的任务"));
+            return 0;
+        }
+        context.getSource().sendSuccess(() -> Component.literal("[FakeAiPlayer] 已中止任务"), false);
         return 1;
     }
 
@@ -363,8 +370,15 @@ public final class AIBotTaskSubcommand {
         if (bot.isEmpty()) {
             return 0;
         }
-        IntentController.INSTANCE.pause(
+        if (rejectRecoveryControl(context, bot.get(), "暂停任务")) {
+            return 0;
+        }
+        boolean changed = IntentController.INSTANCE.pause(
                 bot.get(), IntentController.ControlOrigin.PLAYER_COMMAND, "command_task_pause");
+        if (!changed) {
+            context.getSource().sendFailure(Component.literal("[FakeAiPlayer] 任务已经暂停或当前没有可暂停的任务"));
+            return 0;
+        }
         return 1;
     }
 
@@ -373,8 +387,15 @@ public final class AIBotTaskSubcommand {
         if (bot.isEmpty()) {
             return 0;
         }
-        IntentController.INSTANCE.resume(
+        if (rejectRecoveryControl(context, bot.get(), "恢复任务")) {
+            return 0;
+        }
+        boolean changed = IntentController.INSTANCE.resume(
                 bot.get(), IntentController.ControlOrigin.PLAYER_COMMAND, "command_task_resume");
+        if (!changed) {
+            context.getSource().sendFailure(Component.literal("[FakeAiPlayer] 当前没有已暂停的任务"));
+            return 0;
+        }
         return 1;
     }
 
@@ -383,23 +404,41 @@ public final class AIBotTaskSubcommand {
         if (bot.isEmpty()) {
             return 0;
         }
+        if (rejectRecoveryControl(context, bot.get(), "分配任务")) {
+            return 0;
+        }
         try {
             Task task = factory.create(bot.get());
-            IntentController.INSTANCE.replace(
+            IntentController.ReplaceResult result = IntentController.INSTANCE.replace(
                     bot.get(),
                     IntentController.ControlOrigin.PLAYER_COMMAND,
                     "command_task_assign:" + task.name(),
                     () -> {
-                        TaskManager.INSTANCE.assign(bot.get(), task,
-                                TaskOrigin.of(TaskOrigin.Kind.PLAYER_COMMAND, "command_task_assign"));
-                        return true;
+                        return TaskManager.INSTANCE.assign(bot.get(), task,
+                                TaskOrigin.of(TaskOrigin.Kind.PLAYER_COMMAND, "command_task_assign")).started();
                     });
+            if (!result.replacementStarted()) {
+                context.getSource().sendFailure(Component.literal(
+                        "[FakeAiPlayer] task deferred while safety work is active"));
+                return 0;
+            }
             context.getSource().sendSuccess(() -> Component.literal("[FakeAiPlayer] task assigned: " + task.name()), false);
             return 1;
         } catch (RuntimeException exception) {
             context.getSource().sendFailure(Component.literal("[FakeAiPlayer] task assign failed: " + exception.getMessage()));
             return 0;
         }
+    }
+
+    private static boolean rejectRecoveryControl(CommandContext<CommandSourceStack> context,
+                                                 AIPlayerEntity bot,
+                                                 String operation) {
+        if (!TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)) {
+            return false;
+        }
+        context.getSource().sendFailure(Component.literal(
+                "[FakeAiPlayer] 运行时存档处于只读恢复保护中，无法" + operation + "；修复 runtime.json 后请重启服务器"));
+        return true;
     }
 
     private static Optional<AIPlayerEntity> getBot(CommandContext<CommandSourceStack> context,

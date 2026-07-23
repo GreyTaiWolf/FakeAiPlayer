@@ -11,6 +11,7 @@ import io.github.greytaiwolf.fakeaiplayer.memory.BotMemoryStore;
 import io.github.greytaiwolf.fakeaiplayer.runtime.IntentController;
 import io.github.greytaiwolf.fakeaiplayer.runtime.TaskOrigin;
 import io.github.greytaiwolf.fakeaiplayer.task.MoveTask;
+import io.github.greytaiwolf.fakeaiplayer.task.TaskManager;
 import java.util.Arrays;
 import java.util.Optional;
 import net.minecraft.commands.CommandSourceStack;
@@ -133,15 +134,18 @@ public final class AIBotMemorySubcommand {
             return 0;
         }
         MoveTask task = new MoveTask(bot.get(), target.get().pos());
-        IntentController.INSTANCE.replace(
+        IntentController.ReplaceResult result = IntentController.INSTANCE.replace(
                 bot.get(),
                 IntentController.ControlOrigin.PLAYER_COMMAND,
                 "command_memory_goto:" + place,
-                () -> {
-                    io.github.greytaiwolf.fakeaiplayer.task.TaskManager.INSTANCE.assign(bot.get(), task,
-                            TaskOrigin.of(TaskOrigin.Kind.PLAYER_COMMAND, "command_memory_goto"));
-                    return true;
-                });
+                () -> io.github.greytaiwolf.fakeaiplayer.task.TaskManager.INSTANCE.assign(
+                        bot.get(), task,
+                        TaskOrigin.of(TaskOrigin.Kind.PLAYER_COMMAND, "command_memory_goto")).started());
+        if (!result.replacementStarted()) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] movement deferred while safety work is active"));
+            return 0;
+        }
         source.sendSuccess(() -> Component.literal("[FakeAiPlayer] moving to " + place), false);
         return 1;
     }
@@ -188,8 +192,15 @@ public final class AIBotMemorySubcommand {
                                                 String name,
                                                 BotAuthorizationPolicy.Operation operation,
                                                 String action) {
-        return BotAuthorizationGate.INSTANCE.resolveAuthorized(
+        Optional<AIPlayerEntity> resolved = BotAuthorizationGate.INSTANCE.resolveAuthorized(
                 source, name, operation, "command:memory_" + action);
+        if (operation == BotAuthorizationPolicy.Operation.COMMAND
+                && resolved.filter(TaskManager.INSTANCE::hasRuntimeRecoveryLock).isPresent()) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] memory mutation rejected: runtime recovery is read-only"));
+            return Optional.empty();
+        }
+        return resolved;
     }
 
     private static BotMemory memory(AIPlayerEntity bot) {

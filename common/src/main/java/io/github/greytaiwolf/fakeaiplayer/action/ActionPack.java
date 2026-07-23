@@ -5,7 +5,12 @@ import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.log.LogCategory;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.AStarPathfinder;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationSnapshot;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationHandle;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationPlanner;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationRequest;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavigationState;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.NavGoal;
+import io.github.greytaiwolf.fakeaiplayer.pathfinding.FailureReason;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.Node;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.PathExecutor;
 import io.github.greytaiwolf.fakeaiplayer.pathfinding.PathfindingResult;
@@ -55,7 +60,21 @@ public final class ActionPack {
     private BlockPos activePathGoal;
     private int nextPathfindTick;
     private long navigationRequestId;
+    private long navigationRequestSequence;
     private NavigationSnapshot navigationSnapshot = NavigationSnapshot.idle();
+    private final NavigationHandle.Authority navigationAuthority =
+            new NavigationHandle.Authority();
+    private NavigationHandle navigationHandle;
+    private boolean formalNavigation;
+    private int publishedExecutorReplans;
+    private int publishedExecutorFailureReplans;
+    private int formalReplansUsed;
+    private double formalCompletedPathCost;
+    private boolean formalSegmentPending;
+    private boolean formalPendingDynamicRefresh;
+    private Direction formalIncomingHeading;
+    private int nextFormalPlanTick;
+    private String lastPathRequestKey = "";
     private final EnumSet<PauseOwner> suspensionOwners = EnumSet.noneOf(PauseOwner.class);
     private final EnumSet<PauseOwner> controllerFreezeOwners = EnumSet.noneOf(PauseOwner.class);
 
@@ -112,8 +131,18 @@ public final class ActionPack {
     public ActionResult startDigPathTo(BlockPos goal) {
         int now = player.getServer().getTickCount();
         BlockPos immutableGoal = goal.immutable();
-        if (lastPathGoal != null && lastPathGoal.equals(immutableGoal) && now < nextPathfindTick) {
-            return rejectNavigation(immutableGoal, "pathfinding_throttled");
+        boolean canPillar = PathExecutor.hasPlaceableBlock(player);
+        NavigationRequest legacyRequest = legacyNavigationRequest(
+                NavGoal.near(immutableGoal, 2, 2),
+                TraversalPolicy.TASK_MUTATING_DRY,
+                TraversalBounds.unbounded(), true, canPillar,
+                Set.of(), null, "none", "legacy_dig_path");
+        String requestKey = legacyPathRequestKey(
+                immutableGoal, TraversalPolicy.TASK_MUTATING_DRY,
+                true, canPillar, false,
+                TraversalBounds.unbounded());
+        if (requestKey.equals(lastPathRequestKey) && now < nextPathfindTick) {
+            return rejectNavigation(legacyRequest, immutableGoal, "pathfinding_throttled");
         }
         Standability.clearCache();
         if (hasActiveActions()
@@ -122,30 +151,36 @@ public final class ActionPack {
             // A replacement request is speculative until its A* succeeds. Never teleport the bot
             // out from under a still-valid path/walk/mining/item controller merely to obtain a
             // planning start.
-            return rejectNavigation(immutableGoal, "replacement_path_start_invalid");
+            return rejectNavigation(
+                    legacyRequest, immutableGoal, "replacement_path_start_invalid");
         }
         if (!snapPlayerToNearestStandable("path_start_invalid", TraversalPolicy.TASK_MUTATING_DRY)) {
+            lastPathGoal = immutableGoal;
+            lastPathRequestKey = requestKey;
             nextPathfindTick = now + PATHFIND_FAILURE_COOLDOWN_TICKS;
-            return rejectNavigation(immutableGoal, "pathfinding_failed: NO_START");
+            return rejectNavigation(
+                    legacyRequest, immutableGoal, "pathfinding_failed: NO_START");
         }
-        boolean canPillar = PathExecutor.hasPlaceableBlock(player);
         PathfindingResult result = new AStarPathfinder(
                 player.serverLevel(), player.blockPosition(), goal,
                 DIG_APPROACH_MAX_NODES, PATHFIND_MAX_MILLIS,
                 canPillar, true, TraversalPolicy.TASK_MUTATING_DRY, 10.0D, java.util.Set.of()).findPath();
         if (!result.success()) {
             lastPathGoal = immutableGoal;
+            lastPathRequestKey = requestKey;
             nextPathfindTick = now + PATHFIND_FAILURE_COOLDOWN_TICKS;
             return rejectNavigation(
-                    immutableGoal, "pathfinding_failed: " + result.reason());
+                    legacyRequest, immutableGoal,
+                    "pathfinding_failed: " + result.reason());
         }
         lastPathGoal = immutableGoal;
+        lastPathRequestKey = requestKey;
         nextPathfindTick = now + PATHFIND_SUCCESS_COOLDOWN_TICKS;
         BlockPos resolvedGoal = result.resolvedGoal() == null ? immutableGoal : result.resolvedGoal();
         PathExecutor executor = new PathExecutor(
                 result.path(), resolvedGoal, false, canPillar, true,
                 TraversalPolicy.TASK_MUTATING_DRY);
-        beginNavigation(immutableGoal, TraversalPolicy.TASK_MUTATING_DRY);
+        beginNavigation(resolvedLegacyRequest(legacyRequest, immutableGoal, resolvedGoal));
         this.walkTo = null;
         stopMining();
         activateNavigation(immutableGoal, resolvedGoal, executor);
@@ -191,8 +226,10 @@ public final class ActionPack {
             Set<BlockPos> pathExclusions,
             Predicate<BlockPos> positionConstraint) {
         BlockPos immutableGoal = goal.immutable();
+        NavigationRequest intendedRequest = NavigationRequest.walk(
+                NavGoal.exact(immutableGoal), "legacy_planned_path");
         if (plannedPath == null || plannedPath.isEmpty()) {
-            return rejectNavigation(immutableGoal, "planned_path_empty");
+            return rejectNavigation(intendedRequest, immutableGoal, "planned_path_empty");
         }
         List<Node> path = List.copyOf(plannedPath);
         Set<BlockPos> exclusions = pathExclusions == null
@@ -202,32 +239,40 @@ public final class ActionPack {
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
         Predicate<BlockPos> constraint = positionConstraint == null
                 ? ignored -> true : positionConstraint;
+        intendedRequest = intendedRequest.withConstraint(
+                exclusions, constraint, "legacy_planned_constraint");
         BlockPos current = player.blockPosition();
         BlockPos plannedStart = path.get(0).pos();
         if (!sameArrivalColumn(current, plannedStart)) {
-            return rejectNavigation(immutableGoal, "planned_path_stale_start");
+            return rejectNavigation(
+                    intendedRequest, immutableGoal, "planned_path_stale_start");
         }
         if (exclusions.contains(current)
                 || !constraint.test(current)
                 || path.stream().anyMatch(node -> exclusions.contains(node.pos())
                 || !constraint.test(node.pos()))) {
-            return rejectNavigation(immutableGoal, "planned_path_violates_skill_constraint");
+            return rejectNavigation(
+                    intendedRequest, immutableGoal,
+                    "planned_path_violates_skill_constraint");
         }
         if (path.stream().anyMatch(node -> node.moveType()
                 == io.github.greytaiwolf.fakeaiplayer.pathfinding.MoveType.DIG_THROUGH
                 || node.moveType()
                 == io.github.greytaiwolf.fakeaiplayer.pathfinding.MoveType.PILLAR_UP)) {
-            return rejectNavigation(immutableGoal, "planned_path_contains_world_edit");
+            return rejectNavigation(
+                    intendedRequest, immutableGoal, "planned_path_contains_world_edit");
         }
         BlockPos resolvedGoal = path.get(path.size() - 1).pos();
         if (!resolvedGoal.equals(immutableGoal)) {
-            return rejectNavigation(immutableGoal, "planned_path_wrong_goal");
+            return rejectNavigation(
+                    intendedRequest, immutableGoal, "planned_path_wrong_goal");
         }
         lastPathGoal = immutableGoal;
         // Planned routes are exempt from the ordinary debounce; do not let a previous request's
         // expiry accidentally throttle a later normal route to this goal.
         nextPathfindTick = player.getServer().getTickCount();
-        beginNavigation(immutableGoal, TraversalPolicy.TASK_WALK_DRY);
+        lastPathRequestKey = "";
+        beginNavigation(intendedRequest);
         this.walkTo = null;
         stopMining();
         if (sameArrivalColumn(current, resolvedGoal)) {
@@ -238,6 +283,14 @@ public final class ActionPack {
                     path.size(), 0,
                     Math.max(0.0D, path.get(path.size() - 1).gCost()),
                     0.0D, 0, 0, 0.0D, 0, 0, "", "");
+            if (navigationHandle != null) {
+                navigationHandle.finish(
+                        navigationAuthority,
+                        NavigationState.ARRIVED, FailureReason.NONE, "",
+                        resolvedGoal,
+                        Math.max(0.0D, path.get(path.size() - 1).gCost()),
+                        AStarPathfinder.worldVersion());
+            }
             activePathGoal = null;
             return ActionResult.SUCCESS;
         }
@@ -290,8 +343,16 @@ public final class ActionPack {
                                      TraversalBounds bounds) {
         int now = player.getServer().getTickCount();
         BlockPos immutableGoal = goal.immutable();
-        if (lastPathGoal != null && lastPathGoal.equals(immutableGoal) && now < nextPathfindTick) {
-            return rejectNavigation(immutableGoal, "pathfinding_throttled");
+        NavGoal legacyGoal = exactGoal
+                ? NavGoal.exact(immutableGoal) : NavGoal.near(immutableGoal, 2, 2);
+        NavigationRequest legacyRequest = legacyNavigationRequest(
+                legacyGoal, traversalPolicy, bounds, allowDigFallback, canPillar,
+                Set.of(), null, "none", "legacy_action_pack");
+        String requestKey = legacyPathRequestKey(
+                immutableGoal, traversalPolicy, allowDigFallback, canPillar,
+                exactGoal, bounds);
+        if (requestKey.equals(lastPathRequestKey) && now < nextPathfindTick) {
+            return rejectNavigation(legacyRequest, immutableGoal, "pathfinding_throttled");
         }
         Standability.clearCache();
         boolean currentStartStandable = Standability.isStandable(
@@ -304,14 +365,17 @@ public final class ActionPack {
             // rejectNavigation deliberately retains any active controller. Keeping the position
             // unchanged is equally important: otherwise that controller would resume from a
             // location outside the movement/mining action it reviewed.
-            return rejectNavigation(immutableGoal, "replacement_path_start_invalid");
+            return rejectNavigation(
+                    legacyRequest, immutableGoal, "replacement_path_start_invalid");
         }
         if (!validAmbientStart || (traversalPolicy != TraversalPolicy.AMBIENT_DRY_OPEN
                 && !currentStartStandable
                 && !snapPlayerToNearestStandable("path_start_invalid", traversalPolicy))) {
             lastPathGoal = immutableGoal;
+            lastPathRequestKey = requestKey;
             nextPathfindTick = now + PATHFIND_FAILURE_COOLDOWN_TICKS;
-            return rejectNavigation(immutableGoal, "pathfinding_failed: NO_START");
+            return rejectNavigation(
+                    legacyRequest, immutableGoal, "pathfinding_failed: NO_START");
         }
         ServerLevel world = player.serverLevel();
         BlockPos from = player.blockPosition();
@@ -334,17 +398,20 @@ public final class ActionPack {
         }
         if (!result.success()) {
             lastPathGoal = immutableGoal;
+            lastPathRequestKey = requestKey;
             nextPathfindTick = now + PATHFIND_FAILURE_COOLDOWN_TICKS;
             return rejectNavigation(
-                    immutableGoal, "pathfinding_failed: " + result.reason());
+                    legacyRequest, immutableGoal,
+                    "pathfinding_failed: " + result.reason());
         }
         lastPathGoal = immutableGoal;
+        lastPathRequestKey = requestKey;
         nextPathfindTick = now + PATHFIND_SUCCESS_COOLDOWN_TICKS;
         BlockPos resolvedGoal = result.resolvedGoal() == null ? immutableGoal : result.resolvedGoal();
         PathExecutor executor = new PathExecutor(
                 result.path(), resolvedGoal, exactGoal, canPillar, allowDigFallback,
                 traversalPolicy, bounds);
-        beginNavigation(immutableGoal, traversalPolicy);
+        beginNavigation(resolvedLegacyRequest(legacyRequest, immutableGoal, resolvedGoal));
         this.walkTo = null;
         stopMining();
         activateNavigation(immutableGoal, resolvedGoal, executor);
@@ -358,6 +425,79 @@ public final class ActionPack {
     /** Latest lifecycle state, retained after the executor becomes idle for task recovery/tests. */
     public NavigationSnapshot navigationSnapshot() {
         return navigationSnapshot;
+    }
+
+    /**
+     * Formal P2 navigation entrypoint. Planning a replacement is transactional: a failed plan
+     * returns its own terminal handle without disturbing the currently executing request.
+     */
+    public NavigationHandle navigate(NavigationRequest request) {
+        NavigationHandle candidate = new NavigationHandle(
+                allocateNavigationRequestId(), request, player.blockPosition(),
+                AStarPathfinder.worldVersion(), navigationAuthority);
+
+        NavigationPlanner.PlanningOutcome outcome = NavigationPlanner.plan(
+                player, request, false);
+        PathfindingResult result = outcome.result();
+        if (!result.success()) {
+            NavigationState terminalState = terminalState(result.reason());
+            candidate.finish(
+                    navigationAuthority,
+                    terminalState, result.reason(),
+                    "pathfinding_failed: " + result.reason(),
+                    null, 0.0D, result.worldVersion(),
+                    outcome.unrestrictedEvidenceScope());
+            installRejectedHandleIfIdle(candidate);
+            return candidate;
+        }
+
+        // A successful replacement atomically preempts the old route only after its plan exists.
+        cancelPathNavigation(NavigationState.PREEMPTED, "replaced_by_new_navigation");
+        navigationHandle = candidate;
+        navigationRequestId = candidate.requestId();
+        formalNavigation = true;
+        formalReplansUsed = 0;
+        formalCompletedPathCost = 0.0D;
+        formalSegmentPending = false;
+        formalPendingDynamicRefresh = false;
+        formalIncomingHeading = null;
+        this.walkTo = null;
+        stopMining();
+        stopMovement();
+        BlockPos resolvedGoal = result.resolvedGoal();
+        if (NavigationPlanner.isSatisfiedAt(player, request, player.blockPosition())) {
+            candidate.finish(
+                    navigationAuthority,
+                    NavigationState.ARRIVED, FailureReason.NONE, "",
+                    player.blockPosition(), result.pathCost(), result.worldVersion());
+            formalNavigation = false;
+            formalIncomingHeading = null;
+            formalPendingDynamicRefresh = false;
+            activePathGoal = null;
+            navigationSnapshot = snapshotWithoutExecutor(
+                    candidate, NavigationState.ARRIVED, resolvedGoal,
+                    result.path().size(), result.pathCost(), "");
+            return candidate;
+        }
+        PathExecutor executor = new PathExecutor(outcome, request);
+        activateNavigation(request.goal().anchor(player.serverLevel()), resolvedGoal, executor, false);
+        return candidate;
+    }
+
+    /** Latest installed handle. A failed speculative replacement is returned to its caller only. */
+    public Optional<NavigationHandle> navigationHandle() {
+        return Optional.ofNullable(navigationHandle);
+    }
+
+    /** Request-scoped cancellation; a stale handle can never cancel its successor. */
+    public boolean cancelNavigation(NavigationHandle handle, String reason) {
+        if (handle == null || handle != navigationHandle || handle.terminal()) {
+            return false;
+        }
+        cancelPathNavigation(
+                NavigationState.CANCELLED,
+                reason == null || reason.isBlank() ? "explicit_cancel" : reason);
+        return true;
     }
 
     public boolean snapPlayerToNearestStandable(String reason) {
@@ -516,6 +656,7 @@ public final class ActionPack {
 
     public boolean hasActiveActions() {
         return pathExecutor != null
+                || formalSegmentPending
                 || walkTo != null
                 || mining != null
                 || forward != 0.0F
@@ -537,7 +678,7 @@ public final class ActionPack {
 
     /** Cancels only navigation, leaving the owning task intact so it can recover after safety. */
     public boolean cancelActivePathForSafety(String reason) {
-        if (pathExecutor == null) {
+        if (pathExecutor == null && !formalSegmentPending) {
             return false;
         }
         cancelPathNavigation(NavigationState.PREEMPTED, reason);
@@ -561,6 +702,7 @@ public final class ActionPack {
             return;
         }
         if (controllerFreezeOwners.isEmpty()) {
+            tickPendingFormalNavigation();
             tickPathExecutor();
             tickWalkTo();
             tickMining();
@@ -628,23 +770,237 @@ public final class ActionPack {
 
         ActionResult result = pathExecutor.tick(this);
         if (result.isInProgress()) {
+            activePathGoal = pathExecutor.resolvedGoal();
+            if (formalNavigation && pathExecutor.planningDeferred()) {
+                if (navigationHandle != null) {
+                    navigationHandle.publishPlanning(
+                            navigationAuthority,
+                            "local_replan_budget_deferred",
+                            pathExecutor.worldVersion());
+                }
+                navigationSnapshot = snapshotFromExecutor(
+                        NavigationState.PLANNING, "local_replan_budget_deferred");
+                return;
+            }
+            if (navigationHandle != null) {
+                boolean replan = pathExecutor.replanCount() > publishedExecutorReplans;
+                if (replan) {
+                    if (formalNavigation) {
+                        formalReplansUsed += Math.max(
+                                0, pathExecutor.failureReplanCount()
+                                - publishedExecutorFailureReplans);
+                    }
+                    publishedExecutorReplans = pathExecutor.replanCount();
+                    publishedExecutorFailureReplans = pathExecutor.failureReplanCount();
+                }
+                navigationHandle.publishFollowing(
+                        navigationAuthority,
+                        pathExecutor.resolvedGoal(), logicalPathCost(pathExecutor),
+                        pathExecutor.worldVersion(), replan);
+            }
             navigationSnapshot = snapshotFromExecutor(NavigationState.FOLLOWING, "");
             return;
         }
 
         if (result.isSuccess()) {
+            if (formalNavigation && navigationHandle != null) {
+                NavGoal requestedGoal = navigationHandle.requestedGoal();
+                if (!requestedGoal.resolvable(player.serverLevel())) {
+                    navigationHandle.finish(
+                            navigationAuthority,
+                            NavigationState.STALE_WORLD, FailureReason.STALE_WORLD,
+                            "navigation_goal_stale", pathExecutor.resolvedGoal(),
+                            logicalPathCost(pathExecutor), pathExecutor.worldVersion());
+                    navigationSnapshot = snapshotFromExecutor(
+                            NavigationState.STALE_WORLD, "navigation_goal_stale");
+                } else if (!requestedGoal.accepts(
+                        player.serverLevel(), player.blockPosition())) {
+                    if (continueFormalNavigation(pathExecutor)) {
+                        return;
+                    }
+                    forward = 0.0F;
+                    strafing = 0.0F;
+                    jumping = false;
+                    player.setJumping(false);
+                    return;
+                } else {
+                    navigationHandle.finish(
+                            navigationAuthority,
+                            NavigationState.ARRIVED, FailureReason.NONE, "",
+                            player.blockPosition(), logicalCompletedPathCost(pathExecutor),
+                            pathExecutor.worldVersion());
+                    navigationSnapshot = snapshotFromExecutor(NavigationState.ARRIVED, "");
+                }
+            } else {
+                if (navigationHandle != null) {
+                    navigationHandle.finish(
+                            navigationAuthority,
+                            NavigationState.ARRIVED, FailureReason.NONE, "",
+                            pathExecutor.resolvedGoal(), logicalPathCost(pathExecutor),
+                            pathExecutor.worldVersion());
+                }
+                navigationSnapshot = snapshotFromExecutor(NavigationState.ARRIVED, "");
+            }
             BotLog.path(player, "path_complete", "ticks", pathExecutor.totalTicks());
-            navigationSnapshot = snapshotFromExecutor(NavigationState.ARRIVED, "");
         } else {
             BotLog.warn(LogCategory.ERROR, player, "path_failed", "reason", result.reason());
-            navigationSnapshot = snapshotFromExecutor(NavigationState.FAILED, result.reason());
+            FailureReason failure = pathExecutor.failureReason() == FailureReason.NONE
+                    ? FailureReason.PATH_BLOCKED : pathExecutor.failureReason();
+            NavigationState terminal = formalNavigation
+                    ? terminalState(failure) : NavigationState.FAILED;
+            if (navigationHandle != null) {
+                navigationHandle.finish(
+                        navigationAuthority,
+                        terminal, failure, result.reason(),
+                        pathExecutor.resolvedGoal(), logicalPathCost(pathExecutor),
+                        pathExecutor.worldVersion(),
+                        pathExecutor.failureEvidenceUnrestricted());
+            }
+            navigationSnapshot = snapshotFromExecutor(terminal, result.reason());
         }
         pathExecutor = null;
         activePathGoal = null;
+        formalNavigation = false;
+        formalSegmentPending = false;
+        formalPendingDynamicRefresh = false;
+        formalIncomingHeading = null;
         forward = 0.0F;
         strafing = 0.0F;
         jumping = false;
         player.setJumping(false);
+    }
+
+    private boolean continueFormalNavigation(PathExecutor completedSegment) {
+        NavigationHandle handle = navigationHandle;
+        handle.publishPlanning(
+                navigationAuthority, "segment_relay_reached", AStarPathfinder.worldVersion());
+        if (completedSegment.activateProvenContinuation(player)) {
+            formalSegmentPending = false;
+            formalPendingDynamicRefresh = false;
+            formalIncomingHeading = null;
+            activateNavigation(
+                    handle.requestedGoal().anchor(player.serverLevel()),
+                    completedSegment.resolvedGoal(), completedSegment, true);
+            return true;
+        }
+        formalCompletedPathCost += completedSegment.completedPathCost();
+        formalIncomingHeading = completedSegment.currentHeading();
+        formalPendingDynamicRefresh = completedSegment.semanticGoalChanged(player);
+        pathExecutor = null;
+        activePathGoal = null;
+        formalSegmentPending = true;
+        nextFormalPlanTick = player.getServer().getTickCount();
+        navigationSnapshot = snapshotWithoutExecutor(
+                handle, NavigationState.PLANNING, completedSegment.resolvedGoal(),
+                0, formalCompletedPathCost, "segment_relay_reached");
+        planPendingFormalSegment();
+        return true;
+    }
+
+    private void tickPendingFormalNavigation() {
+        if (!formalSegmentPending || navigationHandle == null
+                || navigationHandle.terminal()
+                || player.getServer().getTickCount() < nextFormalPlanTick) {
+            return;
+        }
+        planPendingFormalSegment();
+    }
+
+    private void planPendingFormalSegment() {
+        NavigationHandle handle = navigationHandle;
+        NavigationRequest request = handle.request();
+        if (!request.goal().resolvable(player.serverLevel())) {
+            finishPendingFormal(
+                    NavigationState.STALE_WORLD, FailureReason.STALE_WORLD,
+                    "navigation_goal_stale", AStarPathfinder.worldVersion());
+            return;
+        }
+        if (NavigationPlanner.isSatisfiedAt(player, request, player.blockPosition())) {
+            finishPendingFormal(
+                    NavigationState.ARRIVED, FailureReason.NONE, "",
+                    AStarPathfinder.worldVersion());
+            return;
+        }
+        if (!formalPendingDynamicRefresh
+                && formalReplansUsed >= request.maxReplans()) {
+            finishPendingFormal(
+                    NavigationState.BLOCKED, FailureReason.PATH_BLOCKED,
+                    "segment_replan_limit", AStarPathfinder.worldVersion());
+            return;
+        }
+        NavigationPlanner.PlanningOutcome outcome = NavigationPlanner.plan(
+                player, request, true, formalIncomingHeading);
+        PathfindingResult plan = outcome.result();
+        if (!plan.success()) {
+            if (plan.reason() == FailureReason.SEARCH_BUDGET) {
+                nextFormalPlanTick = player.getServer().getTickCount() + 1;
+                handle.publishPlanning(
+                        navigationAuthority,
+                        "segment_budget_deferred",
+                        plan.worldVersion());
+                navigationSnapshot = snapshotWithoutExecutor(
+                        handle, NavigationState.PLANNING, handle.resolvedGoal(),
+                        0, formalCompletedPathCost, "segment_budget_deferred");
+                return;
+            }
+            NavigationState terminal = terminalState(plan.reason());
+            finishPendingFormal(
+                    terminal, plan.reason(),
+                    "segment_replan_failed: " + plan.reason(), plan.worldVersion(),
+                    outcome.unrestrictedEvidenceScope());
+            return;
+        }
+        if (plan.path().size() <= 1
+                && !request.goal().accepts(player.serverLevel(), player.blockPosition())) {
+            finishPendingFormal(
+                    NavigationState.BLOCKED, FailureReason.PATH_BLOCKED,
+                    "segment_made_no_progress", plan.worldVersion());
+            return;
+        }
+        if (!formalPendingDynamicRefresh) {
+            formalReplansUsed++;
+        }
+        NavigationRequest executionRequest = request.withMaxReplans(
+                Math.max(0, request.maxReplans() - formalReplansUsed));
+        PathExecutor next = new PathExecutor(outcome, executionRequest);
+        formalSegmentPending = false;
+        formalPendingDynamicRefresh = false;
+        formalIncomingHeading = null;
+        activateNavigation(
+                request.goal().anchor(player.serverLevel()), plan.resolvedGoal(), next, true);
+    }
+
+    private void finishPendingFormal(NavigationState state,
+                                     FailureReason failure,
+                                     String reason,
+                                     long worldVersion) {
+        finishPendingFormal(
+                state, failure, reason, worldVersion,
+                navigationHandle != null
+                        && navigationHandle.request().unrestrictedEvidenceScope());
+    }
+
+    private void finishPendingFormal(NavigationState state,
+                                     FailureReason failure,
+                                     String reason,
+                                     long worldVersion,
+                                     boolean unrestrictedEvidenceScope) {
+        NavigationHandle handle = navigationHandle;
+        BlockPos endpoint = state == NavigationState.ARRIVED
+                ? player.blockPosition() : handle.resolvedGoal();
+        handle.finish(
+                navigationAuthority, state, failure, reason,
+                endpoint, formalCompletedPathCost, worldVersion,
+                unrestrictedEvidenceScope);
+        navigationSnapshot = snapshotWithoutExecutor(
+                handle, state, endpoint, 0,
+                formalCompletedPathCost, reason);
+        formalSegmentPending = false;
+        formalNavigation = false;
+        formalPendingDynamicRefresh = false;
+        formalIncomingHeading = null;
+        activePathGoal = null;
+        stopMovement();
     }
 
     private void tickMining() {
@@ -665,9 +1021,22 @@ public final class ActionPack {
         mining = null;
     }
 
-    private void beginNavigation(BlockPos requestedGoal, TraversalPolicy traversalPolicy) {
-        cancelPathNavigation(NavigationState.CANCELLED, "replaced_by_new_navigation");
-        navigationRequestId++;
+    private void beginNavigation(NavigationRequest request) {
+        cancelPathNavigation(NavigationState.PREEMPTED, "replaced_by_new_navigation");
+        navigationRequestId = allocateNavigationRequestId();
+        BlockPos requestedGoal = request.goal().anchor(player.serverLevel());
+        if (requestedGoal == null) {
+            throw new IllegalArgumentException("legacy navigation requires a resolvable anchor");
+        }
+        navigationHandle = new NavigationHandle(
+                navigationRequestId, request, player.blockPosition(),
+                AStarPathfinder.worldVersion(), navigationAuthority);
+        formalNavigation = false;
+        formalSegmentPending = false;
+        formalPendingDynamicRefresh = false;
+        formalIncomingHeading = null;
+        formalCompletedPathCost = 0.0D;
+        formalReplansUsed = 0;
         navigationSnapshot = new NavigationSnapshot(
                 navigationRequestId,
                 NavigationState.PLANNING,
@@ -675,7 +1044,7 @@ public final class ActionPack {
                 requestedGoal,
                 null,
                 null,
-                traversalPolicy,
+                request.traversalPolicy(),
                 0,
                 0,
                 0.0D,
@@ -689,10 +1058,76 @@ public final class ActionPack {
                 "");
     }
 
+    private static NavigationRequest legacyNavigationRequest(
+            NavGoal goal,
+            TraversalPolicy policy,
+            TraversalBounds bounds,
+            boolean allowDig,
+            boolean allowPillar,
+            Set<BlockPos> exclusions,
+            Predicate<BlockPos> constraint,
+            String constraintKey,
+            String source) {
+        NavigationRequest request = switch (policy) {
+            case TASK_MUTATING_DRY -> {
+                if (!allowDig) {
+                    throw new IllegalArgumentException(
+                            "legacy mutating policy must declare its dig permission");
+                }
+                yield NavigationRequest.mutating(goal, allowPillar, source);
+            }
+            case AMBIENT_DRY_OPEN -> NavigationRequest.ambient(goal, bounds, source);
+            case WATER_CAPABLE -> NavigationRequest.water(goal, source).withBounds(bounds);
+            case TASK_WALK_DRY -> NavigationRequest.walk(goal, source).withBounds(bounds);
+            case ESCAPE_DRY_OPEN -> throw new IllegalArgumentException(
+                    "legacy ActionPack has no implicit escape adapter");
+        };
+        if (policy == TraversalPolicy.TASK_MUTATING_DRY) {
+            request = request.withBounds(bounds);
+        }
+        if ((exclusions != null && !exclusions.isEmpty()) || constraint != null) {
+            request = request.withConstraint(
+                    exclusions == null ? Set.of() : exclusions,
+                    constraint,
+                    constraintKey);
+        }
+        return request;
+    }
+
+    /**
+     * Legacy A* may conservatively snap an obstructed anchor to a standable interaction cell.
+     * Preserve the original target as the diagnostic anchor while making the structured handle's
+     * success predicate exactly match the endpoint that the legacy executor will publish.
+     */
+    private NavigationRequest resolvedLegacyRequest(NavigationRequest request,
+                                                    BlockPos requestedGoal,
+                                                    BlockPos resolvedGoal) {
+        if (request.goal().accepts(player.serverLevel(), resolvedGoal)) {
+            return request;
+        }
+        return request.withGoal(NavGoal.interaction(requestedGoal, Set.of(resolvedGoal)));
+    }
+
     private void activateNavigation(
             BlockPos requestedGoal, BlockPos resolvedGoal, PathExecutor executor) {
+        activateNavigation(requestedGoal, resolvedGoal, executor, false);
+    }
+
+    private void activateNavigation(
+            BlockPos requestedGoal,
+            BlockPos resolvedGoal,
+            PathExecutor executor,
+            boolean routeRevision) {
         this.pathExecutor = executor;
         this.activePathGoal = resolvedGoal.immutable();
+        this.publishedExecutorReplans = routeRevision ? executor.replanCount() : 0;
+        this.publishedExecutorFailureReplans = routeRevision
+                ? executor.failureReplanCount() : 0;
+        if (navigationHandle != null) {
+            navigationHandle.publishFollowing(
+                    navigationAuthority,
+                    resolvedGoal, logicalPathCost(executor), executor.worldVersion(), routeRevision);
+        }
         navigationSnapshot = new NavigationSnapshot(
                 navigationRequestId,
                 NavigationState.FOLLOWING,
@@ -703,7 +1138,7 @@ public final class ActionPack {
                 executor.traversalPolicy(),
                 executor.pathLength(),
                 executor.remainingNodes(),
-                executor.pathCost(),
+                logicalPathCost(executor),
                 executor.remainingPathCost(),
                 executor.totalTicks(),
                 executor.replanCount(),
@@ -714,17 +1149,89 @@ public final class ActionPack {
                 "");
     }
 
+    private void installRejectedHandleIfIdle(NavigationHandle rejected) {
+        if (pathExecutor != null || walkTo != null || formalSegmentPending) {
+            return;
+        }
+        navigationHandle = rejected;
+        navigationRequestId = rejected.requestId();
+        formalNavigation = false;
+        formalPendingDynamicRefresh = false;
+        formalIncomingHeading = null;
+        activePathGoal = null;
+        NavigationState state = rejected.state();
+        navigationSnapshot = snapshotWithoutExecutor(
+                rejected, state, rejected.resolvedGoal(), 0, 0.0D, rejected.reason());
+    }
+
+    private NavigationSnapshot snapshotWithoutExecutor(NavigationHandle handle,
+                                                       NavigationState state,
+                                                       BlockPos resolvedGoal,
+                                                       int pathLength,
+                                                       double pathCost,
+                                                       String reason) {
+        BlockPos requested = handle.requestedGoal().anchor(player.serverLevel());
+        return new NavigationSnapshot(
+                handle.requestId(),
+                state,
+                handle.start(),
+                requested,
+                resolvedGoal,
+                resolvedGoal,
+                handle.request().traversalPolicy(),
+                Math.max(0, pathLength),
+                state == NavigationState.ARRIVED ? 0 : Math.max(0, pathLength),
+                Math.max(0.0D, pathCost),
+                state == NavigationState.ARRIVED ? 0.0D : Math.max(0.0D, pathCost),
+                0,
+                handle.routeRevision(),
+                state == NavigationState.ARRIVED ? 0.0D : Double.POSITIVE_INFINITY,
+                0,
+                0,
+                "",
+                reason);
+    }
+
+    private static NavigationState terminalState(FailureReason reason) {
+        return switch (reason) {
+            case STALE_WORLD -> NavigationState.STALE_WORLD;
+            case NO_START, GOAL_UNREACHABLE, GOAL_NOT_STANDABLE, PATH_BLOCKED ->
+                    NavigationState.BLOCKED;
+            default -> NavigationState.FAILED;
+        };
+    }
+
     private ActionResult rejectNavigation(BlockPos requestedGoal, String reason) {
-        if (pathExecutor != null) {
+        NavigationRequest unknownScope = NavigationRequest.walk(
+                NavGoal.near(requestedGoal, 2, 2), "legacy_rejected_unknown")
+                .withConstraint(Set.of(), ignored -> true, "legacy_unknown_scope");
+        return rejectNavigation(unknownScope, requestedGoal, reason);
+    }
+
+    private ActionResult rejectNavigation(NavigationRequest rejectedRequest,
+                                          BlockPos requestedGoal,
+                                          String reason) {
+        if (pathExecutor != null || formalSegmentPending) {
             // Planning is synchronous: a rejected replacement must leave the previously valid
             // executor and its request snapshot untouched.
             return ActionResult.failed(reason);
         }
-        navigationRequestId++;
+        navigationRequestId = allocateNavigationRequestId();
         activePathGoal = null;
+        FailureReason failure = legacyFailureReason(reason);
+        NavigationState state = terminalState(failure);
+        navigationHandle = new NavigationHandle(
+                navigationRequestId, rejectedRequest, player.blockPosition(),
+                AStarPathfinder.worldVersion(), navigationAuthority);
+        navigationHandle.finish(
+                navigationAuthority,
+                state, failure, reason, null, 0.0D, AStarPathfinder.worldVersion());
+        formalNavigation = false;
+        formalPendingDynamicRefresh = false;
+        formalIncomingHeading = null;
         navigationSnapshot = new NavigationSnapshot(
                 navigationRequestId,
-                NavigationState.FAILED,
+                state,
                 player.blockPosition(),
                 requestedGoal,
                 null,
@@ -744,30 +1251,89 @@ public final class ActionPack {
         return ActionResult.failed(reason);
     }
 
+    private static FailureReason legacyFailureReason(String reason) {
+        if (reason == null) {
+            return FailureReason.PATH_BLOCKED;
+        }
+        for (FailureReason candidate : FailureReason.values()) {
+            if (candidate != FailureReason.NONE && reason.contains(candidate.name())) {
+                return candidate;
+            }
+        }
+        return "pathfinding_throttled".equals(reason)
+                ? FailureReason.SEARCH_BUDGET : FailureReason.PATH_BLOCKED;
+    }
+
+    private long allocateNavigationRequestId() {
+        navigationRequestSequence = Math.max(navigationRequestSequence, navigationRequestId) + 1L;
+        return navigationRequestSequence;
+    }
+
     private void cancelPathNavigation(NavigationState state, String reason) {
         if (pathExecutor == null) {
+            if (!formalSegmentPending || navigationHandle == null
+                    || navigationHandle.terminal()) {
+                return;
+            }
+            navigationHandle.finish(
+                    navigationAuthority,
+                    state,
+                    state == NavigationState.STALE_WORLD
+                            ? FailureReason.STALE_WORLD : FailureReason.NONE,
+                    reason,
+                    navigationHandle.resolvedGoal(),
+                    formalCompletedPathCost,
+                    AStarPathfinder.worldVersion());
+            navigationSnapshot = snapshotWithoutExecutor(
+                    navigationHandle, state, navigationHandle.resolvedGoal(),
+                    0, formalCompletedPathCost, reason);
+            formalSegmentPending = false;
+            formalNavigation = false;
+            formalPendingDynamicRefresh = false;
+            formalIncomingHeading = null;
+            activePathGoal = null;
+            stopMovement();
             return;
         }
         NavigationSnapshot terminal = snapshotFromExecutor(state, reason);
+        if (navigationHandle != null) {
+            navigationHandle.finish(
+                    navigationAuthority,
+                    state,
+                    state == NavigationState.STALE_WORLD
+                            ? FailureReason.STALE_WORLD : FailureReason.NONE,
+                    reason,
+                    pathExecutor.resolvedGoal(),
+                    logicalPathCost(pathExecutor),
+                    pathExecutor.worldVersion());
+        }
         pathExecutor.abort(this);
         pathExecutor = null;
         activePathGoal = null;
+        formalNavigation = false;
+        formalPendingDynamicRefresh = false;
+        formalIncomingHeading = null;
         navigationSnapshot = terminal;
     }
 
     private NavigationSnapshot snapshotFromExecutor(NavigationState state, String reason) {
+        boolean formalArrival = formalNavigation && state == NavigationState.ARRIVED;
+        BlockPos resolved = formalArrival
+                ? player.blockPosition() : pathExecutor.resolvedGoal();
+        double totalCost = formalArrival
+                ? logicalCompletedPathCost(pathExecutor) : logicalPathCost(pathExecutor);
         return new NavigationSnapshot(
                 navigationRequestId,
                 state,
                 navigationSnapshot.start(),
                 navigationSnapshot.requestedGoal(),
-                activePathGoal,
-                pathExecutor.currentNode(),
+                resolved,
+                formalArrival ? resolved : pathExecutor.currentNode(),
                 pathExecutor.traversalPolicy(),
                 pathExecutor.pathLength(),
-                pathExecutor.remainingNodes(),
-                pathExecutor.pathCost(),
-                pathExecutor.remainingPathCost(),
+                formalArrival ? 0 : pathExecutor.remainingNodes(),
+                totalCost,
+                formalArrival ? 0.0D : pathExecutor.remainingPathCost(),
                 pathExecutor.totalTicks(),
                 pathExecutor.replanCount(),
                 pathExecutor.bestNodeDistance(),
@@ -777,10 +1343,34 @@ public final class ActionPack {
                 reason);
     }
 
+    private double logicalPathCost(PathExecutor executor) {
+        return Math.max(0.0D,
+                (formalNavigation ? formalCompletedPathCost : 0.0D) + executor.pathCost());
+    }
+
+    private double logicalCompletedPathCost(PathExecutor executor) {
+        return Math.max(0.0D,
+                (formalNavigation ? formalCompletedPathCost : 0.0D)
+                        + executor.completedPathCost());
+    }
+
     private static boolean sameArrivalColumn(BlockPos first, BlockPos second) {
         return first.getX() == second.getX()
                 && first.getZ() == second.getZ()
                 && Math.abs(first.getY() - second.getY()) <= 1;
+    }
+
+    private static String legacyPathRequestKey(BlockPos goal,
+                                               TraversalPolicy policy,
+                                               boolean allowDig,
+                                               boolean allowPillar,
+                                               boolean exact,
+                                               TraversalBounds bounds) {
+        return goal.asLong() + "|" + policy.name()
+                + "|dig=" + allowDig
+                + "|pillar=" + allowPillar
+                + "|exact=" + exact
+                + "|bounds=" + (bounds == null ? TraversalBounds.unbounded() : bounds);
     }
 
     private static float clampInput(float value) {

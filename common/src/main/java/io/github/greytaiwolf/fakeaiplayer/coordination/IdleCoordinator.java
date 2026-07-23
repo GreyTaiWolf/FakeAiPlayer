@@ -46,6 +46,10 @@ public final class IdleCoordinator {
 
     /** Runs ambient state every tick while expensive job sampling remains background-throttled. */
     public boolean tickBot(AIPlayerEntity bot, boolean allowJobClaim) {
+        if (TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)) {
+            IdleBehaviorController.INSTANCE.cancel(bot, "runtime_recovery_read_only");
+            return false;
+        }
         if (TaskManager.INSTANCE.hasPersistentPause(bot)
                 || TaskManager.INSTANCE.getActive(bot).isPresent()
                 || TaskManager.INSTANCE.hasPaused(bot)) {
@@ -144,7 +148,22 @@ public final class IdleCoordinator {
             return;
         }
         claimedJobs.put(bot.getUUID(), job.id());
-        TaskManager.INSTANCE.assign(bot, task.get(), TaskOrigin.job(job.id(), "task_board"));
+        try {
+            io.github.greytaiwolf.fakeaiplayer.task.TaskAssignmentResult assignment =
+                    TaskManager.INSTANCE.assign(
+                            bot, task.get(), TaskOrigin.job(job.id(), "task_board"));
+            if (!assignment.started()) {
+                claimedJobs.remove(bot.getUUID(), job.id());
+                TaskBoard.INSTANCE.markFailed(job.id(), "assignment_deferred:" + assignment.reason());
+                markDirty(bot);
+            }
+        } catch (RuntimeException exception) {
+            claimedJobs.remove(bot.getUUID(), job.id());
+            TaskBoard.INSTANCE.markFailed(job.id(), "assignment_start_failed");
+            markDirty(bot);
+            io.github.greytaiwolf.fakeaiplayer.log.BotLog.error(
+                    bot, "job_assignment_start_failed", exception, "job_id", job.id());
+        }
     }
 
     private static void markDirty(AIPlayerEntity bot) {

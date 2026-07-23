@@ -529,6 +529,51 @@ public final class SmeltTask extends AbstractTask {
         return chooseFuel(smeltCount, item -> InventoryAction.countItem(bot, item));
     }
 
+    /**
+     * Shared Task/Mission fuel-availability predicate. It mirrors the sources loadFurnace can
+     * actually consume: carried fuel, fuel already loaded in the selected furnace, or reachable
+     * fuel in a container at the remembered base.
+     */
+    public static boolean hasUsableFuelSource(AIPlayerEntity bot) {
+        if (bot == null) {
+            return false;
+        }
+        if (chooseFuel(bot, 1) != null) {
+            return true;
+        }
+        Optional<BlockPos> selectedFurnace = nearestFurnace(bot);
+        if (selectedFurnace.isPresent()
+                && bot.serverLevel().getBlockEntity(selectedFurnace.get())
+                instanceof AbstractFurnaceBlockEntity furnace
+                && !furnace.getItem(1).isEmpty()) {
+            return true;
+        }
+        BlockPos base = BotMemoryStore.INSTANCE.of(bot.getUUID())
+                .placeIn(bot.serverLevel(), "base")
+                .orElse(null);
+        if (base == null) {
+            return false;
+        }
+        return FUEL_TICKS.keySet().stream()
+                .anyMatch(fuel -> !fuelContainers(bot, base, fuel).isEmpty());
+    }
+
+    /** Mirrors the executor's complete furnace discovery envelope for Mission preflight. */
+    public static boolean hasUsableFurnaceSource(AIPlayerEntity bot) {
+        if (bot == null) {
+            return false;
+        }
+        if (InventoryAction.findItem(bot, Items.FURNACE).isPresent()
+                || nearestFurnace(bot).isPresent()) {
+            return true;
+        }
+        return BotMemoryStore.INSTANCE
+                .of(bot.getUUID())
+                .placeIn(bot.serverLevel(), "furnace")
+                .filter(pos -> pos.closerThan(bot.blockPosition(), 96.0D))
+                .isPresent();
+    }
+
     static FuelChoice chooseFuel(Map<Item, Integer> inventory, int smeltCount) {
         return chooseFuel(smeltCount, item -> inventory.getOrDefault(item, 0));
     }

@@ -78,7 +78,7 @@ public final class CraftTask extends AbstractTask {
 
     private void plan(AIPlayerEntity bot) {
         // 幂等短路:工作台/熔炉这类功能方块,若附近已有(够得着)或背包已有,直接完成,不浪费材料重复制造。
-        if (utilityAlreadyAvailable(bot)) {
+        if (utilityAlreadyAvailable(bot, target, targetCount)) {
             BotLog.action(bot, "craft_skipped_already_available", "item", BuiltInRegistries.ITEM.getKey(target).toString());
             complete();
             return;
@@ -210,17 +210,28 @@ public final class CraftTask extends AbstractTask {
         return String.join("|", ids) + " x" + count;
     }
 
-    /** 目标是工作台/熔炉时,附近已有(够得着)或背包已有则视为"已具备",无需重复制造。 */
-    private boolean utilityAlreadyAvailable(AIPlayerEntity bot) {
+    /**
+     * Shared Task/Mission definition of a crafted utility being available. A world block can
+     * satisfy only a single-unit utility request; larger crafting quotas still require inventory.
+     */
+    public static boolean utilityAlreadyAvailable(AIPlayerEntity bot, Item target, int targetCount) {
+        int required = Math.max(1, targetCount);
+        int inventoryCount = InventoryAction.countItem(bot, target);
+        boolean nearbyUtility = false;
         if (target == Items.CRAFTING_TABLE) {
-            return nearbyCraftingTable(bot) != null
-                    || InventoryAction.findItem(bot, Items.CRAFTING_TABLE).isPresent();
+            nearbyUtility = nearbyCraftingTable(bot) != null;
+        } else if (target == Items.FURNACE) {
+            nearbyUtility = nearbyBlock(bot, Blocks.FURNACE) != null;
         }
-        if (target == Items.FURNACE) {
-            return nearbyBlock(bot, Blocks.FURNACE) != null
-                    || InventoryAction.findItem(bot, Items.FURNACE).isPresent();
-        }
-        return false;
+        return utilityRequestSatisfied(inventoryCount, required, nearbyUtility);
+    }
+
+    static boolean utilityRequestSatisfied(int inventoryCount,
+                                           int targetCount,
+                                           boolean nearbyUtility) {
+        int required = Math.max(1, targetCount);
+        return Math.max(0, inventoryCount) >= required
+                || required == 1 && nearbyUtility;
     }
 
     private static BlockPos nearbyBlock(AIPlayerEntity bot, net.minecraft.world.level.block.Block block) {

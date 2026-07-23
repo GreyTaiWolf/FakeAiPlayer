@@ -16,7 +16,7 @@ jobs:
   verify:
     name: Unit, GameTest, production jar and runtime evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
 
     steps:
       - name: Check out full repository history
@@ -39,14 +39,23 @@ jobs:
       - name: Run evidence validator adversarial self-tests
         run: bash scripts/evidence_validate.sh --self-test
 
-      - name: Run unit tests, headless GameTests and production build
+      - name: Run unit tests, Fabric GameTests and Fabric build
+        timeout-minutes: 12
         run: >-
           ./gradlew --no-daemon --console=plain --stacktrace
-          clean :common:test :fabric:runGameTest :neoforge:runGameTestServer
-          :fabric:build :neoforge:build
+          clean :common:test :fabric:runGameTest :fabric:build
+
+      - name: Run NeoForge GameTests and NeoForge build
+        timeout-minutes: 15
+        run: >-
+          ./gradlew --no-daemon --console=plain --stacktrace
+          :neoforge:runGameTestServer :neoforge:build
 
       - name: Inspect production artifacts
-        run: CI_STATIC_CHECK_ARTIFACTS=1 bash scripts/ci_static_check.sh
+        run: >-
+          CI_STATIC_CHECK_ARTIFACTS=1
+          CI_STATIC_CHECK_GAMETEST_RESULTS=1
+          bash scripts/ci_static_check.sh
 
       - name: Verify persistence across two JVM processes
         run: bash scripts/persistence_restart_test.sh
@@ -86,7 +95,7 @@ jobs:
             fabric/build/run/gameTest/crash-reports/**
             neoforge/build/run/gameTest/logs/**
             neoforge/build/run/gameTest/crash-reports/**
-            fabric/build/persistence-restart/**
+            fabric/build/reports/persistence-restart/**
             fabric/build/run/restart-*/logs/**
             fabric/build/run/restart-*/crash-reports/**
             fabric/build/libs/**

@@ -66,6 +66,7 @@ public final class GoalCard extends PanelCard {
         return switch (status) {
             case "COMPLETED" -> Theme.OK;
             case "PARTIAL" -> Theme.SYS;
+            case "BLOCKED" -> Theme.SYS;
             case "FAILED" -> Theme.HP;
             default -> Theme.TEXT_DIM;
         };

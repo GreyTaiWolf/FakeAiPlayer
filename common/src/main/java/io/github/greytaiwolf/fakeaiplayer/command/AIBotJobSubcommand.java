@@ -54,6 +54,11 @@ public final class AIBotJobSubcommand {
         if (!BotAuthorizationGate.INSTANCE.requireGlobalAdmin(source, "command:job_post")) {
             return 0;
         }
+        if (TaskBoard.INSTANCE.claimsSuspended()) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] job post rejected: runtime recovery is read-only"));
+            return 0;
+        }
         UUID id = TaskBoard.INSTANCE.postGlobal(kind, parseParams(paramsText), role);
         io.github.greytaiwolf.fakeaiplayer.persist.BotPersistence.INSTANCE.markDirty(source.getServer());
         source.sendSuccess(() -> Component.literal("[FakeAiPlayer] job posted " + id + " kind=" + kind + " role=" + role), false);
@@ -80,6 +85,11 @@ public final class AIBotJobSubcommand {
         if (!BotAuthorizationGate.INSTANCE.requireGlobalAdmin(source, "command:job_clear")) {
             return 0;
         }
+        if (TaskBoard.INSTANCE.claimsSuspended()) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] job clear rejected: runtime recovery is read-only"));
+            return 0;
+        }
         TaskBoard.INSTANCE.clear();
         io.github.greytaiwolf.fakeaiplayer.persist.BotPersistence.INSTANCE.markDirty(source.getServer());
         source.sendSuccess(() -> Component.literal("[FakeAiPlayer] jobs cleared"), false);
@@ -98,9 +108,15 @@ public final class AIBotJobSubcommand {
         // Preserve the real OP/console provenance. The legacy from_bot argument is not used as an
         // identity because that would let an administrator silently impersonate a Bot.
         boolean queued = BrainCoordinator.INSTANCE.handleMessage(target.get(), source.getTextName(), message);
-        source.sendSuccess(() -> Component.literal("[FakeAiPlayer] operator tell " + (queued ? "queued" : "busy")
-                + " (legacy from_bot=" + fromBot + " ignored)"), false);
-        return queued ? 1 : 0;
+        if (!queued) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] operator tell 未排队（目标忙碌或处于只读恢复保护；legacy from_bot="
+                            + fromBot + " 已忽略）"));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal(
+                "[FakeAiPlayer] operator tell 已排队（legacy from_bot=" + fromBot + " 已忽略）"), false);
+        return 1;
     }
 
     public static Map<String, String> parseParams(String text) {

@@ -8,6 +8,7 @@
     "BaseContainerBlockEntityAccessorMixin",
     "BlockItemPlacementMixin",
     "ClientConnectionAccessorMixin",
+    "LevelBlockRevisionMixin",
     "PlayerManagerFakePlayerMixin",
     "MerchantEntityInvokerMixin"
   ],

@@ -55,6 +55,16 @@ public final class BrainCoordinator {
     }
 
     public boolean handleMessage(AIPlayerEntity bot, String senderName, String text) {
+        if (TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)) {
+            BotLog.security("runtime_recovery_brain_request_rejected",
+                    "bot_uuid", bot.getUUID(),
+                    "sender", senderName == null ? "unknown" : senderName);
+            sendPanelChat(
+                    bot,
+                    "system",
+                    "运行时存档正在只读恢复保护中；修复 runtime.json 并重启服务器后才能继续对话或执行任务。");
+            return false;
+        }
         ensureConfigured();
         BotConversation conversation = conversations.computeIfAbsent(bot.getUUID(), BotConversation::new);
         boolean supersededDecision = conversation.decision.busy();
@@ -387,6 +397,9 @@ public final class BrainCoordinator {
     }
 
     public boolean maybeWakeForFailureOrGoal(AIPlayerEntity bot) {
+        if (TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)) {
+            return false;
+        }
         if (awaitingExternalConfirmation.containsKey(bot.getUUID())) {
             return false;
         }
@@ -679,7 +692,11 @@ public final class BrainCoordinator {
                                     + "/" + result.evaluation().required()
                                     + ", reason=" + result.reason()
                                     + ", unmet=" + result.evaluation().unmet()
-                                    + ". Only COMPLETED may be described as complete; PARTIAL, FAILED, or CANCELLED must be reported truthfully."));
+                                    + result.terminalSkillOutcome().map(outcome ->
+                                            ", skill_outcome=" + outcome.status()
+                                            + ", failure_kind=" + outcome.failureKind()
+                                            + ", skill_evidence=" + outcome.evidence()).orElse("")
+                                    + ". Only COMPLETED may be described as complete; BLOCKED, PARTIAL, FAILED, or CANCELLED must be reported truthfully."));
                     BotLog.comm(bot, "goal_result_injected",
                             "sequence", result.sequence(),
                             "status", result.status(),

@@ -144,7 +144,7 @@ printf 'fakeaiplayer harness restart-check RestartBob\n' >&9
 wait_for_outcome "$phase2" \
   '[FakeAiPlayer Harness] persistence_restart RESTORE_PASS' \
   '[FakeAiPlayer Harness] persistence_restart RESTORE_FAIL' 120 || {
-  printf 'persistence-restart: exact checkpoint/lease restore failed; see %s\n' "$phase2" >&2
+  printf 'persistence-restart: checkpoint accounting/lease restore failed; see %s\n' "$phase2" >&2
   exit 1
 }
 poll_command_until "$phase2" \
@@ -159,7 +159,8 @@ stop_server
 {
   printf 'result\tPASS\n'
   printf 'profile\tstrict_survival\n'
-  printf 'checkpoint\tnon_default_exact_restore\n'
+  printf 'checkpoint\tv3_accounting_exact_plan_cursor_rebased\n'
+  printf 'recovery_budget\tnonzero_exact_restore\n'
   printf 'stale_lease\treopened\n'
   printf 'resume\tcompleted_with_postcondition\n'
   printf 'phase1\t%s\n' "$phase1"

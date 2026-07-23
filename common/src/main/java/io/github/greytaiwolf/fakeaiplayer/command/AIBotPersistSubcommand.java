@@ -43,8 +43,21 @@ public final class AIBotPersistSubcommand {
             return 0;
         }
         int count = BotPersistence.INSTANCE.reloadIfIdle(source.getServer());
-        if (count < 0) {
+        if (count == -1) {
             source.sendFailure(Component.literal("[FakeAiPlayer] reload rejected: despawn all bots and clear jobs first"));
+            return 0;
+        }
+        if (count == -2) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] reload rejected: persistence writer is still flushing; "
+                            + "wait, then repair runtime.json and retry"));
+            return 0;
+        }
+        if (BotPersistence.INSTANCE.readOnlyRecoveryActive()) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] restore failed and runtime is read-only: "
+                            + BotPersistence.INSTANCE.readOnlyRecoveryReason()
+                            + "; repair runtime.json and restart the server"));
             return 0;
         }
         source.sendSuccess(() -> Component.literal("[FakeAiPlayer] restored " + count + " bot(s)"), false);

@@ -30,6 +30,7 @@ public record GoalStep(Kind kind,
         HUNT,
         COOK_FOOD,
         MILK_COW,
+        EQUIP_LOADOUT,
         PLACE_STATIONS,
         STOCKPILE,
         DESCEND_TO_Y,
@@ -38,9 +39,43 @@ public record GoalStep(Kind kind,
     }
 
     public GoalStep {
+        if (kind == null) {
+            throw new IllegalArgumentException("goal_step_kind_missing");
+        }
         count = Math.max(1, count);
+        if (ores != null && ores.stream().anyMatch(java.util.Objects::isNull)) {
+            throw new IllegalArgumentException(
+                    "goal_step_ores_invalid:" + kind.name().toLowerCase(java.util.Locale.ROOT));
+        }
         ores = ores == null ? Set.of() : Set.copyOf(ores);
         pos = pos == null ? null : pos.immutable();
+        switch (kind) {
+            case GATHER, GATHER_EXACT, CRAFT, STOCKPILE -> require(item != null,
+                    "goal_step_item_missing:" + kind.name().toLowerCase(java.util.Locale.ROOT));
+            case MINE, MINE_EXACT -> require(block != null,
+                    "goal_step_block_missing:" + kind.name().toLowerCase(java.util.Locale.ROOT));
+            case MINE_ORE -> require(!ores.isEmpty(), "goal_step_ores_missing:mine_ore");
+            case SMELT -> {
+                require(input != null, "goal_step_input_missing:smelt");
+                require(output != null, "goal_step_output_missing:smelt");
+            }
+            case MOVE, MOVE_NON_MUTATING, DESCEND_TO_Y -> require(pos != null,
+                    "goal_step_position_missing:" + kind.name().toLowerCase(java.util.Locale.ROOT));
+            case FARM -> {
+                require(block != null, "goal_step_crop_missing:farm");
+                require(input != null, "goal_step_seed_missing:farm");
+                require(item != null, "goal_step_produce_missing:farm");
+            }
+            case BUILD -> require(tag != null && !tag.isBlank(), "goal_step_blueprint_missing:build");
+            case HUNT, COOK_FOOD, MILK_COW, EQUIP_LOADOUT, PLACE_STATIONS, MAKE_OBSIDIAN -> {
+            }
+        }
+    }
+
+    private static void require(boolean condition, String reason) {
+        if (!condition) {
+            throw new IllegalArgumentException(reason);
+        }
     }
 
     public static GoalStep gather(Item item, int count) {
@@ -105,6 +140,11 @@ public record GoalStep(Kind kind,
         return new GoalStep(Kind.MILK_COW, null, count, null, Set.of(), null, null, null, null);
     }
 
+    /** Equip the best owned armor and weapon, then verify the authoritative equipment slots. */
+    public static GoalStep equipLoadout() {
+        return new GoalStep(Kind.EQUIP_LOADOUT, null, 1, null, Set.of(), null, null, null, null);
+    }
+
     /** Phase2:放置工作台/熔炉/箱子三件套(方块固定,无参数)。 */
     public static GoalStep placeStations() {
         return new GoalStep(Kind.PLACE_STATIONS, null, 1, null, Set.of(), null, null, null, null);
@@ -165,6 +205,7 @@ public record GoalStep(Kind kind,
             case HUNT -> "打猎取肉 ×" + count;
             case COOK_FOOD -> "烤制食物 ×" + count;
             case MILK_COW -> "挤牛奶 ×" + count;
+            case EQUIP_LOADOUT -> "穿戴最佳护甲和武器";
             case PLACE_STATIONS -> "摆放工作台/熔炉/箱子";
             case STOCKPILE -> "囤入箱子 " + ItemNames.cn(item);
             case DESCEND_TO_Y -> "下挖到 Y=" + pos.getY();

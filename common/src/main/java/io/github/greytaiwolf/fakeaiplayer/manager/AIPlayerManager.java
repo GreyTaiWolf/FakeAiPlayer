@@ -12,6 +12,7 @@ import io.github.greytaiwolf.fakeaiplayer.pathfinding.Standability;
 import io.github.greytaiwolf.fakeaiplayer.persist.BotPersistence;
 import io.github.greytaiwolf.fakeaiplayer.persist.BotRecord;
 import io.github.greytaiwolf.fakeaiplayer.runtime.RuntimeLifecycleCoordinator;
+import io.github.greytaiwolf.fakeaiplayer.task.TaskManager;
 import io.github.greytaiwolf.fakeaiplayer.util.OfflineProfileFactory;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
@@ -112,6 +113,11 @@ public final class AIPlayerManager {
                                           float pitch,
                                           GameType gameMode,
                                           UUID ownerUuid) {
+        if (TaskManager.INSTANCE.runtimeRecoveryModeActive()) {
+            BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE, null,
+                    "bot_spawn_rejected_runtime_recovery", "name", name);
+            return Optional.empty();
+        }
         String normalizedName = normalizeName(name);
         if (nameIndex.containsKey(normalizedName) || server.getPlayerList().getPlayerByName(name) != null) {
             return Optional.empty();
@@ -153,6 +159,12 @@ public final class AIPlayerManager {
     }
 
     public Optional<AIPlayerEntity> respawnFromRecord(MinecraftServer server, BotRecord record) {
+        if (!BotPersistence.restorableBotSubstate(record)) {
+            BotLog.error("bot_restore_substate_rejected", null,
+                    "name", record == null ? "unknown" : record.name(),
+                    "reason", "owner_inventory_or_memory_payload_invalid");
+            return Optional.empty();
+        }
         RestoreTarget target = restoreTarget(server, record);
         GameType gameMode = GameType.SURVIVAL;  // AI 助手一律生存,忽略旧存档可能存的 creative
         Optional<AIPlayerEntity> spawned = spawn(
@@ -164,18 +176,32 @@ public final class AIPlayerManager {
                 record.pitch(),
                 gameMode,
                 parseUuid(record.ownerUuid()));
-        spawned.ifPresent(bot -> {
-            BotPersistence.applyInventory(bot, record.inventoryNbt());
-            setRole(bot, record.role());
-            BotMemoryStore.INSTANCE.loadString(bot.getUUID(), record.memoryNbt());
-            bot.setHealth(Math.max(1.0F, Math.min(record.health(), bot.getMaxHealth())));
-            bot.getFoodData().setFoodLevel(Math.max(0, Math.min(20, record.hunger())));
-            BotLog.lifecycle(bot, "bot_restored",
-                    "pos", LogFields.pos(bot.blockPosition()),
-                    "mode", gameMode.getName(),
-                    "dimension", bot.level().dimension().location(),
-                    "fallback", target.fallback());
-        });
+        if (spawned.isEmpty()) {
+            return Optional.empty();
+        }
+        AIPlayerEntity bot = spawned.orElseThrow();
+        boolean inventoryRestored =
+                BotPersistence.applyInventory(bot, record.inventoryNbt());
+        boolean memoryRestored =
+                BotMemoryStore.INSTANCE.loadString(bot.getUUID(), record.memoryNbt());
+        if (!inventoryRestored || !memoryRestored) {
+            // The shell remains registered only long enough for BotPersistence's whole-session
+            // recovery isolation to stop it and expose diagnostics. Returning empty is the
+            // accounting signal that forbids a canonical rewrite of the source snapshot.
+            BotLog.error(bot, "bot_restore_substate_failed", null,
+                    "inventory_restored", inventoryRestored,
+                    "memory_restored", memoryRestored,
+                    "recovery", "runtime_partial_restore_read_only");
+            return Optional.empty();
+        }
+        setRole(bot, record.role());
+        bot.setHealth(Math.max(1.0F, Math.min(record.health(), bot.getMaxHealth())));
+        bot.getFoodData().setFoodLevel(Math.max(0, Math.min(20, record.hunger())));
+        BotLog.lifecycle(bot, "bot_restored",
+                "pos", LogFields.pos(bot.blockPosition()),
+                "mode", gameMode.getName(),
+                "dimension", bot.level().dimension().location(),
+                "fallback", target.fallback());
         return spawned;
     }
 

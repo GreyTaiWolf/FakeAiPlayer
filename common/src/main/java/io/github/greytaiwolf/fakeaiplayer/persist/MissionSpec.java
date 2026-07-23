@@ -1,23 +1,78 @@
 package io.github.greytaiwolf.fakeaiplayer.persist;
 
 import io.github.greytaiwolf.fakeaiplayer.goal.Goal;
+import io.github.greytaiwolf.fakeaiplayer.mission.GoalSpec;
+import io.github.greytaiwolf.fakeaiplayer.mission.MissionPolicy;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 
 /** Stable, declarative Goal representation. No Task, phase, path, entity, or world object is serialized. */
-public record MissionSpec(String type, Map<String, String> params, List<String> values) {
+public record MissionSpec(
+        String type,
+        Map<String, String> params,
+        List<String> values,
+        String source,
+        Integer priority,
+        PolicySpec policy,
+        String binding
+) {
+    private static final HexFormat HEX = HexFormat.of();
+
+    /** Backwards-compatible constructor for callers and schema-1 snapshots without provenance. */
+    public MissionSpec(String type, Map<String, String> params, List<String> values) {
+        this(type, params, values, "", null, null, "");
+    }
+
+    /** Schema-2 compatibility constructor for records that predate exact MissionPolicy state. */
+    public MissionSpec(String type,
+                       Map<String, String> params,
+                       List<String> values,
+                       String source,
+                       Integer priority) {
+        this(type, params, values, source, priority, null, "");
+    }
+
+    /** Compatibility constructor for P3 records that predate the outer MissionSpec binding. */
+    public MissionSpec(String type,
+                       Map<String, String> params,
+                       List<String> values,
+                       String source,
+                       Integer priority,
+                       PolicySpec policy) {
+        this(type, params, values, source, priority, policy, "");
+    }
+
     public MissionSpec {
         type = type == null ? "" : type;
         params = params == null ? Map.of() : Map.copyOf(params);
         values = values == null ? List.of() : List.copyOf(values);
+        source = source == null ? "" : source.trim();
+        binding = binding == null ? "" : binding.trim();
     }
 
     public static MissionSpec fromGoal(Goal goal) {
+        return fromGoal(goal, GoalSpec.Source.LEGACY,
+                GoalSpec.defaultPriority(GoalSpec.Source.LEGACY), null);
+    }
+
+    public static MissionSpec fromGoal(Goal goal, GoalSpec.Source source, int priority) {
+        return fromGoal(goal, source, priority, null);
+    }
+
+    public static MissionSpec fromGoal(Goal goal,
+                                       GoalSpec.Source source,
+                                       int priority,
+                                       MissionPolicy policy) {
         Map<String, String> params = new LinkedHashMap<>();
         List<String> values = List.of();
         String type;
@@ -70,7 +125,124 @@ public record MissionSpec(String type, Map<String, String> params, List<String> 
                 }
             }
         }
-        return new MissionSpec(type, params, values);
+        GoalSpec.Source resolvedSource = source == null ? GoalSpec.Source.LEGACY : source;
+        MissionSpec unbound = new MissionSpec(
+                type,
+                params,
+                values,
+                resolvedSource.name(),
+                priority,
+                policy == null ? null : PolicySpec.from(policy),
+                "");
+        return unbound.withCurrentBinding();
+    }
+
+    /** Old snapshots intentionally restore at RESTORED priority rather than gaining authority. */
+    public GoalSpec.Source sourceOrRestored() {
+        if (!provenanceValid()) {
+            return GoalSpec.Source.RESTORED;
+        }
+        try {
+            return source.isBlank() ? GoalSpec.Source.RESTORED : GoalSpec.Source.valueOf(source);
+        } catch (RuntimeException ignored) {
+            return GoalSpec.Source.RESTORED;
+        }
+    }
+
+    public int priorityOrDefault() {
+        if (!provenanceValid()) {
+            return GoalSpec.defaultPriority(GoalSpec.Source.RESTORED);
+        }
+        GoalSpec.Source resolved = sourceOrRestored();
+        return priority == null ? GoalSpec.defaultPriority(resolved) : priority;
+    }
+
+    /** Current persisted MissionSpecs carry a self-binding over every semantic field. */
+    public boolean bindingPresent() {
+        return !binding.isBlank();
+    }
+
+    public boolean bindingValid() {
+        return binding.matches("[0-9a-f]{64}") && binding.equals(contentFingerprint());
+    }
+
+    /** Exact pre-P3 persistence shape; it may migrate only at restricted RESTORED authority. */
+    public boolean legacyUnboundShape() {
+        return binding.isBlank() && source.isBlank() && priority == null && policy == null;
+    }
+
+    private boolean provenanceValid() {
+        if (source.isBlank()) {
+            return priority == null;
+        }
+        try {
+            GoalSpec.Source.valueOf(source);
+            return priority != null && priority >= 0 && priority <= 100;
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private MissionSpec withCurrentBinding() {
+        return new MissionSpec(type, params, values, source, priority, policy,
+                contentFingerprint());
+    }
+
+    private String contentFingerprint() {
+        StringBuilder canonical = new StringBuilder();
+        appendField(canonical, "type", type);
+        appendField(canonical, "params.size", Integer.toString(params.size()));
+        new TreeMap<>(params).forEach((key, value) -> {
+            appendField(canonical, "params.key", key);
+            appendField(canonical, "params.value", value);
+        });
+        appendField(canonical, "values.size", Integer.toString(values.size()));
+        values.forEach(value -> appendField(canonical, "values.item", value));
+        appendField(canonical, "source", source);
+        appendNullable(canonical, "priority", priority == null ? null : priority.toString());
+        if (policy == null) {
+            appendField(canonical, "policy.present", "false");
+        } else {
+            appendField(canonical, "policy.present", "true");
+            appendNullable(canonical, "policy.risk", policy.riskLevel());
+            appendNullable(canonical, "policy.mutation", policy.mutationScope());
+            appendNullable(canonical, "policy.time",
+                    policy.timeBudgetTicks() == null ? null : policy.timeBudgetTicks().toString());
+            appendNullable(canonical, "policy.recovery",
+                    policy.recoveryBudget() == null ? null : policy.recoveryBudget().toString());
+            appendNullable(canonical, "policy.interruption", policy.interruptionPolicy());
+        }
+        try {
+            return HEX.formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(canonical.toString().getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("sha256_unavailable", exception);
+        }
+    }
+
+    private static void appendNullable(StringBuilder target, String name, String value) {
+        appendField(target, name + ".present", Boolean.toString(value != null));
+        if (value != null) {
+            appendField(target, name, value);
+        }
+    }
+
+    private static void appendField(StringBuilder target, String name, String value) {
+        appendLengthPrefixed(target, name);
+        appendLengthPrefixed(target, value);
+    }
+
+    private static void appendLengthPrefixed(StringBuilder target, String value) {
+        target.append(value.length()).append(':').append(value).append(';');
+    }
+
+    /** Empty means either a legacy record (no policy) or a corrupt policy; use policyPresent to distinguish. */
+    public Optional<MissionPolicy> persistedPolicy() {
+        return policy == null ? Optional.empty() : policy.toPolicy();
+    }
+
+    public boolean policyPresent() {
+        return policy != null;
     }
 
     public Optional<Goal> toGoal() {
@@ -129,5 +301,43 @@ public record MissionSpec(String type, Map<String, String> params, List<String> 
             throw new IllegalArgumentException("missing_mission_param:" + key);
         }
         return value;
+    }
+
+    /** Pure persistence form with boxed counters so missing legacy fields cannot become zero silently. */
+    public record PolicySpec(
+            String riskLevel,
+            String mutationScope,
+            Integer timeBudgetTicks,
+            Integer recoveryBudget,
+            String interruptionPolicy
+    ) {
+        public static PolicySpec from(MissionPolicy policy) {
+            if (policy == null) {
+                throw new IllegalArgumentException("mission_policy_missing");
+            }
+            return new PolicySpec(
+                    policy.riskLevel().name(),
+                    policy.mutationScope().name(),
+                    policy.timeBudgetTicks(),
+                    policy.recoveryBudget(),
+                    policy.interruptionPolicy().name());
+        }
+
+        public Optional<MissionPolicy> toPolicy() {
+            try {
+                if (riskLevel == null || mutationScope == null || timeBudgetTicks == null
+                        || recoveryBudget == null || interruptionPolicy == null) {
+                    return Optional.empty();
+                }
+                return Optional.of(new MissionPolicy(
+                        MissionPolicy.RiskLevel.valueOf(riskLevel),
+                        MissionPolicy.MutationScope.valueOf(mutationScope),
+                        timeBudgetTicks,
+                        recoveryBudget,
+                        MissionPolicy.InterruptionPolicy.valueOf(interruptionPolicy)));
+            } catch (RuntimeException exception) {
+                return Optional.empty();
+            }
+        }
     }
 }

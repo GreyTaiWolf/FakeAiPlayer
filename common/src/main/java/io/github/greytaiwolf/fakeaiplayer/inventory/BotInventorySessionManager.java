@@ -36,6 +36,10 @@ public final class BotInventorySessionManager {
             deny(viewer, "You are not this bot's owner and do not have OP permission.");
             return false;
         }
+        if (TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)) {
+            deny(viewer, "Runtime recovery is read-only; repair runtime.json and restart first.");
+            return false;
+        }
         if (!baseValidity(viewer, bot)) {
             deny(viewer, "Move within 8 blocks of the bot to open its inventory.");
             return false;
@@ -121,6 +125,7 @@ public final class BotInventorySessionManager {
         Session session = sessionsByBot.get(bot.getUUID());
         return session != null
                 && session.viewerUuid().equals(viewer.getUUID())
+                && !TaskManager.INSTANCE.hasRuntimeRecoveryLock(bot)
                 && viewer instanceof ServerPlayer serverViewer
                 && baseValidity(serverViewer, bot)
                 && BotAuthorizationGate.INSTANCE.authorize(serverViewer, bot,

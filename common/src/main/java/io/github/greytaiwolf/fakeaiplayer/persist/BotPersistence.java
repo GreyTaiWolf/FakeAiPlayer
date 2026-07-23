@@ -2,10 +2,12 @@ package io.github.greytaiwolf.fakeaiplayer.persist;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import io.github.greytaiwolf.fakeaiplayer.brain.BrainCoordinator;
 import io.github.greytaiwolf.fakeaiplayer.coordination.Job;
 import io.github.greytaiwolf.fakeaiplayer.coordination.TaskBoard;
 import io.github.greytaiwolf.fakeaiplayer.entity.AIPlayerEntity;
 import io.github.greytaiwolf.fakeaiplayer.goal.GoalExecutor;
+import io.github.greytaiwolf.fakeaiplayer.inventory.BotInventorySessionManager;
 import io.github.greytaiwolf.fakeaiplayer.log.BotLog;
 import io.github.greytaiwolf.fakeaiplayer.manager.AIPlayerManager;
 import io.github.greytaiwolf.fakeaiplayer.memory.BotMemoryStore;
@@ -18,6 +20,7 @@ import net.minecraft.nbt.TagParser;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.storage.LevelResource;
 import java.io.IOException;
 import java.io.Reader;
@@ -28,6 +31,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -60,6 +64,8 @@ public final class BotPersistence {
     private volatile boolean acceptingAsyncWrites = true;
     private volatile boolean restoring;
     private volatile boolean lastSaveSucceeded;
+    private volatile boolean lastWriterOperationSucceeded = true;
+    private volatile String readOnlyReason = "";
 
     private BotPersistence() {
     }
@@ -130,6 +136,14 @@ public final class BotPersistence {
         return lastSaveSucceeded;
     }
 
+    public boolean readOnlyRecoveryActive() {
+        return readOnlyDueToLoadFailure;
+    }
+
+    public String readOnlyRecoveryReason() {
+        return readOnlyReason;
+    }
+
     public List<BotRecord> load(MinecraftServer server) {
         LoadOutcome outcome = loadSnapshot(server);
         return outcome.snapshot().bots().stream().map(PersistedBot::bot).toList();
@@ -138,7 +152,30 @@ public final class BotPersistence {
     public int loadAndRespawn(MinecraftServer server) {
         restoring = true;
         try {
-            return loadAndRespawnInternal(server);
+            if (!quiescePendingWritesForRestore()) {
+                enterRestoreReadOnly(
+                        server,
+                        "runtime_restore_writer_quiesce_failed_read_only",
+                        0,
+                        0);
+                return 0;
+            }
+            try {
+                return loadAndRespawnInternal(server);
+            } catch (RuntimeException restoreFailure) {
+                // A malformed record may fail after earlier Bots or Jobs have already been
+                // reconstructed. Keep every currently known Bot and every future Bot behind the
+                // session-wide gate instead of returning a half-live, non-persistable runtime.
+                enterRestoreReadOnly(
+                        server,
+                        "runtime_restore_unexpected_failure_read_only",
+                        AIPlayerManager.INSTANCE.all().size(),
+                        -1);
+                BotLog.error("runtime_restore_unexpected_failure", restoreFailure,
+                        "path", runtimeFile(server),
+                        "recovery", "source_snapshot_preserved; runtime_read_only");
+                return 0;
+            }
         } finally {
             restoring = false;
         }
@@ -153,42 +190,196 @@ public final class BotPersistence {
                     "runtime_live_reload_rejected", "reason", "runtime_not_empty");
             return -1;
         }
+        if (pendingAsync.get() != null || asyncDrainScheduled.get()) {
+            // An admin may be about to replace runtime.json with a repaired authoritative copy.
+            // Never flush a debounced pre-repair snapshot over that source from the reload path.
+            BotLog.warn(io.github.greytaiwolf.fakeaiplayer.log.LogCategory.LIFECYCLE, null,
+                    "runtime_live_reload_rejected", "reason", "pending_writer_activity",
+                    "recovery", "wait_for_persistence_flush_then_repair_and_retry");
+            return -2;
+        }
         return loadAndRespawn(server);
     }
 
     private int loadAndRespawnInternal(MinecraftServer server) {
         readOnlyDueToLoadFailure = false;
+        readOnlyReason = "";
+        TaskManager.INSTANCE.beginRuntimeSession();
         TaskBoard.INSTANCE.beginRuntimeSession();
         LoadOutcome outcome = loadSnapshot(server);
+        if (readOnlyDueToLoadFailure) {
+            // Unsupported, malformed and failed legacy reads all return an empty projection. They
+            // still require the same whole-session execution gate as a partially restored graph;
+            // otherwise a newly spawned Bot could mutate the world while persistence is disabled.
+            enterRestoreReadOnly(
+                    server,
+                    "runtime_load_failure_read_only",
+                    0,
+                    0);
+            return 0;
+        }
         RuntimeSnapshot snapshot = outcome.snapshot();
         List<RestoredMission> missions = new ArrayList<>();
         int restored = 0;
+        boolean fullyAccounted = true;
         for (PersistedBot persisted : snapshot.bots()) {
             if (persisted == null || persisted.bot() == null) {
+                fullyAccounted = false;
                 continue;
             }
             Optional<AIPlayerEntity> bot = AIPlayerManager.INSTANCE.respawnFromRecord(server, persisted.bot());
             if (bot.isPresent()) {
                 restored++;
                 missions.add(new RestoredMission(bot.get(), persisted.missions()));
+            } else {
+                fullyAccounted = false;
             }
         }
-        TaskBoard.INSTANCE.replaceAll(migrateJobs(snapshot.jobs()));
-        for (RestoredMission restoredMission : missions) {
-            GoalExecutor.INSTANCE.restoreRuntime(restoredMission.bot(), restoredMission.missions());
+        List<Job> migratedJobs = migrateJobs(snapshot.jobs());
+        if (migratedJobs.size() != snapshot.jobs().size()) {
+            fullyAccounted = false;
         }
-        if (outcome.legacyMigrated() && !readOnlyDueToLoadFailure) {
+        TaskBoard.INSTANCE.replaceAll(migratedJobs);
+        List<Job> restoredJobs = TaskBoard.INSTANCE.snapshot();
+        if (!restoredJobIdentityMatches(migratedJobs, restoredJobs)) {
+            fullyAccounted = false;
+        }
+        for (RestoredMission restoredMission : missions) {
+            boolean missionAccounted = GoalExecutor.INSTANCE.restoreRuntime(
+                    restoredMission.bot(), restoredMission.missions());
+            fullyAccounted &= missionAccounted;
+        }
+        boolean canonicalWriteAllowed = canonicalRestoreWriteAllowed(
+                readOnlyDueToLoadFailure,
+                snapshot.bots().size(),
+                restored,
+                fullyAccounted,
+                snapshot.jobs().size(),
+                restoredJobs.size());
+        if (!readOnlyDueToLoadFailure && !canonicalWriteAllowed) {
+            // A canonical snapshot may contain only fully accounted entries. Otherwise capture()
+            // would silently omit a Bot/Mission/Job that failed to restore and overwrite the last
+            // recoverable runtime.json. Keep the whole session read-only until an operator repairs
+            // or removes the isolated record.
+            enterRestoreReadOnly(
+                    server,
+                    "runtime_partial_restore_read_only",
+                    restored,
+                    snapshot.bots().size());
+        }
+        if (!readOnlyDueToLoadFailure) {
+            // restoreRuntime suppresses mutation-driven writes while the in-memory graph is
+            // incomplete. Once every Bot, Mission and stale Job lease has been reconstructed,
+            // synchronously persist the canonical revision/cursor before releasing the restoring
+            // guard and publishing runtime-ready; an async debounce leaves a second-crash window.
             saveAll(server);
-            if (lastSaveSucceeded) {
-                backupLegacyFiles(server);
-                BotLog.lifecycle("runtime_legacy_migrated", "bots", restored,
-                        "schema", RuntimeSnapshot.CURRENT_SCHEMA);
-            } else {
-                BotLog.error("runtime_legacy_migration_write_failed", null,
-                        "recovery", "legacy_files_were_left_in_place");
+            if (!lastSaveSucceeded) {
+                enterRestoreReadOnly(
+                        server,
+                        "runtime_canonical_restore_save_failed_read_only",
+                        restored,
+                        snapshot.bots().size());
+            }
+            if (outcome.legacyMigrated()) {
+                if (lastSaveSucceeded) {
+                    backupLegacyFiles(server);
+                    BotLog.lifecycle("runtime_legacy_migrated", "bots", restored,
+                            "schema", RuntimeSnapshot.CURRENT_SCHEMA);
+                } else {
+                    BotLog.error("runtime_legacy_migration_write_failed", null,
+                            "recovery", "legacy_files_were_left_in_place");
+                }
             }
         }
         return restored;
+    }
+
+    private boolean quiescePendingWritesForRestore() {
+        try {
+            Future<Boolean> barrier = writer.submit(() -> {
+                // The reload caller has already set restoring=true, so no new captures can enter.
+                // Admin live reload rejects pending writer activity before reaching this barrier.
+                // At startup, drain rather than discard any residual coalesced snapshot: it may be
+                // the only durable record that a Bot was deleted before a same-JVM world restart.
+                drainPendingWrites();
+                return lastWriterOperationSucceeded;
+            });
+            return barrier.get();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (ExecutionException | RejectedExecutionException exception) {
+            return false;
+        }
+    }
+
+    private void enterRestoreReadOnly(MinecraftServer server,
+                                      String event,
+                                      int restoredBots,
+                                      int persistedBots) {
+        readOnlyDueToLoadFailure = true;
+        readOnlyReason = event;
+        lastSaveSucceeded = false;
+        TaskManager.INSTANCE.enterRuntimeRecoveryMode(event);
+        TaskBoard.INSTANCE.suspendClaims(event);
+        for (AIPlayerEntity bot : List.copyOf(AIPlayerManager.INSTANCE.all())) {
+            try {
+                BrainCoordinator.INSTANCE.invalidateDecision(bot, event);
+                BrainCoordinator.INSTANCE.clearIntentWakeSources(bot);
+                BotInventorySessionManager.INSTANCE.closeForSafety(bot, event);
+                bot.getActionPack().stopAll();
+                bot.setInvulnerable(true);
+                bot.gameMode.changeGameModeForPlayer(GameType.SPECTATOR);
+                TaskManager.INSTANCE.acquireRuntimeRecoveryLock(bot);
+                TaskManager.INSTANCE.pauseUserIntent(bot, event);
+            } catch (RuntimeException isolationFailure) {
+                // The global gate was installed before per-Bot isolation. One malformed Bot may
+                // therefore lose a diagnostic USER lock, but cannot resume ordinary execution.
+                BotLog.error(bot, "runtime_restore_bot_isolation_failed", isolationFailure,
+                        "event", event);
+            }
+        }
+        BotLog.error(event, null,
+                "path", runtimeFile(server),
+                "restored_bots", restoredBots,
+                "persisted_bots", persistedBots,
+                "recovery", "source_snapshot_preserved; repair_or_remove_isolated_records");
+    }
+
+    static boolean canonicalRestoreWriteAllowed(boolean loadReadOnly,
+                                                int persistedBots,
+                                                int restoredBots,
+                                                boolean entriesAccounted,
+                                                int persistedJobs,
+                                                int restoredJobs) {
+        if (persistedBots < 0 || restoredBots < 0
+                || persistedJobs < 0 || restoredJobs < 0) {
+            throw new IllegalArgumentException("restore_accounting_negative");
+        }
+        return !loadReadOnly
+                && entriesAccounted
+                && persistedBots == restoredBots
+                && persistedJobs == restoredJobs;
+    }
+
+    static boolean restoredJobIdentityMatches(List<Job> expected, List<Job> actual) {
+        if (expected == null || actual == null) {
+            return false;
+        }
+        java.util.Set<UUID> expectedIds = new java.util.HashSet<>();
+        for (Job job : expected) {
+            if (job == null || job.id() == null || !expectedIds.add(job.id())) {
+                return false;
+            }
+        }
+        java.util.Set<UUID> actualIds = new java.util.HashSet<>();
+        for (Job job : actual) {
+            if (job == null || job.id() == null || !actualIds.add(job.id())) {
+                return false;
+            }
+        }
+        return expected.size() == actual.size()
+                && expectedIds.equals(actualIds);
     }
 
     public static BotRecord capture(AIPlayerEntity bot) {
@@ -209,18 +400,83 @@ public final class BotPersistence {
         return root.toString();
     }
 
-    public static void applyInventory(ServerPlayer player, String snbt) {
-        if (snbt == null || snbt.isBlank()) {
-            return;
+    /**
+     * Validates every persisted Bot sub-payload before AIPlayerManager creates a live shell.
+     * Blank owner/inventory/memory values are the supported legacy-empty representation; malformed
+     * nonblank values are unaccounted restore data and must block the canonical rewrite.
+     */
+    public static boolean restorableBotSubstate(BotRecord record) {
+        if (record == null
+                || !optionalOwnerUuidValid(record.ownerUuid())
+                || !inventoryPayloadValid(record.inventoryNbt())) {
+            return false;
+        }
+        return BotMemoryStore.INSTANCE.persistedPayloadValid(record.memoryNbt());
+    }
+
+    static boolean optionalOwnerUuidValid(String value) {
+        if (value == null || value.isBlank()) {
+            return true;
         }
         try {
+            UUID parsed = UUID.fromString(value);
+            return parsed.toString().equalsIgnoreCase(value);
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
+    }
+
+    static boolean inventoryPayloadValid(String snbt) {
+        if (snbt == null || snbt.isBlank()) {
+            return true;
+        }
+        try {
+            CompoundTag root = TagParser.parseTag(snbt);
+            if (!root.getAllKeys().equals(Set.of(INVENTORY_KEY))
+                    || !root.contains(INVENTORY_KEY, Tag.TAG_LIST)) {
+                return false;
+            }
+            if (!(root.get(INVENTORY_KEY) instanceof ListTag inventory)) {
+                return false;
+            }
+            return inventory.isEmpty() || inventory.getElementType() == Tag.TAG_COMPOUND;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Applies a preflighted inventory and verifies that Minecraft can encode the exact same list.
+     * Returning false keeps the source runtime snapshot read-only instead of canonicalizing a
+     * partially dropped inventory.
+     */
+    public static boolean applyInventory(ServerPlayer player, String snbt) {
+        if (snbt == null || snbt.isBlank()) {
+            return true;
+        }
+        try {
+            if (!inventoryPayloadValid(snbt)) {
+                BotLog.error(player instanceof AIPlayerEntity bot ? bot : null,
+                        "bot_inventory_restore_failed", null,
+                        "reason", "invalid_persisted_shape");
+                return false;
+            }
             CompoundTag root = TagParser.parseTag(snbt);
             ListTag inventory = root.getList(INVENTORY_KEY, Tag.TAG_COMPOUND);
             Inventory playerInventory = player.getInventory();
             playerInventory.load(inventory);
             playerInventory.setChanged();
+            ListTag restored = playerInventory.save(new ListTag());
+            if (!inventory.equals(restored)) {
+                BotLog.error(player instanceof AIPlayerEntity bot ? bot : null,
+                        "bot_inventory_restore_failed", null,
+                        "reason", "non_exact_round_trip");
+                return false;
+            }
+            return true;
         } catch (Exception exception) {
             BotLog.error(player instanceof AIPlayerEntity bot ? bot : null, "bot_inventory_restore_failed", exception);
+            return false;
         }
     }
 
@@ -352,6 +608,7 @@ public final class BotPersistence {
     private boolean writeSnapshot(Path file, RuntimeSnapshot snapshot) {
         try {
             boolean atomic = AtomicSnapshotFile.write(file, RuntimeSnapshotCodec.encode(snapshot));
+            lastWriterOperationSucceeded = true;
             BotLog.lifecycle("runtime_persist_saved", "bots", snapshot.bots().size(),
                     "jobs", snapshot.jobs().size(), "path", file, "schema", snapshot.schemaVersion(),
                     "atomic_move", atomic);
@@ -361,6 +618,7 @@ public final class BotPersistence {
             }
             return true;
         } catch (IOException | RuntimeException exception) {
+            lastWriterOperationSucceeded = false;
             BotLog.error("runtime_persist_save_failed", exception, "path", file,
                     "bots", snapshot.bots().size(), "jobs", snapshot.jobs().size());
             return false;

@@ -10,6 +10,7 @@ import io.github.greytaiwolf.fakeaiplayer.runtime.PauseOwner;
 import io.github.greytaiwolf.fakeaiplayer.runtime.TaskOrigin;
 import io.github.greytaiwolf.fakeaiplayer.task.DangerWatcher;
 import io.github.greytaiwolf.fakeaiplayer.task.HoldTask;
+import io.github.greytaiwolf.fakeaiplayer.task.MoveTask;
 import io.github.greytaiwolf.fakeaiplayer.task.NavSafetyNet;
 import io.github.greytaiwolf.fakeaiplayer.task.TaskManager;
 import io.github.greytaiwolf.fakeaiplayer.task.TaskState;
@@ -87,6 +88,56 @@ public final class FakeAiPlayerSafetyControlGameTests implements FabricGameTest 
                     "hazard release restarted or advanced the paused HoldTask step");
             require(TaskManager.INSTANCE.pausedDepth(bot) == 0,
                     "safety pause frame remained after hazard release");
+
+            // Mission Tasks are different from direct player Tasks: their onResume hooks may
+            // restart paths immediately, so the safety unwind must wait for GoalExecutor's bound
+            // RESUME/REPLAN/CANCEL decision.
+            TaskManager.INSTANCE.cancelIntentTasks(bot, "prepare_mission_resume_handoff");
+            UUID missionId = UUID.randomUUID();
+            MoveTask missionTask = new MoveTask(bot, botPos.offset(2, 0, 0));
+            TaskManager.INSTANCE.assign(
+                    bot,
+                    missionTask,
+                    TaskOrigin.mission(missionId, "gametest_mission_resume_handoff"));
+            context.getLevel().setBlockAndUpdate(botPos, Blocks.LAVA.defaultBlockState());
+            require(NavSafetyNet.INSTANCE.tickBot(context.getLevel().getServer(), bot),
+                    "Mission lava fixture did not trigger NavSafetyNet");
+            context.getLevel().setBlockAndUpdate(botPos, Blocks.AIR.defaultBlockState());
+            require(!NavSafetyNet.INSTANCE.tickBot(context.getLevel().getServer(), bot),
+                    "Mission safety did not release after the hazard was removed");
+            require(missionTask.state() == TaskState.PAUSED
+                            && TaskManager.INSTANCE.getActive(bot).isEmpty(),
+                    "generic safety unwind invoked Mission onResume before policy handoff");
+            require(TaskManager.INSTANCE.hasMissionInterruption(bot, missionId),
+                    "Mission interruption latch disappeared before policy handoff");
+            require(TaskManager.INSTANCE.resumeMissionAfterInterruption(bot, missionId)
+                            && missionTask.state() == TaskState.RUNNING
+                            && TaskManager.INSTANCE.getActive(bot).orElse(null) == missionTask,
+                    "explicit RESUME policy handoff did not restore the exact Mission Task");
+            require(TaskManager.INSTANCE.consumeMissionInterruption(bot, missionId),
+                    "Mission interruption latch was not consumable after policy handoff");
+
+            TaskManager.INSTANCE.cancelIntentTasks(bot, "prepare_recovery_inventory_gate");
+            TaskManager.INSTANCE.enterRuntimeRecoveryMode("gametest_recovery_inventory_gate");
+            try {
+                owner.getInventory().setItem(owner.getInventory().selected, ItemStack.EMPTY);
+                bot.interact(owner, InteractionHand.MAIN_HAND);
+                require(!BotInventorySessionManager.INSTANCE.isOpen(bot)
+                                && !(owner.containerMenu instanceof BotInventoryMenu),
+                        "read-only recovery allowed a Bot inventory session");
+                require(AIPlayerManager.INSTANCE.spawn(
+                                context.getLevel().getServer(),
+                                "BlockedRecoveryBot01",
+                                context.getLevel(),
+                                Vec3.atBottomCenterOf(botPos.offset(1, 0, 1)),
+                                0.0F,
+                                0.0F,
+                                GameType.SURVIVAL,
+                                null).isEmpty(),
+                        "read-only recovery allowed a newly spawned Bot");
+            } finally {
+                TaskManager.INSTANCE.beginRuntimeSession();
+            }
             finishSuccess(context, bot, owner, botName, botPos);
         } catch (RuntimeException | AssertionError failure) {
             finishFailure(context, bot, owner, botName, botPos, failure);

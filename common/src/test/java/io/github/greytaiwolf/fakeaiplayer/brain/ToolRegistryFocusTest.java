@@ -4,6 +4,7 @@ import io.github.greytaiwolf.fakeaiplayer.AIBotConfig;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ToolRegistryFocusTest {
@@ -22,5 +23,11 @@ class ToolRegistryFocusTest {
     @Test
     void inspectionRemainsAllowedWhileMissionIsPaused() {
         assertTrue(ActionDispatcher.isAllowedWhileUserPaused("inspect_focus"));
+        assertTrue(ActionDispatcher.isAllowedDuringRuntimeRecovery("inspect_focus"));
+        assertTrue(ActionDispatcher.isAllowedDuringRuntimeRecovery("inventory"));
+        assertFalse(ActionDispatcher.isAllowedDuringRuntimeRecovery("resume"));
+        assertFalse(ActionDispatcher.isAllowedDuringRuntimeRecovery("mine_block"));
+        assertFalse(ActionDispatcher.isAllowedDuringRuntimeRecovery("place_block"));
+        assertFalse(ActionDispatcher.isAllowedDuringRuntimeRecovery("post_job"));
     }
 }

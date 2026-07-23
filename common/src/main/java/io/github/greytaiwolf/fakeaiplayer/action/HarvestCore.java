@@ -136,9 +136,15 @@ public final class HarvestCore {
         }
         nearestDropAnyOf(bot, items, radius).ifPresent(drop -> {
             if (bot.distanceTo(drop) > 1.3F) {
-                if (bot.getActionPack().isPathExecutorIdle() && bot.getActionPack().isWalkToIdle()) {
-                    ActionResult result = bot.getActionPack().startPathTo(pickupStandPos(bot, drop.blockPosition()));
-                    if (result.isFailed()) {
+                if (bot.getActionPack().isPathExecutorIdle()
+                        && bot.getActionPack().isWalkToIdle()
+                        && bot.getActionPack().isMiningIdle()) {
+                    ActionResult result = bot.getActionPack().startNonMutatingPathTo(
+                            pickupStandPos(bot, drop.blockPosition()));
+                    if (result.isFailed() || result.isSuccess()) {
+                        // Exact block navigation can finish on an adjacent stand cell while the
+                        // entity rests at the far edge of its block. Direct-walk the final fraction
+                        // so vanilla collision pickup, not a privileged teleport, closes the gap.
                         bot.getActionPack().startWalkTo(drop.position());
                     }
                 }
@@ -164,9 +170,12 @@ public final class HarvestCore {
             return picked;
         }
         nearestDropAnyOf(bot, items, radius).ifPresent(drop -> {
-            if (bot.getActionPack().isPathExecutorIdle() && bot.getActionPack().isWalkToIdle()) {
-                ActionResult result = bot.getActionPack().startPathTo(pickupStandPos(bot, drop.blockPosition()));
-                if (result.isFailed()) {
+            if (bot.getActionPack().isPathExecutorIdle()
+                    && bot.getActionPack().isWalkToIdle()
+                    && bot.getActionPack().isMiningIdle()) {
+                ActionResult result = bot.getActionPack().startNonMutatingPathTo(
+                        pickupStandPos(bot, drop.blockPosition()));
+                if (result.isFailed() || result.isSuccess()) {
                     bot.getActionPack().startWalkTo(drop.position());
                 }
             }
