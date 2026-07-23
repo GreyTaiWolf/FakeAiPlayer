@@ -16,7 +16,7 @@ jobs:
   verify:
     name: Unit, GameTest, production jar and runtime evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
 
     steps:
       - name: Check out full repository history
@@ -52,7 +52,10 @@ jobs:
           :neoforge:runGameTestServer :neoforge:build
 
       - name: Inspect production artifacts
-        run: CI_STATIC_CHECK_ARTIFACTS=1 bash scripts/ci_static_check.sh
+        run: >-
+          CI_STATIC_CHECK_ARTIFACTS=1
+          CI_STATIC_CHECK_GAMETEST_RESULTS=1
+          bash scripts/ci_static_check.sh
 
       - name: Verify persistence across two JVM processes
         run: bash scripts/persistence_restart_test.sh

@@ -25,6 +25,9 @@ bin/
 !README.zh-CN.md
 !ROADMAP.md
 !THIRD_PARTY_NOTICES.md
+!CHANGELOG.md
+!CONTRIBUTING.md
+!.github/PULL_REQUEST_TEMPLATE.md
 !docs/
 !docs/*.md
 !docs/**/*.md

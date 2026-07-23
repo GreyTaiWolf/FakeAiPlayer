@@ -85,6 +85,9 @@ CI_STATIC_CHECK_ARTIFACTS=1 bash scripts/ci_static_check.sh
 ```
 
 该检查会扫描 `common/build/libs`、`fabric/build/libs` 与 `neoforge/build/libs` 中的 jar，发现 GameTest 或 verification command 泄漏时失败。
+PR CI 在完成 JUnit 与双端 GameTest 后还会设置
+`CI_STATIC_CHECK_GAMETEST_RESULTS=1`，强制核对 95/479、Fabric 55、NeoForge 31
+以及 6 个 P3 共享场景的实际执行证据；仅做本地生产 jar 检查时无需设置该变量。
 
 ## 每 Bot 凭据与聊天回归边界
 

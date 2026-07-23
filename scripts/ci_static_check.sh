@@ -9,6 +9,14 @@ fail() {
   exit 1
 }
 
+# These numbers describe the P3 release candidate. Any intentional test addition or removal must
+# update the baseline in the same reviewed change; an accidental loss of discovery must fail CI.
+readonly expected_junit_classes=95
+readonly expected_junit_tests=479
+readonly expected_fabric_gametests=55
+readonly expected_neoforge_gametests=31
+readonly expected_p3_shared_gametests=6
+
 # Production artifacts must never contain loader test entrypoints or the generated GameTest
 # arenas. Keep this expression centralized so the ordinary (pre-build) static pass can exercise
 # the same guard that the post-build jar inspection uses.
@@ -94,6 +102,26 @@ required_files=(
 for file in "${required_files[@]}"; do
   [[ -f "$file" ]] || fail "missing required file: $file"
 done
+
+actual_junit_classes="$(find common/src/test/java -type f -name '*Test.java' | wc -l \
+    | tr -d '[:space:]')"
+actual_junit_tests="$(grep -R -h --include='*Test.java' \
+    -E '^[[:space:]]*@Test([[:space:]]|$)' common/src/test/java | wc -l \
+    | tr -d '[:space:]')"
+actual_fabric_gametests="$(grep -R -h --include='*.java' \
+    -E '^[[:space:]]*@GameTest([[:space:](]|$)' fabric/src/gametest/java | wc -l \
+    | tr -d '[:space:]')"
+actual_neoforge_gametests="$(grep -R -h --include='*.java' \
+    -E '^[[:space:]]*@GameTest([[:space:](]|$)' neoforge/src/gametest/java | wc -l \
+    | tr -d '[:space:]')"
+[[ "$actual_junit_classes" == "$expected_junit_classes" ]] \
+  || fail "JUnit class baseline changed: expected $expected_junit_classes, found $actual_junit_classes"
+[[ "$actual_junit_tests" == "$expected_junit_tests" ]] \
+  || fail "JUnit @Test baseline changed: expected $expected_junit_tests, found $actual_junit_tests"
+[[ "$actual_fabric_gametests" == "$expected_fabric_gametests" ]] \
+  || fail "Fabric GameTest baseline changed: expected $expected_fabric_gametests, found $actual_fabric_gametests"
+[[ "$actual_neoforge_gametests" == "$expected_neoforge_gametests" ]] \
+  || fail "NeoForge GameTest baseline changed: expected $expected_neoforge_gametests, found $actual_neoforge_gametests"
 
 grep -Fq 'gametest {' fabric/build.gradle \
   || fail 'Fabric GameTest must use an isolated source set'
@@ -297,6 +325,10 @@ fabric_p3_delegates="$(printf '%s\n' "$fabric_p3_scenarios" \
     | sed 's/^SharedP3MissionGameTestScenarios\.//' | sort)"
 [[ "$shared_p3_scenarios" == "$fabric_p3_delegates" ]] \
   || fail 'A shared P3 scenario is missing or duplicated in a loader wrapper'
+actual_p3_shared_gametests="$(printf '%s\n' "$fabric_p3_delegates" \
+    | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')"
+[[ "$actual_p3_shared_gametests" == "$expected_p3_shared_gametests" ]] \
+  || fail "P3 shared GameTest baseline changed: expected $expected_p3_shared_gametests, found $actual_p3_shared_gametests"
 for shared_wrapper in "$fabric_p3_tests" "$neoforge_p3_tests"; do
   duplicate_batch="$(grep -oE 'batch = "[^"]+"' "$shared_wrapper" \
       | sort | uniq -d | head -1)"
@@ -808,17 +840,37 @@ if [[ "${CI_STATIC_CHECK_ARTIFACTS:-0}" == 1 ]]; then
     || fail 'artifact inspection found no NeoForge jars'
 
   # The source checks above prove that both wrappers look equivalent. When GameTest results are
-  # present, also prove the loaders actually discovered and executed every P3 wrapper method. The
-  # Fabric API publishes stable normalized method names in its JUnit XML; NeoForge 1.21.3 publishes
-  # stable batch ids in latest.log. Keep this conditional so the documented jar-only inspection can
-  # still run without GameTests, while PR CI (which runs both loaders first) cannot pass on zero tests.
+  # present, also prove the loaders actually discovered and executed every test. PR CI sets
+  # CI_STATIC_CHECK_GAMETEST_RESULTS=1, so missing evidence cannot silently turn this into a jar-only
+  # inspection. Local production-jar checks may omit that flag when GameTests were not requested.
   fabric_gametest_report=fabric/build/test-results/gametest/TEST-fakeaiplayer-gametest.xml
   neoforge_gametest_log=neoforge/build/run/gameTest/logs/latest.log
+  common_test_results=common/build/test-results/test
+  if [[ "${CI_STATIC_CHECK_GAMETEST_RESULTS:-0}" == 1 ]]; then
+    [[ -f "$fabric_gametest_report" ]] \
+      || fail 'required Fabric GameTest evidence is missing'
+    [[ -f "$neoforge_gametest_log" ]] \
+      || fail 'required NeoForge GameTest evidence is missing'
+    [[ -d "$common_test_results" ]] \
+      || fail 'required JUnit evidence is missing'
+  fi
   if [[ -f "$fabric_gametest_report" || -f "$neoforge_gametest_log" ]]; then
     [[ -f "$fabric_gametest_report" ]] \
       || fail 'NeoForge GameTest evidence exists but the Fabric JUnit report is missing'
     [[ -f "$neoforge_gametest_log" ]] \
       || fail 'Fabric GameTest evidence exists but the NeoForge latest.log is missing'
+
+    fabric_executed_total="$(grep -oE 'tests="[0-9]+"' "$fabric_gametest_report" \
+        | head -1 | tr -cd '0-9')"
+    [[ "$fabric_executed_total" == "$expected_fabric_gametests" ]] \
+      || fail "Fabric executed GameTest count changed: expected $expected_fabric_gametests, found ${fabric_executed_total:-0}"
+    neoforge_executed_total="$(grep -cE \
+        "Running test batch '[^']+:[0-9]+' \\(1 tests\\)\\.\\.\\." \
+        "$neoforge_gametest_log" || true)"
+    [[ "$neoforge_executed_total" == "$expected_neoforge_gametests" ]] \
+      || fail "NeoForge executed GameTest count changed: expected $expected_neoforge_gametests, found $neoforge_executed_total"
+    grep -Fq "All $expected_neoforge_gametests required tests passed :)" "$neoforge_gametest_log" \
+      || fail "NeoForge did not report all $expected_neoforge_gametests required GameTests passing"
 
     expected_fabric_p3_tests="$(printf '%s\n' "$fabric_p3_delegates" \
         | tr '[:upper:]' '[:lower:]' \
@@ -841,6 +893,18 @@ if [[ "${CI_STATIC_CHECK_ARTIFACTS:-0}" == 1 ]]; then
     [[ -n "$expected_neoforge_p3_batches" \
         && "$executed_neoforge_p3_batches" == "$expected_neoforge_p3_batches" ]] \
       || fail 'NeoForge did not execute exactly one test for every registered P3 batch'
+  fi
+  if [[ "${CI_STATIC_CHECK_GAMETEST_RESULTS:-0}" == 1 ]]; then
+    mapfile -t junit_reports < <(
+      find "$common_test_results" -maxdepth 1 -type f -name 'TEST-*.xml' | sort
+    )
+    [[ "${#junit_reports[@]}" == "$expected_junit_classes" ]] \
+      || fail "JUnit report class count changed: expected $expected_junit_classes, found ${#junit_reports[@]}"
+    junit_executed_total="$(grep -h '<testsuite ' "${junit_reports[@]}" \
+        | sed -E 's/.* tests="([0-9]+)".*/\1/' \
+        | awk '{ total += $1 } END { print total + 0 }')"
+    [[ "$junit_executed_total" == "$expected_junit_tests" ]] \
+      || fail "JUnit executed test count changed: expected $expected_junit_tests, found $junit_executed_total"
   fi
 
   inspected=0

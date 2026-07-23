@@ -52,7 +52,7 @@ LLM 理解意图
 - 9 类 Goal、63 个 Tool 注册点、34 个具体 Task 状态机。
 - Fabric testmod 的 `/fakeaiplayer verify all` 含 98 个确定性场景，另有 1 个 opt-in 确定性场景和 4 个真实 LLM 场景；生产 JAR 不包含 test/verify 命令。
 - 早期根路线图 P0 快照曾以 19 个 JUnit 类、68 个测试和 3 个 Fabric GameTest 通过 `clean :common:test :fabric:runGameTest :fabric:build :neoforge:build`；该数字只描述历史提交，不是当前源码清单。
-- 当前源码清单为 79 个 JUnit 类、312 个 `@Test`、49 个 Fabric GameTest 和 25 个 NeoForge GameTest。Bot 智能重构 P0/P1 在提交 [`9155c9c`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/9155c9ca18cb1c8021bf50d453bbafe84f2c1489) 的 [CI #106](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29862817627) 中通过；P2 在代码提交 [`2450e13`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/2450e1352f27e3768e0f2d0ceeed98c7d7a71c4a) 的 [CI #129](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29879516182) 中通过 Java 21、当前完整 JUnit、Fabric 49/49、NeoForge 25/25、双端构建与产物检查、两进程持久化和 strict-survival runtime/evidence；P2 增量为两端同源的 14 个场景。两项结果均尚未显式 pin 发布 baseline。
+- 当前源码清单为 95 个 JUnit 类、479 个 `@Test`、55 个 Fabric GameTest 和 31 个 NeoForge GameTest。Bot 智能重构 P0/P1 在提交 [`9155c9c`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/9155c9ca18cb1c8021bf50d453bbafe84f2c1489) 的 [CI #106](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29862817627) 中通过；P2 在代码提交 [`2450e13`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/2450e1352f27e3768e0f2d0ceeed98c7d7a71c4a) 的 [CI #129](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29879516182) 中通过当时完整 JUnit、Fabric 49/49、NeoForge 25/25、双端构建与产物检查、两进程持久化和 strict-survival runtime/evidence。P3 实现绑定代码提交 [`1965137`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/19651378d049099d8ee7d7bf5aecda3e68529d0a)，新增两端同源的 6 个场景，等待当前主线集成提交的 Java 21 全矩阵 CI。上述结果均尚未显式 pin 发布 baseline。
 - `capability_profile + runtime_control_suite` 在 strict/operator 下均为 7/7；两 JVM restart-resume 精确恢复非默认 checkpoint，并以原 Mission `COMPLETED 4/4` 结束。
 - PR CI、nightly 双 profile/seed matrix 与手动计费 LLM workflow 已建立；evidence bundle 会绑定 revision/config/actual seed/runtime/profile 并做不可变封存。
 - 现有多 seed 报告能用于诊断，但缺少 commit SHA、配置摘要和 actual seed 回读，不能作为 HEAD 的发布证明。
@@ -149,11 +149,11 @@ Capability
 |---|---|---|
 | Pure logic | JUnit、静态不变量检查、编译 | 同一套 JUnit/静态检查/生产构建 |
 | Runtime contract | 取消、权限、生命周期、两 JVM restart probe、strict evidence | 7 项 profile/runtime 合约 × 2 profile × 2 seed |
-| Game behavior | 当前源码 49 个 Fabric GameTest、25 个 NeoForge GameTest；P0/P1 的 Fabric 35/35 与 NeoForge 11/11 已绑定 CI #106，P2 增量 14 项随 Fabric 49/49、NeoForge 25/25 绑定代码提交 `2450e13` 的 CI #129 通过 | 同一双端共享集持续回归；Fabric-only 24 项和 98 场景 harness 再按 v0.1 目标分片、多 seed |
+| Game behavior | 当前源码 55 个 Fabric GameTest、31 个 NeoForge GameTest；P0/P1 的 Fabric 35/35 与 NeoForge 11/11 已绑定 CI #106，P2 增量 14 项随 Fabric 49/49、NeoForge 25/25 绑定代码提交 `2450e13` 的 CI #129 通过；P3 增量 6 项等待当前集成 CI | 同一双端共享集持续回归；Fabric-only 24 项和 98 场景 harness 再按 v0.1 目标分片、多 seed |
 | LLM routing | 不注入 API key | 独立手动 workflow，明确确认计费后运行 4 个真实 LLM story |
 
 上表描述当前源码与提交绑定门禁；P0/P1 的 CI #106 与 P2 的代码提交 `2450e13` / CI #129
-均已通过但尚未显式 pin 为发布 baseline。98 场景多 seed 分片与 Nightly restart/resume matrix 是 v0.1 后续项，不作为当前 P0
+均已通过但尚未显式 pin 为发布 baseline；P3 仍等待当前集成提交 CI。98 场景多 seed 分片与 Nightly restart/resume matrix 是 v0.1 后续项，不作为当前 P0
 完成度的既成事实。
 
 每次能力报告必须记录：
