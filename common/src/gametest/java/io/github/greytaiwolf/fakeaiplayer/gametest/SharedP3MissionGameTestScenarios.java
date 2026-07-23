@@ -393,6 +393,8 @@ public final class SharedP3MissionGameTestScenarios {
                 require(TaskManager.INSTANCE.getActive(bot).isEmpty()
                                 && TaskManager.INSTANCE.pausedDepth(bot) == 0,
                         "Completed golden chain leaked active or paused Tasks");
+                require(!bot.getActionPack().hasActiveActions(),
+                        "Completed golden chain leaked a movement, mining or pickup controller");
                 require(bot.isAlive(), "Golden-chain bot died before completion");
                 require(InventoryAction.countItem(bot, Items.IRON_INGOT) >= 1,
                         "Completed golden chain has no authoritative iron ingot");
@@ -408,6 +410,8 @@ public final class SharedP3MissionGameTestScenarios {
                         "Golden chain did not mine the 8 furnace + 3 stone-pickaxe blocks");
                 require(!helper.getLevel().getBlockState(ironOre).is(Blocks.IRON_ORE),
                         "Golden chain completed without mining the fixture iron ore");
+                require(state.sawRawIron,
+                        "Golden chain smelted without an observed natural raw-iron pickup");
                 require(hasFurnace(helper, fixture),
                         "Golden chain produced iron without placing its crafted furnace");
                 require(state.sawGather && state.sawCraft && state.sawDigDown
@@ -536,6 +540,9 @@ public final class SharedP3MissionGameTestScenarios {
                 && InventoryAction.countItem(bot, Items.STONE_PICKAXE) > 0) {
             state.stonePickaxeTick = tick;
         }
+        if (!state.sawRawIron && InventoryAction.countItem(bot, Items.RAW_IRON) > 0) {
+            state.sawRawIron = true;
+        }
 
         String fingerprint = (active == null ? "idle" : active.name())
                 + ':' + GoalExecutor.INSTANCE.activeGoalCurrentIndex(bot)
@@ -648,6 +655,7 @@ public final class SharedP3MissionGameTestScenarios {
         private boolean sawCraft;
         private boolean sawDigDown;
         private boolean sawOreDig;
+        private boolean sawRawIron;
         private boolean sawSmelt;
         private long gatherTick = -1L;
         private long craftTick = -1L;

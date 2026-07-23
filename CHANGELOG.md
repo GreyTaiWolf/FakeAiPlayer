@@ -24,10 +24,13 @@
 - 修复跨维度 Mission、越权世界修改和无法验证的完成结果进入执行链的问题。
 - 修复安全抢占、Task 启动失败和备用分支切换时可能遗留旧 Task 或错误恢复状态的问题。
 - 护甲 Goal 改为读取权威装备槽验收；资源点、危险区和死亡记忆按维度隔离。
+- 修复严格生存模式下远端矿石已破坏、`FORCED_PICKUP` 被拒后 Bot 不会自然接近掉落物，转而盲掘并最终阻塞的问题。
+- 掉落追逐改用精确、只步行的拾取站位，消除导航在 1.3–2 格处提前结束却无法触发原版拾取的死区。
 
 #### 验证
 
 - 完整 P3 代码提交：[`1965137`](https://github.com/GreyTaiWolf/FakeAiPlayer/commit/19651378d049099d8ee7d7bf5aecda3e68529d0a)。
+- 首轮集成 [CI #143](https://github.com/GreyTaiWolf/FakeAiPlayer/actions/runs/29985224408) 成功暴露并阻止了严格生存黄金链的掉落拾取缺陷；修复后的提交绑定 CI 待重新验证。
 - Java 21 JUnit、Fabric 55/55 GameTest、NeoForge 31/31 GameTest、双端生产构建、JAR 隔离、双 JVM 恢复与 strict-survival evidence：等待本次 `main` 集成 PR 的提交绑定 CI。
 
 #### 已知限制

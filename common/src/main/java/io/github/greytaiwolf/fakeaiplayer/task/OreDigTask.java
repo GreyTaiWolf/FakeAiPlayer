@@ -48,6 +48,8 @@ public final class OreDigTask extends AbstractTask {
     private static final int MIN_Y = -60;
     private static final int VEIN_CAP = 64;
     private static final int PICKUP_GRACE_TICKS = 30;
+    private static final int TARGET_DROP_RECOVERY_TICKS = 120;
+    private static final double TARGET_DROP_SEARCH_RADIUS = 16.0D;
     private static final int BONUS_CAP = 8;            // R3 顺路矿单任务上限:白捡是好,改行不行
     private static final int APPROACH_LIMIT = 80;       // P0:锁定矿超过此 tick 仍没靠近 → 判够不到,放弃换矿/下挖
     private static final int STRIP_SEGMENT = 48;        // 覆盖效率:扫描是全知 24 格球,巷道价值=移动覆盖;长段直线减少转向与重叠扫描
@@ -76,7 +78,10 @@ public final class OreDigTask extends AbstractTask {
     private int consecutiveSkips;     // 连续"锁矿够不到被跳过"次数(挖到矿清零);超阈值强制 strip 推进破死锁
     private BlockPos lastSkipPos;     // 上次弃矿时 bot 所在格:原地反复弃矿(位置不变)不喂活看门狗,让其能熔断破thrash
     private final int maxElapsed;     // 硬超时:大配额(整套铁甲26铁)按量缩放,小配额用基线
-    private int lastMinedTick = -100; // 挖掉矿本体的时刻:掉落实体在下 tick 才出现,挖完原地驻留捡取
+    // 目标矿在合法交互距离边缘被挖掉时，掉落物可能离自然拾取范围还有数格。严格生存模式
+    // 禁止 FORCED_PICKUP，因此必须像真人一样在有限窗口内走过去捡，期间不能另开一条矿道。
+    private int targetDropRecoveryStartedTick = -1;
+    private BlockPos targetDropRecoveryPos;
     private BlockPos bonusOre;        // R3 顺路矿:reach 内的非目标矿,顺手一镐(单块,不追脉)
     private int bonusMined;           // 顺路预算计数(防喧宾夺主)
     private int lastBonusScanTick = -100;
@@ -134,6 +139,8 @@ public final class OreDigTask extends AbstractTask {
         lastProgressTick = 0;
         pickupGrace = 0;
         targetOre = null;
+        targetDropRecoveryStartedTick = -1;
+        targetDropRecoveryPos = null;
         // R6 入口地标:开挖处自动 mark(goto_place mine_entry 一步回来;玩家问'矿洞在哪'也答得出)。
         io.github.greytaiwolf.fakeaiplayer.memory.BotMemoryStore.INSTANCE.of(bot.getUUID())
                 .markPlace("mine_entry", bot.serverLevel(), bot.blockPosition());
@@ -160,6 +167,8 @@ public final class OreDigTask extends AbstractTask {
     @Override
     protected void onTick(AIPlayerEntity bot) {
         if (elapsed > maxElapsed) {
+            miner.cancel(bot);
+            bot.getActionPack().stopAll();
             fail("ore_dig_timeout collected=" + collected);
             return;
         }
@@ -178,14 +187,26 @@ public final class OreDigTask extends AbstractTask {
             return;
         }
 
+        // PathExecutor 可能在 Task tick 之前把接近路径的头位（目标矿）挖掉。先确认这一
+        // 权威世界变化并进入拾取恢复，再检查镐与背包；否则最后一镐恰好损坏时会丢下
+        // 已落地矿物，错误报告 need_better_tool。
+        if (targetOre != null && !OreScan.isOre(world.getBlockState(targetOre), targetOres)) {
+            beginTargetDropRecovery(targetOre);
+            HarvestCore.forcePickupNearbyAnyOf(bot, targetDrops, 7.0D, 4.0D);
+            queueVeinAround(bot, world, targetOre);
+            targetOre = null;
+        }
+
         // 工具闸:挖不动目标矿(无合格镐)立即失败,交 GoalExecutor 倒推补镐。
-        if (!canHarvestAnyTarget(bot)) {
+        if (targetDropRecoveryStartedTick < 0 && !canHarvestAnyTarget(bot)) {
             fail("need_better_tool:" + ToolTier.requiredPickaxeItemId(targetOres));
             return;
         }
 
         // P0 背包满自救:满了先丢低值占位(每种留 8 个),腾不出位才失败交编排——否则破了矿捡不起白挖。
-        if (HarvestCore.isInventoryFull(bot) && !io.github.greytaiwolf.fakeaiplayer.action.InventoryAction.dropJunk(bot, 8)) {
+        if (targetDropRecoveryStartedTick < 0
+                && HarvestCore.isInventoryFull(bot)
+                && !io.github.greytaiwolf.fakeaiplayer.action.InventoryAction.dropJunk(bot, 8)) {
             fail("inventory_full");
             return;
         }
@@ -193,7 +214,12 @@ public final class OreDigTask extends AbstractTask {
         HarvestCore.forcePickupNearbyAnyOf(bot, targetDrops, 3.0D, 3.0D);
         int total = Math.max(0, HarvestCore.countInventoryItems(bot, targetDrops) - invBaseline);
         if (total > collected) {
+            if (targetDropRecoveryStartedTick >= 0) {
+                bot.getActionPack().stopAll();
+            }
             collected = total;
+            targetDropRecoveryStartedTick = -1;
+            targetDropRecoveryPos = null;
             lastProgressTick = elapsed;
             BotLog.action(bot, "ore_dig_collected", "total", collected + "/" + targetCount);
             // P2 进度播报:挖到就说一声(面板可见),贵重矿尤其有"报喜"的真实感。
@@ -206,8 +232,42 @@ public final class OreDigTask extends AbstractTask {
             HarvestCore.sweepPickupAnyOf(bot, targetDrops, 16);
             if (pickupGrace++ >= PICKUP_GRACE_TICKS
                     || HarvestCore.countInventoryItems(bot, targetDrops) - invBaseline >= targetCount) {
+                bot.getActionPack().stopAll();
                 markMineFace(bot);
                 complete();
+            }
+            return;
+        }
+
+        // 挖完目标矿后先完成自然拾取。chaseDropAnyOf 在严格生存下只会追逐真实、可见的
+        // ItemEntity；它不会绕过 FORCED_PICKUP 门禁。120 tick 与 MineTask 的拾取预算一致，
+        // 足以从合法交互距离走到掉落物，又能在掉落异常时有界失败并交给 Mission 恢复。
+        if (targetDropRecoveryStartedTick >= 0) {
+            if (elapsed - targetDropRecoveryStartedTick > TARGET_DROP_RECOVERY_TICKS) {
+                targetDropRecoveryStartedTick = -1;
+                targetDropRecoveryPos = null;
+                miner.cancel(bot);
+                bot.getActionPack().stopAll();
+                fail("ore_dig_pickup_timeout collected=" + collected);
+                return;
+            }
+            if (HarvestCore.nearestDropAnyOf(
+                    bot, targetDrops, TARGET_DROP_SEARCH_RADIUS).isPresent()) {
+                HarvestCore.chaseDropAnyOf(bot, targetDrops, TARGET_DROP_SEARCH_RADIUS);
+            } else if (targetDropRecoveryPos != null
+                    && elapsed - targetDropRecoveryStartedTick >= 2
+                    && bot.position().distanceTo(targetDropRecoveryPos.getCenter()) > 1.3D
+                    && bot.getActionPack().isPathExecutorIdle()
+                    && bot.getActionPack().isWalkToIdle()
+                    && bot.getActionPack().isMiningIdle()) {
+                // ItemEntity 可能尚未生成或暂时被墙角遮住；Bot 仍记得刚挖掉的方块位置，
+                // 先沿不修改世界的精确路径靠近该处，获得视野后再追逐真实掉落物。
+                BlockPos stand = HarvestCore.pickupStandPos(bot, targetDropRecoveryPos);
+                var approach = bot.getActionPack().startNonMutatingPathTo(stand);
+                if ((approach.isFailed() || approach.isSuccess())
+                        && bot.position().distanceTo(targetDropRecoveryPos.getCenter()) > 1.3D) {
+                    bot.getActionPack().startWalkTo(targetDropRecoveryPos.getCenter());
+                }
             }
             return;
         }
@@ -261,7 +321,6 @@ public final class OreDigTask extends AbstractTask {
                 targetApproachTick = elapsed; // 顺路一镐不算接近停滞,别让 APPROACH_LIMIT 误杀目标矿
                 if (st == BlockMiner.Status.DONE) {
                     bonusMined++;
-                    lastMinedTick = elapsed;
                     lastProgressTick = elapsed;
                     HarvestCore.forcePickupNearbyAnyOf(bot, null, 7.0D, 4.0D); // 捡一切:掉落不在 targetDrops 里
                     BotLog.action(bot, "ore_dig_bonus", "pos", bonusOre.toShortString(),
@@ -277,16 +336,6 @@ public final class OreDigTask extends AbstractTask {
 
         // 2) 当前有锁定矿:可达就挖它(挖到后入脉队列),不可达就朝它挖一格隧道。
         if (targetOre != null) {
-            if (!OreScan.isOre(world.getBlockState(targetOre), targetOres)) {
-                // 矿没了——多数是寻路执行器接近时把"头位=矿"顺手挖掉了(approach 目标=矿正下方的设计),
-                // 掉落已在地上:开驻留窗大半径捡(geo_wall 实测 mine_complete 由执行器打、不走 DONE 分支,
-                // 不在这接驻留就 0 捡取白挖)。同脉排队照旧。
-                lastMinedTick = elapsed;
-                HarvestCore.forcePickupNearbyAnyOf(bot, targetDrops, 7.0D, 4.0D);
-                queueVeinAround(bot, world, targetOre);
-                targetOre = null;
-                return;
-            }
             // 接近途中改投更近矿(real_diamond seed777 主因,确诊):bot 从 35 格外锁定一块钻石、掘进
             // 途中路过同脉更近的矿块(dist 3-4)却死盯远锁不放,最后 8 格在远矿局部几何里抖死
             // (三个静态合成场景都复现不出——因为它们 bot 一开局 targetOre 为空就选了最近矿)。
@@ -379,7 +428,7 @@ public final class OreDigTask extends AbstractTask {
                     // 掉落捡取半径跟上 reach:寻路接近停在 reach 边缘(5.5)挖,掉落落在矿位、
                     // 超出每 tick 3 格被动捡取(旧贴脸直挖 1-2 格才没暴露);挖掉即定向大半径捡一把,
                     // 否则 collected 不涨、bot 被下一个目标拉走白挖(geo_wall 实测 mine_complete 后 0/1)。
-                    lastMinedTick = elapsed;
+                    beginTargetDropRecovery(targetOre);
                     HarvestCore.forcePickupNearbyAnyOf(bot, targetDrops, 7.0D, 4.0D);
                     queueVeinAround(bot, world, targetOre);
                     targetOre = null;
@@ -414,13 +463,6 @@ public final class OreDigTask extends AbstractTask {
                     digTowardStep(bot, world, targetOre);
                 }
             }
-            return;
-        }
-
-        // 挖完驻留:掉落实体在破块的下一 tick 才落地,立刻奔赴新目标会永远错过(geo_wall 实测
-        // mine_complete 后 0 捡取、collected 不涨白挖)。原地等 15t 持续大半径捡,捡到计数自然推进。
-        if (elapsed - lastMinedTick < 15) {
-            HarvestCore.forcePickupNearbyAnyOf(bot, targetDrops, 7.0D, 4.0D);
             return;
         }
 
@@ -552,6 +594,12 @@ public final class OreDigTask extends AbstractTask {
     }
 
     // ── 矿脉:挖净已锁定矿周围的同脉相邻矿 ──
+    private void beginTargetDropRecovery(BlockPos minedPos) {
+        targetDropRecoveryStartedTick = elapsed;
+        targetDropRecoveryPos = minedPos == null ? null : minedPos.immutable();
+        lastProgressTick = elapsed;
+    }
+
     private boolean advanceVein(AIPlayerEntity bot, ServerLevel world) {
         if (veinQueue.isEmpty()) {
             return false;
@@ -572,7 +620,7 @@ public final class OreDigTask extends AbstractTask {
         if (st == BlockMiner.Status.DONE) {
             queueVeinAround(bot, world, v);
             veinQueue.pollFirst();
-            lastProgressTick = elapsed;
+            beginTargetDropRecovery(v);
         } else if (st == BlockMiner.Status.FAILED) {
             veinQueue.pollFirst();
         }
