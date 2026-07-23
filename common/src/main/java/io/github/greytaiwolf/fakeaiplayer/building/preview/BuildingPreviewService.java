@@ -490,7 +490,10 @@ public final class BuildingPreviewService {
                 bot,
                 controlOrigin,
                 "building_preview_confirmed",
-                () -> GoalExecutor.INSTANCE.submit(bot, buildGoal));
+                () -> GoalExecutor.INSTANCE.submit(
+                        bot,
+                        buildGoal,
+                        io.github.greytaiwolf.fakeaiplayer.mission.GoalSpec.Source.PLAYER_CONFIRMED));
         if (!result.replacementStarted()) {
             return fail(player, "建造任务未能启动；投影已保留，可排查材料规划后重试。");
         }

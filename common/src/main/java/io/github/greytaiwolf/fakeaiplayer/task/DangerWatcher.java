@@ -10,7 +10,6 @@ import io.github.greytaiwolf.fakeaiplayer.manager.AIPlayerManager;
 import io.github.greytaiwolf.fakeaiplayer.inventory.BotInventorySessionManager;
 import io.github.greytaiwolf.fakeaiplayer.mode.ObservableWorldQuery;
 import io.github.greytaiwolf.fakeaiplayer.runtime.TaskOrigin;
-import io.github.greytaiwolf.fakeaiplayer.runtime.PauseOwner;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.tags.FluidTags;
@@ -92,19 +91,24 @@ public final class DangerWatcher {
         // SAFE-DEAD:死亡的 bot 不再无限派 evade(僵尸循环)。满血复活到地表,清任务/计划,中文告知。
         if (bot.getHealth() <= 0.0F || !bot.isAlive()) {
             BlockPos deathPos = bot.blockPosition();
+            String deathDimension = bot.serverLevel().dimension().location().toString();
             long deathTick = server.getTickCount();
             AIPlayerManager.INSTANCE.respawnDeadBot(bot);
             // 死亡找回反射:装备掉在死亡点(5 分钟 despawn),真实玩家第一反应就是跑尸。
             // 自动出发的两个闸:①重生点离死亡点 ≤160(太远赶不上白跑);②死亡点不在危险区
             // (同区两死记忆会立牌——记忆劝阻就听劝,别第三次送死,装备认亏)。
-            boolean nearEnough = bot.blockPosition().closerThan(deathPos, 160.0D);
+            boolean nearEnough = deathDimension.equals(
+                    bot.serverLevel().dimension().location().toString())
+                    && bot.blockPosition().closerThan(deathPos, 160.0D);
             boolean dangerous = io.github.greytaiwolf.fakeaiplayer.memory.KnowledgeBase.INSTANCE
-                    .isDanger(bot.getUUID(), deathPos);
+                    .isDanger(bot.getUUID(), deathDimension, deathPos);
             if (nearEnough && !dangerous) {
-                TaskManager.INSTANCE.assign(bot, new RecoverDropsTask(deathPos, deathTick), TaskOrigin.safety("recover_drops"));
-                BrainCoordinator.INSTANCE.sendPanelChat(bot, "system",
-                        bot.getGameProfile().getName() + " 死亡后已复活,正赶回 "
-                                + deathPos.toShortString() + " 找回掉落装备。");
+                TaskAssignmentResult assignment = assignSafely(
+                        bot, new RecoverDropsTask(deathPos, deathTick), TaskOrigin.safety("recover_drops"));
+                BrainCoordinator.INSTANCE.sendPanelChat(bot, "system", assignment.started()
+                        ? bot.getGameProfile().getName() + " 死亡后已复活,正赶回 "
+                        + deathPos.toShortString() + " 找回掉落装备。"
+                        : bot.getGameProfile().getName() + " 死亡后已复活，但跑尸任务未能启动。请检查日志。");
             } else {
                 BrainCoordinator.INSTANCE.sendPanelChat(bot, "system",
                         bot.getGameProfile().getName() + " 死亡后已自动复活到地面。"
@@ -119,14 +123,13 @@ public final class DangerWatcher {
         // 这里补上:身陷岩浆且当前不是逃浆任务 → 立即派 LavaEscapeTask,把命先捞回来。
         if (bot.isInLava() && !(active.isPresent() && active.get() instanceof LavaEscapeTask)) {
             BotInventorySessionManager.INSTANCE.closeForSafety(bot, "lava_escape");
-            active = TaskManager.INSTANCE.getActive(bot);
-            if (active.isPresent()) {
-                TaskManager.INSTANCE.pauseFor(bot, PauseOwner.SAFETY, "lava_escape");
+            TaskAssignmentResult assignment = assignSafely(
+                    bot, new LavaEscapeTask(), TaskOrigin.safety("lava_escape"));
+            if (assignment.started()) {
+                BotLog.danger(bot, "lava_escape_start", "pos", bot.blockPosition().toShortString(),
+                        "hp", (int) bot.getHealth());
             }
-            TaskManager.INSTANCE.assign(bot, new LavaEscapeTask(), TaskOrigin.safety("lava_escape"));
-            BotLog.danger(bot, "lava_escape_start", "pos", bot.blockPosition().toShortString(),
-                    "hp", (int) bot.getHealth());
-            return true;
+            return assignment.started() || safetyWorkActive(bot);
         }
         // 夜间怪海保命(治死亡螺旋):濒死(≤4 心)+ 有敌 + 当前没在筑墙 → 立即筑墙自保,**无视威胁冷却**。
         // 元凶:combat 完(~100t 没杀光)→进 100t 冷却→gather 恢复挨打→guard 中止→冷却没过 shelter
@@ -148,14 +151,13 @@ public final class DangerWatcher {
                 && EmergencyShelterTask.hasShelterBlock(bot)
                 && !(active.isPresent() && active.get() instanceof EmergencyShelterTask)) {
             BotInventorySessionManager.INSTANCE.closeForSafety(bot, "emergency_entomb");
-            active = TaskManager.INSTANCE.getActive(bot);
-            if (active.isPresent()) {
-                TaskManager.INSTANCE.pauseFor(bot, PauseOwner.SAFETY, "emergency_entomb");
+            TaskAssignmentResult assignment = assignSafely(
+                    bot, new EmergencyShelterTask(), TaskOrigin.safety("emergency_entomb"));
+            if (assignment.started()) {
+                BotLog.danger(bot, "emergency_entomb", "hp", (int) bot.getHealth(),
+                        "underground", cannotFlee, "threat", threat.get().type());
             }
-            TaskManager.INSTANCE.assign(bot, new EmergencyShelterTask(), TaskOrigin.safety("emergency_entomb"));
-            BotLog.danger(bot, "emergency_entomb", "hp", (int) bot.getHealth(),
-                    "underground", cannotFlee, "threat", threat.get().type());
-            return true;
+            return assignment.started() || safetyWorkActive(bot);
         }
         if (threat.isPresent()) {
             Threat top = threat.get();
@@ -167,18 +169,17 @@ public final class DangerWatcher {
                     return true; // 被困:退避并(节流)求助,不再每 2 秒空派 shelter/evade
                 }
                 BotInventorySessionManager.INSTANCE.closeForSafety(bot, "threat:" + top.type());
-                active = TaskManager.INSTANCE.getActive(bot);
-                if (active.isPresent() && shouldPauseForThreat(active.get(), top, task)) {
-                    TaskManager.INSTANCE.pauseFor(bot, PauseOwner.SAFETY, "threat: " + top.type());
+                TaskAssignmentResult assignment = assignSafely(
+                        bot, task, TaskOrigin.safety("threat:" + top.type()));
+                if (assignment.started()) {
+                    nextThreatAttemptTick.put(bot.getUUID(), server.getTickCount() + threatCooldownTicks(top, task));
+                    BotLog.danger(bot, "threat_detected",
+                            "type", top.type(),
+                            "severity", top.severity(),
+                            "source", top.pos(),
+                            "decision", task.name());
                 }
-                TaskManager.INSTANCE.assign(bot, task, TaskOrigin.safety("threat:" + top.type()));
-                nextThreatAttemptTick.put(bot.getUUID(), server.getTickCount() + threatCooldownTicks(top, task));
-                BotLog.danger(bot, "threat_detected",
-                        "type", top.type(),
-                        "severity", top.severity(),
-                        "source", top.pos(),
-                        "decision", task.name());
-                return true;
+                return assignment.started() || safetyWorkActive(bot);
             }
         }
         // 规避加固(保命兜底):困死在地下黑暗处 → 撤回地面,优先于补给/进食。
@@ -256,13 +257,16 @@ public final class DangerWatcher {
         if (task == null) {
             return false;
         }
-        if (active.isPresent()) {
-            TaskManager.INSTANCE.pauseFor(bot,
-                    criticalStarvation ? PauseOwner.SAFETY : PauseOwner.SYSTEM, "resupply");
+        if (!criticalStarvation && active.isEmpty()
+                && io.github.greytaiwolf.fakeaiplayer.goal.GoalExecutor.INSTANCE.hasActivePlan(bot)) {
+            return false;
         }
-        TaskManager.INSTANCE.assign(bot, task, criticalStarvation
+        TaskAssignmentResult assignment = assignSafely(bot, task, criticalStarvation
                 ? TaskOrigin.safety("critical_resupply")
-                : TaskOrigin.of(TaskOrigin.Kind.SYSTEM_BACKGROUND, "resupply"));
+                : TaskOrigin.of(TaskOrigin.Kind.REFLEX, "resupply"));
+        if (!assignment.started()) {
+            return false;
+        }
         nextResupplyAttemptTick.put(bot.getUUID(), now + 200);
         BotLog.danger(bot, "resupply_started", "need", task.describe());
         return true;
@@ -284,6 +288,10 @@ public final class DangerWatcher {
         if (active.isPresent() && active.get() instanceof EatTask) {
             return true;
         }
+        if (!critical && active.isEmpty()
+                && io.github.greytaiwolf.fakeaiplayer.goal.GoalExecutor.INSTANCE.hasActivePlan(bot)) {
+            return false;
+        }
         int now = server.getTickCount();
         if (now < nextEatAttemptTick.getOrDefault(bot.getUUID(), 0)) {
             return false;
@@ -301,12 +309,13 @@ public final class DangerWatcher {
             if (!critical || active.get() instanceof EvadeTask) {
                 return false;
             }
-            TaskManager.INSTANCE.pauseFor(bot, critical ? PauseOwner.SAFETY : PauseOwner.SYSTEM,
-                    "hunger: " + foodLevel);
         }
-        TaskManager.INSTANCE.assign(bot, new EatTask(), critical
+        TaskAssignmentResult assignment = assignSafely(bot, new EatTask(), critical
                 ? TaskOrigin.safety("critical_hunger")
-                : TaskOrigin.of(TaskOrigin.Kind.SYSTEM_BACKGROUND, "eat"));
+                : TaskOrigin.of(TaskOrigin.Kind.REFLEX, "eat"));
+        if (!assignment.started()) {
+            return false;
+        }
         nextEatAttemptTick.put(bot.getUUID(), now + 100);
         BotLog.danger(bot, "hunger_eat_started", "food", foodLevel, "critical", critical);
         return true;
@@ -327,6 +336,10 @@ public final class DangerWatcher {
                 return false; // 正在应对威胁,别打断
             }
         }
+        if (!critical && active.isEmpty()
+                && io.github.greytaiwolf.fakeaiplayer.goal.GoalExecutor.INSTANCE.hasActivePlan(bot)) {
+            return false;
+        }
         int now = server.getTickCount();
         if (now < nextHuntAttemptTick.getOrDefault(bot.getUUID(), 0)) {
             return false;
@@ -335,13 +348,13 @@ public final class DangerWatcher {
             nextHuntAttemptTick.put(bot.getUUID(), now + 200); // 周围没猎物,过会儿再看
             return false;
         }
-        if (active.isPresent()) {
-            TaskManager.INSTANCE.pauseFor(bot, critical ? PauseOwner.SAFETY : PauseOwner.SYSTEM,
-                    "hunt_for_food");
-        }
-        TaskManager.INSTANCE.assign(bot, new HuntTask(HUNT_FOOD_TARGET), critical
+        TaskAssignmentResult assignment = assignSafely(
+                bot, new HuntTask(HUNT_FOOD_TARGET), critical
                 ? TaskOrigin.safety("critical_hunt_for_food")
-                : TaskOrigin.of(TaskOrigin.Kind.SYSTEM_BACKGROUND, "hunt_for_food"));
+                : TaskOrigin.of(TaskOrigin.Kind.REFLEX, "hunt_for_food"));
+        if (!assignment.started()) {
+            return false;
+        }
         nextHuntAttemptTick.put(bot.getUUID(), now + 400);
         BotLog.danger(bot, "hunt_for_food_started", "food", bot.getFoodData().getFoodLevel());
         return true;
@@ -392,12 +405,10 @@ public final class DangerWatcher {
             if (hostile != null) {
                 BotLog.danger(bot, "trapped_fight_back", "target", hostile.getType().toString());
                 BotInventorySessionManager.INSTANCE.closeForSafety(bot, "trapped_fight_back");
-                if (TaskManager.INSTANCE.getActive(bot).isPresent()) {
-                    TaskManager.INSTANCE.pauseFor(bot, PauseOwner.SAFETY, "trapped_fight_back");
-                }
-                TaskManager.INSTANCE.assign(bot, new CombatTask(hostile.getType(), 1, 0.0F),
+                TaskAssignmentResult assignment = assignSafely(
+                        bot, new CombatTask(hostile.getType(), 1, 0.0F),
                         TaskOrigin.safety("trapped_fight_back"));
-                return true;
+                return assignment.started() || safetyWorkActive(bot);
             }
         }
         if (repeat < TRAP_REPEAT_LIMIT) {
@@ -455,7 +466,11 @@ public final class DangerWatcher {
             nextNightAttemptTick.put(bot.getUUID(), now + 600);
             return false;
         }
-        TaskManager.INSTANCE.assign(bot, task, TaskOrigin.of(TaskOrigin.Kind.SYSTEM_BACKGROUND, "night_task"));
+        TaskAssignmentResult assignment = assignSafely(
+                bot, task, TaskOrigin.of(TaskOrigin.Kind.SYSTEM_BACKGROUND, "night_task"));
+        if (!assignment.started()) {
+            return false;
+        }
         nextNightAttemptTick.put(bot.getUUID(), now + 600);
         BotLog.danger(bot, "night_task_started", "task", task.name());
         return true;
@@ -489,8 +504,11 @@ public final class DangerWatcher {
         if (now < nextNightAttemptTick.getOrDefault(bot.getUUID(), 0)) {
             return false; // 复用夜间节流,避免每次扫描都派
         }
-        TaskManager.INSTANCE.assign(bot, new LightAreaTask(8, 8),
+        TaskAssignmentResult assignment = assignSafely(bot, new LightAreaTask(8, 8),
                 TaskOrigin.of(TaskOrigin.Kind.SYSTEM_BACKGROUND, "dark_area_light"));
+        if (!assignment.started()) {
+            return false;
+        }
         nextNightAttemptTick.put(bot.getUUID(), now + 600);
         BotLog.danger(bot, "dark_area_lit",
                 "light", world.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, feet));
@@ -601,15 +619,23 @@ public final class DangerWatcher {
         return !(task instanceof CombatTask) || threat.type() == Threat.Type.LOW_HP;
     }
 
-    private static boolean shouldPauseForThreat(Task active, Threat threat, Task nextTask) {
-        // 已在战斗/逃跑 → 不二次暂停(让其自行重定向)。
-        if (active instanceof CombatTask || active instanceof EvadeTask) {
-            return false;
+    private static TaskAssignmentResult assignSafely(AIPlayerEntity bot,
+                                                     Task task,
+                                                     TaskOrigin origin) {
+        try {
+            return TaskManager.INSTANCE.assign(bot, task, origin);
+        } catch (RuntimeException exception) {
+            BotLog.error(bot, "survival_task_start_failed", exception,
+                    "task", task.name(), "origin", origin.kind(), "reason", origin.reason());
+            return new TaskAssignmentResult(
+                    false,
+                    io.github.greytaiwolf.fakeaiplayer.mission.MissionArbiter.Action.REJECT,
+                    "start_failed:" + task.name());
         }
-        // FREEZE fix:其它进行中的任务(挖矿/采集/合成…)遇任何威胁一律**暂停保留**,打完/逃完再 resume,
-        // 而不是被后续 assign 直接 abort 销毁。旧逻辑对"敌对→战斗"和 LOW_HP 都返回 false=不暂停=销毁当前任务,
-        // 导致 GoalExecutor 把它判为 foreign 而整体放弃目标(实测刷怪时挖矿目标被反复放弃、空转发呆)。
-        return true;
+    }
+
+    private static boolean safetyWorkActive(AIPlayerEntity bot) {
+        return TaskManager.INSTANCE.activeOrigin(bot).map(TaskOrigin::safety).orElse(false);
     }
 
     private boolean canAssignThreatTask(MinecraftServer server, AIPlayerEntity bot, Threat threat) {

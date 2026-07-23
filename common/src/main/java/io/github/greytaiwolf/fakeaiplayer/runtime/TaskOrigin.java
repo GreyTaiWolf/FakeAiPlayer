@@ -8,8 +8,10 @@ public record TaskOrigin(Kind kind, UUID missionId, UUID jobId, String reason) {
         PLAYER_COMMAND,
         PLAYER_PANEL,
         LLM_TOOL,
+        LLM_SKILL,
         JOB,
         SAFETY,
+        REFLEX,
         SYSTEM_BACKGROUND,
         VERIFY
     }

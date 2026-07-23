@@ -6,6 +6,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 /** Pure LIFO model used by TaskManager for nested safety preemption. */
 public final class ExecutionStack<T> {
@@ -44,6 +45,27 @@ public final class ExecutionStack<T> {
             drained.add(frame);
         }
         return List.copyOf(drained);
+    }
+
+    /** Removes only frames owned by one cancellation transaction while preserving LIFO order. */
+    public List<Frame<T>> removeMatching(Predicate<Frame<T>> predicate) {
+        if (predicate == null || frames.isEmpty()) {
+            return List.of();
+        }
+        List<Frame<T>> removed = new ArrayList<>();
+        var iterator = frames.iterator();
+        while (iterator.hasNext()) {
+            Frame<T> frame = iterator.next();
+            if (predicate.test(frame)) {
+                iterator.remove();
+                removed.add(frame);
+            }
+        }
+        return List.copyOf(removed);
+    }
+
+    public boolean anyMatch(Predicate<Frame<T>> predicate) {
+        return predicate != null && frames.stream().anyMatch(predicate);
     }
 
     public int size() {

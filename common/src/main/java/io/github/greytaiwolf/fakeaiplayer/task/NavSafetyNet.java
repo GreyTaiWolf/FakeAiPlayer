@@ -55,6 +55,7 @@ public final class NavSafetyNet {
     public void clear(AIPlayerEntity bot) {
         UUID id = bot.getUUID();
         bot.getActionPack().resumeControllers(PauseOwner.SAFETY);
+        TaskManager.INSTANCE.releaseNavigationSafetyLease(bot);
         nextLogTick.remove(id);
         waterRescueShore.remove(id);
         waterRescueSince.remove(id);
@@ -290,6 +291,7 @@ public final class NavSafetyNet {
     private void acquireTaskPauseLease(AIPlayerEntity bot, String reason) {
         BotInventorySessionManager.INSTANCE.closeForSafety(bot, reason);
         bot.getActionPack().freezeControllers(PauseOwner.SAFETY);
+        TaskManager.INSTANCE.acquireNavigationSafetyLease(bot, reason);
         UUID id = bot.getUUID();
         Optional<Task> active = TaskManager.INSTANCE.getActive(bot);
         if (taskPauseLeases.contains(id)
@@ -305,6 +307,7 @@ public final class NavSafetyNet {
     private void releaseTaskPauseLease(AIPlayerEntity bot) {
         UUID id = bot.getUUID();
         bot.getActionPack().resumeControllers(PauseOwner.SAFETY);
+        TaskManager.INSTANCE.releaseNavigationSafetyLease(bot);
         if (!taskPauseLeases.contains(id)) {
             return;
         }

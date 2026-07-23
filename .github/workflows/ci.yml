@@ -92,7 +92,7 @@ jobs:
             fabric/build/run/gameTest/crash-reports/**
             neoforge/build/run/gameTest/logs/**
             neoforge/build/run/gameTest/crash-reports/**
-            fabric/build/persistence-restart/**
+            fabric/build/reports/persistence-restart/**
             fabric/build/run/restart-*/logs/**
             fabric/build/run/restart-*/crash-reports/**
             fabric/build/libs/**

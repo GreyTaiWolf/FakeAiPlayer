@@ -133,15 +133,18 @@ public final class AIBotMemorySubcommand {
             return 0;
         }
         MoveTask task = new MoveTask(bot.get(), target.get().pos());
-        IntentController.INSTANCE.replace(
+        IntentController.ReplaceResult result = IntentController.INSTANCE.replace(
                 bot.get(),
                 IntentController.ControlOrigin.PLAYER_COMMAND,
                 "command_memory_goto:" + place,
-                () -> {
-                    io.github.greytaiwolf.fakeaiplayer.task.TaskManager.INSTANCE.assign(bot.get(), task,
-                            TaskOrigin.of(TaskOrigin.Kind.PLAYER_COMMAND, "command_memory_goto"));
-                    return true;
-                });
+                () -> io.github.greytaiwolf.fakeaiplayer.task.TaskManager.INSTANCE.assign(
+                        bot.get(), task,
+                        TaskOrigin.of(TaskOrigin.Kind.PLAYER_COMMAND, "command_memory_goto")).started());
+        if (!result.replacementStarted()) {
+            source.sendFailure(Component.literal(
+                    "[FakeAiPlayer] movement deferred while safety work is active"));
+            return 0;
+        }
         source.sendSuccess(() -> Component.literal("[FakeAiPlayer] moving to " + place), false);
         return 1;
     }

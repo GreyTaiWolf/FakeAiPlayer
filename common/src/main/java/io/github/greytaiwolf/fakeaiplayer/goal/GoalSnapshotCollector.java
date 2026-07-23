@@ -18,6 +18,7 @@ import java.util.Optional;
 import java.util.Set;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.Container;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -88,31 +89,44 @@ public final class GoalSnapshotCollector {
 
     private static Set<String> armorCapabilities(AIPlayerEntity bot) {
         Set<String> capabilities = new HashSet<>();
-        for (ItemStack stack : allStacks(bot)) {
-            if (stack.isEmpty() || nearlyBroken(stack)) {
-                continue;
-            }
-            Item item = stack.getItem();
-            if (item == Items.IRON_HELMET || item == Items.DIAMOND_HELMET || item == Items.NETHERITE_HELMET) {
-                capabilities.add("helmet");
-            } else if (item == Items.IRON_CHESTPLATE || item == Items.DIAMOND_CHESTPLATE || item == Items.NETHERITE_CHESTPLATE) {
-                capabilities.add("chestplate");
-            } else if (item == Items.IRON_LEGGINGS || item == Items.DIAMOND_LEGGINGS || item == Items.NETHERITE_LEGGINGS) {
-                capabilities.add("leggings");
-            } else if (item == Items.IRON_BOOTS || item == Items.DIAMOND_BOOTS || item == Items.NETHERITE_BOOTS) {
-                capabilities.add("boots");
-            } else if (item == Items.IRON_SWORD || item == Items.DIAMOND_SWORD || item == Items.NETHERITE_SWORD) {
-                capabilities.add("sword");
+        addEquippedArmorCapability(capabilities, bot.getItemBySlot(EquipmentSlot.HEAD), "helmet",
+                Items.IRON_HELMET, Items.DIAMOND_HELMET, Items.NETHERITE_HELMET);
+        addEquippedArmorCapability(capabilities, bot.getItemBySlot(EquipmentSlot.CHEST), "chestplate",
+                Items.IRON_CHESTPLATE, Items.DIAMOND_CHESTPLATE, Items.NETHERITE_CHESTPLATE);
+        addEquippedArmorCapability(capabilities, bot.getItemBySlot(EquipmentSlot.LEGS), "leggings",
+                Items.IRON_LEGGINGS, Items.DIAMOND_LEGGINGS, Items.NETHERITE_LEGGINGS);
+        addEquippedArmorCapability(capabilities, bot.getItemBySlot(EquipmentSlot.FEET), "boots",
+                Items.IRON_BOOTS, Items.DIAMOND_BOOTS, Items.NETHERITE_BOOTS);
+        for (ItemStack stack : ownedStacks(bot)) {
+            if (!stack.isEmpty() && !nearlyBroken(stack)) {
+                Item item = stack.getItem();
+                if (item == Items.IRON_SWORD || item == Items.DIAMOND_SWORD || item == Items.NETHERITE_SWORD) {
+                    capabilities.add("sword");
+                }
             }
         }
         return capabilities;
     }
 
-    private static List<ItemStack> allStacks(AIPlayerEntity bot) {
+    private static void addEquippedArmorCapability(Set<String> capabilities,
+                                                    ItemStack stack,
+                                                    String capability,
+                                                    Item... allowed) {
+        if (stack.isEmpty() || nearlyBroken(stack)) {
+            return;
+        }
+        for (Item item : allowed) {
+            if (stack.is(item)) {
+                capabilities.add(capability);
+                return;
+            }
+        }
+    }
+
+    private static List<ItemStack> ownedStacks(AIPlayerEntity bot) {
         List<ItemStack> stacks = new ArrayList<>();
         stacks.addAll(bot.getInventory().items);
         stacks.addAll(bot.getInventory().offhand);
-        stacks.addAll(bot.getInventory().armor);
         return stacks;
     }
 

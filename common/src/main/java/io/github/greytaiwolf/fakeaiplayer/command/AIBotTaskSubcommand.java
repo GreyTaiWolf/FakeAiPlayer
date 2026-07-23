@@ -385,15 +385,19 @@ public final class AIBotTaskSubcommand {
         }
         try {
             Task task = factory.create(bot.get());
-            IntentController.INSTANCE.replace(
+            IntentController.ReplaceResult result = IntentController.INSTANCE.replace(
                     bot.get(),
                     IntentController.ControlOrigin.PLAYER_COMMAND,
                     "command_task_assign:" + task.name(),
                     () -> {
-                        TaskManager.INSTANCE.assign(bot.get(), task,
-                                TaskOrigin.of(TaskOrigin.Kind.PLAYER_COMMAND, "command_task_assign"));
-                        return true;
+                        return TaskManager.INSTANCE.assign(bot.get(), task,
+                                TaskOrigin.of(TaskOrigin.Kind.PLAYER_COMMAND, "command_task_assign")).started();
                     });
+            if (!result.replacementStarted()) {
+                context.getSource().sendFailure(Component.literal(
+                        "[FakeAiPlayer] task deferred while safety work is active"));
+                return 0;
+            }
             context.getSource().sendSuccess(() -> Component.literal("[FakeAiPlayer] task assigned: " + task.name()), false);
             return 1;
         } catch (RuntimeException exception) {
